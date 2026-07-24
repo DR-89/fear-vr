@@ -1,18 +1,31 @@
-F.E.A.R. VR — Projektlizenz (noch festzulegen)
-================================================
+MIT License
 
-Für die selbst geschriebenen Bestandteile dieses Projekts (Host, Proxy,
-Launcher, IPC-Vertrag, Shader, Tests, Tools, Dokumentation) ist noch eine
-Open-Source-Lizenz auszuwählen und hier einzutragen.
+Copyright (c) 2026 F.E.A.R. VR contributors
 
-Die Wahl ist nicht trivial, weil das lokal neu gebaute GameClient-Modul gegen
-die offiziellen F.E.A.R.-Public-Tools und ggf. gegen Bestandteile mit
-GPL-/MIT-/proprietären Grenzen linkt (siehe THIRD_PARTY_NOTICES.md und
-ANWEISUNG.md §18). Die Projektlizenz muss mit diesen Grenzen verträglich sein.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Bis zur Festlegung gilt: Dieses Repository enthält ausschließlich selbst
-geschriebene Quelldateien und Dokumentation. Es enthält KEINE Retail-Dateien,
-KEINE proprietären SDK-Quellen und KEINE extrahierten Assets.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-TODO: Konkrete Lizenz (z. B. MIT, Apache-2.0 oder GPL-kompatibel) eintragen,
-sobald die Lizenzgrenzen der GameClient-Abhängigkeiten geprüft sind.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Hinweis: Diese MIT-Lizenz gilt ausschließlich für die selbst geschriebenen
+Bestandteile dieses Repositories (Host, Proxy, Launcher, IPC-Vertrag, Shader,
+Tests, Tools, Dokumentation). Sie gilt NICHT für die offiziellen
+F.E.A.R.-Retail-Dateien, die F.E.A.R.-Public-Tools oder daraus abgeleitete
+Bestandteile; deren jeweilige Lizenzbedingungen bleiben unberührt (siehe
+THIRD_PARTY_NOTICES.md). Das lokal gebaute GameClient-Modul unterliegt zudem
+den Lizenzgrenzen der Public-Tools-Quellen, gegen die es linkt.

@@ -82,9 +82,9 @@ cmake --build build\x64 --config RelWithDebInfo
 
 ## Lizenz
 
-Siehe `LICENSE` (Projektlizenz noch festzulegen) und `THIRD_PARTY_NOTICES.md`
-für die Lizenzgrenzen der Abhängigkeiten und der offiziellen F.E.A.R.-Client-
-und Public-Tools-Bestandteile.
+Die selbst geschriebenen Bestandteile stehen unter der **MIT-Lizenz** (siehe
+`LICENSE`). Für die Lizenzgrenzen der Abhängigkeiten und der offiziellen
+F.E.A.R.-Client- und Public-Tools-Bestandteile gilt `THIRD_PARTY_NOTICES.md`.
 
 ## Rechtlicher Hinweis
 

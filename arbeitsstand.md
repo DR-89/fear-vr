@@ -36,9 +36,18 @@
 - **M2-Live-Nachweis bestanden:** Der Benutzer sah das normale
   F.E.A.R.-Menü in beiden Augen; Maus und Tastatur reagierten normal. Nach dem
   Schließen des SteamVR-Desktop-Overlays blieb das Spielbild sichtbar.
-- Der Stand ist absichtlich noch nicht angenehm nutzbar: Beide Augen erhalten
-  dasselbe flache Monobild, Headtracking fehlt, und der klassische
-  D3D9-Kompatibilitätspfad führt einen CPU-Transfer pro Frame aus.
+- **M3 abgeschlossen:** Die Welt wird pro Auge nativ mit eigener Kamera
+  gerendert. Der Benutzer bestätigte korrekte 3D-Tiefe und akzeptierte den
+  15-Minuten-Stabilitätstest.
+- **M4 abgeschlossen:** HMD-Rotation, F9-Recenter, optionale begrenzte
+  Translation, Stereo-HUD, raumfeste Menüs, automatische Übergänge und
+  Komfortmodus funktionieren im echten Spiel. Der Benutzer bestätigte alle
+  Achsen, die verbesserte Latenz, HUD-Anordnung, Menüs und Übergänge.
+- Der M4-Launcher unterdrückt die verzögert eingeblendete
+  SteamVR-Theaterfläche; der Benutzer bestätigte den finalen Lauf.
+- Bekannte Restgrenzen: Der klassische D3D9-Pfad und der HUD-Prototyp nutzen
+  CPU-Readbacks; ein physischer vollständiger Trackingverlust wurde nicht
+  separat provoziert. Beides ist dokumentiert und blockiert das M4-Gate nicht.
 
 ## 1. Verifizierte Umgebung
 
@@ -253,20 +262,14 @@ Details: `docs/M1-OPENXR-HOST.md`.
 
 ## 9. Empfohlene nächste Schritte
 
-1. M3 beginnen: den Welt-Renderdurchlauf sicher zweimal pro Frame ausführen
-   und pro Auge eine eigene Projektion einspeisen.
-2. Strikt nachweisen, dass Simulation, KI, Partikel, Sound, Eingabe und
-   Spielzeit nicht doppelt fortschreiten.
-3. Eine GPU-direkte Lösung für den klassischen D3D9-Retailpfad untersuchen.
-   Der aktuelle `FEARVR_BF_CPU_FALLBACK` bleibt bis dahin klar als
-   Kompatibilitäts-/Diagnosepfad markiert.
-4. Alt-Tab und einen echten F.E.A.R.-Auflösungswechsel als längeren
-   Regressionstest der M2-Brücke ausführen.
-5. Vor nativen GameClient-Änderungen eine rechtmäßig verfügbare VC7.1-Toolchain in
-   einer isolierten historischen Buildumgebung einrichten. Keine
-   inoffiziellen Compilerarchive ungeprüft herunterladen.
-6. Erst ein VC7.1-Stockmodul durch den vorhandenen ABI-Guard und M0-Lauftest
-   bringen; danach VR-Änderungen in den Clientquellen beginnen.
+1. M5 mit Motion-Controller-Eingabe beginnen, ohne die bestehende
+   Maus-/Tastatursteuerung zu beeinträchtigen.
+2. Den HUD-Differenzpfad und den klassischen D3D9-Kompatibilitätspfad für M6
+   GPU-seitig umsetzen und die markierten CPU-Readbacks entfernen.
+3. Lean, Slow-Mo und einen physisch erzwungenen Trackingverlust als gezielte
+   Regressionen protokollieren.
+4. Die M4-Komfortoptionen anhand längerer geskripteter Kamerafahrten weiter
+   abstimmen.
 
 ## 10. Repository-Regeln
 
@@ -320,12 +323,12 @@ Live-Nachweis mit echtem F.E.A.R. am 24.07.2026:
 
 Gate-Einschränkung:
 
-- Der echte klassische D3D9-Pfad enthält derzeit einen per-Frame-CPU-Readback
+- Der echte klassische D3D9-Pfad enthält weiterhin einen per-Frame-CPU-Readback
   und erfüllt damit noch nicht die finale Produktionsinvariante.
-- Monobild, fehlendes Headtracking und flaches HUD erklären, warum der Stand
-  noch nicht angenehm nutzbar ist.
-- M2 gilt als funktionaler Techniknachweis; „VR spielbar“ wird weiterhin erst
-  ab M4 behauptet.
+- Zum damaligen M2-Stand erklärten Monobild, fehlendes Headtracking und flaches
+  HUD, warum er noch nicht angenehm nutzbar war.
+- M2 gilt als funktionaler Techniknachweis; der inzwischen abgeschlossene
+  M4-Stand erfüllt die Bezeichnung „VR spielbar“.
 
 Relevante Befehle:
 
@@ -337,3 +340,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\launch-m2-fear.ps1
 ```
 
 Details: `docs/M2-D3D9-BRIDGE.md`.
+
+## 12. M3/M4 — natives Stereo und spielbarer VR-Modus
+
+M3 ruft ausschließlich den reinen Retail-`RenderCamera`-Slot zweimal auf.
+Simulation, Eingabe, Audio und Interface laufen weiterhin genau einmal pro
+Spiel-Frame. F8 schaltet den Hook fail-open; Pose und Kamera werden auch bei
+Fehlern wiederhergestellt. Der Benutzer bestätigte die native 3D-Wirkung und
+den Stabilitätstest.
+
+M4 ergänzt:
+
+- HMD-Rotation auf allen Achsen und F9-Recenter;
+- optionale, auf 25 cm begrenzte Translation;
+- zur tatsächlich gerenderten Pose passende OpenXR-Views für besseres
+  Timewarp;
+- Stereo-Fadenkreuz und Stereo-HUD mit angepasster ergonomischer Position;
+- raumfestes Menü-/Vollbild-Quad und automatische Übergänge;
+- `-NoHeadBob` sowie F10-Flatscreen-Komfortmodus;
+- einen pro Spielstart begrenzten Wächter gegen die
+  SteamVR-Desktop-Theaterfläche.
+
+Der Benutzer bestätigte den M4-Gesamtstand am 24.07.2026 mit „top, passt“.
+Build-, Protokoll- und Mathematiktests sind in x86 und x64 grün. Details:
+`docs/TESTING.md`, `docs/ARCHITECTURE.md`, `docs/STEREO-RESEARCH.md` und
+`docs/COORDINATE-SYSTEM.md`.

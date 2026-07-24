@@ -252,6 +252,11 @@ bool IpcBridge::GameWasConnected() const noexcept {
     return gameWasConnected_;
 }
 
+bool IpcBridge::StereoActive() const noexcept {
+    return shared_ != nullptr &&
+           (shared_->bridgeFlags & FEARVR_BF_STEREO_ACTIVE) != 0;
+}
+
 void IpcBridge::PublishRenderRequest(
     const FearVrRenderRequest& request) {
     if (shared_ == nullptr) {
@@ -290,12 +295,14 @@ bool IpcBridge::ConsumeLatestPair() {
         }
     }
     if (!valid) {
+        ++consecutiveOpenFailures_;
         ReleaseClaim(slotIndex);
         for (auto& source : pending_->source) {
             source.Reset();
         }
         return false;
     }
+    consecutiveOpenFailures_ = 0;
 
     for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
         context_->CopyResource(privateEye_[eye].texture.Get(),
@@ -416,7 +423,17 @@ bool IpcBridge::ValidateAndOpenSource(std::uint32_t eye,
     HRESULT result = device_->OpenSharedResource(
         handle, IID_PPV_ARGS(resource.ReleaseAndGetAddressOf()));
     if (FAILED(result)) {
-        LogHresult("open_shared_resource_failed", result);
+        std::ostringstream message;
+        message << "HRESULT=0x" << std::hex << std::uppercase
+                << static_cast<std::uint32_t>(result)
+                << " frame=" << std::dec << slot.frameId
+                << " slot=" << slotIndex;
+        log_(
+            consecutiveOpenFailures_ == 0 ? "WARN" : "ERROR",
+            consecutiveOpenFailures_ == 0
+                ? "shared_resource_stale"
+                : "open_shared_resource_failed",
+            message.str());
         return false;
     }
     result = resource.As(&pending_->source[eye]);

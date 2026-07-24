@@ -6,6 +6,8 @@
 #endif
 #include <Windows.h>
 
+#include "stereo_hook.h"
+
 extern "C" int FearVrGameClientCompatData = 0;
 
 namespace {
@@ -106,6 +108,7 @@ extern "C" void SetMasterDatabase(void* masterDatabase) {
     if (function != nullptr) {
         function(masterDatabase);
     }
+    fearvr::InstallStereoHook(masterDatabase, g_bridge);
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {

@@ -18,7 +18,12 @@ struct Options {
     std::uint64_t frameLimit{900};
     std::uint64_t adapterLuid{0};
     bool classicD3D9{false};
+    bool stereo{false};
 };
+
+using BeginEyeFunction = void(__cdecl*)(std::uint32_t);
+using CaptureEyeFunction = void(__cdecl*)(std::uint32_t);
+using EndStereoFrameFunction = void(__cdecl*)(std::uint64_t);
 
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam,
                                  LPARAM lparam) {
@@ -39,6 +44,10 @@ Options ParseOptions(int argumentCount, char** arguments) {
         const std::string argument = arguments[index];
         if (argument == "--classic-d3d9") {
             options.classicD3D9 = true;
+            continue;
+        }
+        if (argument == "--stereo") {
+            options.stereo = true;
             continue;
         }
         if (index + 1 >= argumentCount) {
@@ -80,6 +89,13 @@ D3DCOLOR FrameColor(std::uint64_t frame) {
     const auto green = static_cast<unsigned>((frame * 3U + 85U) & 0xFFU);
     const auto blue = static_cast<unsigned>((frame * 7U + 170U) & 0xFFU);
     return D3DCOLOR_XRGB(red, green, blue);
+}
+
+D3DCOLOR StereoEyeColor(std::uint64_t frame, std::uint32_t eye) {
+    const auto pulse = static_cast<unsigned>((frame * 3U) & 0x7FU);
+    return eye == 0
+        ? D3DCOLOR_XRGB(128U + pulse, 24U, 16U)
+        : D3DCOLOR_XRGB(16U, 24U, 128U + pulse);
 }
 
 HRESULT ResetDevice(IDirect3DDevice9* device,
@@ -241,6 +257,36 @@ int main(int argumentCount, char** arguments) {
     std::printf("M2 D3D9 producer started: frames=%llu mode=%s\n",
                 static_cast<unsigned long long>(frameLimit),
                 options.classicD3D9 ? "classic" : "ex");
+    HMODULE proxy = GetModuleHandleW(L"d3d9.dll");
+    const auto beginEye = proxy == nullptr
+        ? nullptr
+        : reinterpret_cast<BeginEyeFunction>(
+              GetProcAddress(proxy, "FearVr_BeginEye"));
+    const auto captureEye = proxy == nullptr
+        ? nullptr
+        : reinterpret_cast<CaptureEyeFunction>(
+              GetProcAddress(proxy, "FearVr_CaptureEye"));
+    const auto endStereoFrame = proxy == nullptr
+        ? nullptr
+        : reinterpret_cast<EndStereoFrameFunction>(
+              GetProcAddress(proxy, "FearVr_EndStereoFrame"));
+    if (options.stereo &&
+        (beginEye == nullptr || captureEye == nullptr ||
+         endStereoFrame == nullptr)) {
+        std::fprintf(stderr, "M3 stereo bridge exports are unavailable.\n");
+        device->Release();
+        if (options.classicD3D9) {
+            d3d->Release();
+        }
+        d3dEx->Release();
+        DestroyWindow(window);
+        return 7;
+    }
+    if (options.stereo) {
+        std::printf(
+            "M3 stereo producer active: left=red right=blue\n");
+    }
+
     bool resetDone = false;
     bool running = true;
     for (std::uint64_t frame = 1; running && frame <= frameLimit; ++frame) {
@@ -257,8 +303,24 @@ int main(int argumentCount, char** arguments) {
             resetDone = SUCCEEDED(ResetDevice(device, parameters, window));
         }
 
-        result = device->Clear(0, nullptr, D3DCLEAR_TARGET,
-                               FrameColor(frame), 1.0F, 0);
+        if (options.stereo) {
+            result = D3D_OK;
+            for (std::uint32_t eye = 0; eye < 2; ++eye) {
+                result = device->Clear(
+                    0, nullptr, D3DCLEAR_TARGET,
+                    StereoEyeColor(frame, eye), 1.0F, 0);
+                if (FAILED(result)) {
+                    break;
+                }
+                beginEye(eye);
+                captureEye(eye);
+            }
+            endStereoFrame(frame);
+        } else {
+            result = device->Clear(
+                0, nullptr, D3DCLEAR_TARGET,
+                FrameColor(frame), 1.0F, 0);
+        }
         if (SUCCEEDED(result)) {
             result = device->Present(nullptr, nullptr, nullptr, nullptr);
         }
@@ -274,9 +336,20 @@ int main(int argumentCount, char** arguments) {
             break;
         }
         if (frame == 1 || frame % 300U == 0) {
-            std::printf("M2 producer frame=%llu color=0x%08lX\n",
-                        static_cast<unsigned long long>(frame),
-                        static_cast<unsigned long>(FrameColor(frame)));
+            if (options.stereo) {
+                std::printf(
+                    "M3 producer frame=%llu left=0x%08lX right=0x%08lX\n",
+                    static_cast<unsigned long long>(frame),
+                    static_cast<unsigned long>(
+                        StereoEyeColor(frame, 0)),
+                    static_cast<unsigned long>(
+                        StereoEyeColor(frame, 1)));
+            } else {
+                std::printf("M2 producer frame=%llu color=0x%08lX\n",
+                            static_cast<unsigned long long>(frame),
+                            static_cast<unsigned long>(
+                                FrameColor(frame)));
+            }
         }
         Sleep(11);
     }

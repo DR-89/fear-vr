@@ -125,6 +125,19 @@ extern "C" BOOL FearVr_IsHostConnected() {
     return fearvr::IsHostConnected();
 }
 
+extern "C" BOOL FearVr_IsStereoAvailable() {
+    return fearvr::IsStereoAvailable();
+}
+
+extern "C" BOOL FearVr_IsStereoEnabled() {
+    return fearvr::IsStereoEnabled();
+}
+
+extern "C" void FearVr_RegisterStereoToggleCallback(
+    fearvr::StereoToggleCallback callback) {
+    fearvr::RegisterStereoToggleCallback(callback);
+}
+
 extern "C" BOOL FearVr_GetRenderRequest(FearVrRenderRequest* request) {
     return fearvr::GetRenderRequest(request);
 }
@@ -139,6 +152,11 @@ extern "C" void FearVr_CaptureEye(std::uint32_t eye) {
 
 extern "C" void FearVr_EndStereoFrame(std::uint64_t frameId) {
     fearvr::EndStereoFrame(frameId);
+}
+
+extern "C" void FearVr_ReportHookStatus(
+    const char* level, const char* event, const char* message) {
+    fearvr::ReportHookStatus(level, event, message);
 }
 
 extern "C" BOOL FearVr_InstallIatHook() {

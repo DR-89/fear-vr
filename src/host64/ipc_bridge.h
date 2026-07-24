@@ -32,6 +32,7 @@ public:
     [[nodiscard]] bool Enabled() const noexcept;
     [[nodiscard]] bool GameConnected() const noexcept;
     [[nodiscard]] bool GameWasConnected() const noexcept;
+    [[nodiscard]] bool StereoActive() const noexcept;
     [[nodiscard]] bool HasImage(std::uint32_t eye) const noexcept;
     [[nodiscard]] ID3D11ShaderResourceView* ImageView(
         std::uint32_t eye) const noexcept;
@@ -74,6 +75,7 @@ private:
     std::uint64_t lastGameHeartbeat_{0};
     std::uint64_t latestFrameId_{0};
     std::uint64_t consumedFrames_{0};
+    std::uint32_t consecutiveOpenFailures_{0};
     bool gameConnected_{false};
     bool gameWasConnected_{false};
     bool protocolRejected_{false};

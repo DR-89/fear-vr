@@ -3,12 +3,11 @@
 Quelloffener, lokal baubarer VR-Mod für die **Singleplayer-Basisversion von
 F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
-> **Status:** M2 — die x86-D3D9/x64-D3D11-Monobrücke ist implementiert und
-> mit dem echten F.E.A.R. im Headset bestätigt. Der D3D9Ex-Test läuft
-> GPU-direkt; das klassische D3D9 des Spiels verwendet vorläufig einen
-> markierten CPU-Kompatibilitätspfad. Beide Augen zeigen noch dasselbe flache
-> Bild, ohne Kopfsteuerung. Dies ist ein Techniknachweis, kein angenehm
-> spielbarer VR-Stand. Details: `docs/M2-D3D9-BRIDGE.md`.
+> **Status:** M4 — nativer Stereo-Weltrender, relatives HMD-Headtracking,
+> F9-Recenter, lesbares raumfestes Menü und Stereo-HUD sind mit dem echten
+> F.E.A.R. auf Quest 3/SteamVR bestätigt. Der klassische D3D9-Pfad verwendet
+> weiterhin einen markierten CPU-Kompatibilitätspfad; Translation bleibt ohne
+> Weltkollision opt-in. Details: `docs/TESTING.md`.
 
 ## Grundprinzipien
 
@@ -104,9 +103,26 @@ pwsh -File tools\prepare-m2-stage.ps1
 pwsh -File tools\launch-m2-fear.ps1
 ```
 
-Im echten Spiel muss das SteamVR-Desktop-Overlay gegebenenfalls mit der
-System-/Menütaste des linken Controllers geschlossen werden. Es ist nicht Teil
-des Mods.
+Spielbarer M4-Stand:
+
+```powershell
+pwsh -File tools\prepare-m4-stage.ps1
+pwsh -File tools\launch-m4-fear.ps1
+```
+
+Der M4-Start aktiviert das bestätigte Stereo-HUD standardmäßig und schließt
+SteamVRs verzögertes F.E.A.R.-Desktop-Theater automatisch. Optionen:
+
+- `-Translation`: begrenzte HMD-Translation bis 25 cm, ohne Weltkollision;
+- `-NoHeadBob`: Kamera- und Waffen-Head-Bob deaktivieren;
+- `-NoStereoHud`: nur für Vergleich/Fehlersuche.
+
+Tasten im Spiel:
+
+- F8: nativen Stereo-Weltrender ein-/ausschalten;
+- F9: aktuelle HMD-Ausrichtung zentrieren;
+- F10: raumfesten Komfortbildschirm für Camera-Shakes und Zwischensequenzen
+  ein-/ausschalten.
 
 ## Lizenz
 

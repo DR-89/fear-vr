@@ -68,7 +68,8 @@ enum {
   FEARVR_BF_SHARED_SUPPORTED = 0x00000008u,
   FEARVR_BF_DEVICE_LOST      = 0x00000010u,
   FEARVR_BF_PROTOCOL_ERROR   = 0x00000020u,
-  FEARVR_BF_CPU_FALLBACK     = 0x00000040u
+  FEARVR_BF_CPU_FALLBACK     = 0x00000040u,
+  FEARVR_BF_STEREO_ACTIVE    = 0x00000080u
 };
 
 /* ---- Geometrie ----------------------------------------------------------- */

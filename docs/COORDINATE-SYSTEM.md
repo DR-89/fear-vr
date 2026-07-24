@@ -4,33 +4,46 @@
 > unterschiedliche Händigkeit und Vorwärtsachsen. Jede Abbildung wird belegt,
 > zentral definiert und mit Unit-Tests abgesichert (ANWEISUNG.md §7).
 
-## 1. Konventionen (zu belegen)
+## 1. Konventionen
 
 | System | Händigkeit | Vorwärts | Oben | Rechts | Einheit | Beleg |
 |---|---|---|---|---|---|---|
-| OpenXR (`XrSpace`, view space) | rechtshändig | −Z | +Y | +X | Meter | OpenXR-Spec (zu zitieren) |
-| LithTech Jupiter EX (Welt/Kamera) | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ (Game-Units) | Public-Tools-Quellen (zu prüfen) |
+| OpenXR (`XrSpace`, view space) | rechtshändig | −Z | +Y | +X | Meter | OpenXR-Spezifikation |
+| LithTech Jupiter EX (Welt/Kamera) | linkshändig | +Z | +Y | +X | 100 Game-Units/Meter | `ltrotation.h`, `ltvector.h`, M3-IPD-Livetest |
 
-→ Die tatsächliche LithTech-Konvention wird aus den offiziellen
-Public-Tools-Quellen abgeleitet (`RenderCamera`, Kamera-/Rotationstypen),
-**nicht** vermutet.
+`LTRotation::Right/Up/Forward` liefert für die Identität +X/+Y/+Z.
+`LTVector::Cross` berechnet die Operandenreihenfolge gegenüber dem üblichen
+rechtshändigen Kreuzprodukt umgekehrt. Die zentrale Abbildung lautet daher:
+
+```text
+Position OpenXR → LithTech:   ( x,  y, -z)
+Quaternion OpenXR → LithTech: (-x, -y,  z, w)
+```
+
+Der Quaternionvektor erhält bei der Z-Spiegelung zusätzlich das Vorzeichen
+eines axialen Vektors. Die Abbildung ist in `head_tracking_math.h` zentral
+implementiert und wird in x86 und x64 getestet.
 
 ## 2. Zentrale, konfigurierbare Konversion
 
 - Genau **eine** Stelle im Code definiert `OpenXR → LithTech` (Position,
-  Rotation) und die Skalierung Meter ↔ Game-Units.
-- Implementierung: `src/common/math/` (+ Tests in `tests/`).
+  Rotation): `src/common/head_tracking_math.h`.
+- Die Skalierung liegt zentral in `src/common/stereo_math.h`.
+- Tests: `tests/test_head_tracking_math.cpp` und
+  `tests/test_stereo_math.cpp`.
 
 ## 3. Vorgehen (§7)
 
-1. **Recenter:** aktuelle HMD-Pose als neutralen lokalen Ursprung speichern.
+1. **Recenter:** beim Aktivieren aktuelle HMD-Pose als neutralen lokalen
+   Ursprung speichern; F9 erhöht `recenterGeneration` und setzt sie neu.
 2. **Relative Headpose** berechnen — nicht die absolute Tracking-Space-Pose
    direkt in die Welt schreiben.
 3. **Körper-Yaw** und **Head-Yaw** getrennt halten.
 4. **IPD** aus den beiden `xrLocateViews`-Posen übernehmen, **nicht** fest auf
    64 mm setzen.
-5. **Translation** zunächst deaktivierbar; danach lokal auf einen komfortablen
-   Bereich begrenzen und gegen Wanddurchdringung absichern.
+5. **Translation** standardmäßig deaktiviert; opt-in lokal auf 25 cm vom
+   Recenter-Punkt begrenzt. Eine echte Kollisionsabfrage gegen Wände bleibt
+   vor einer allgemeinen Aktivierung erforderlich.
 6. **Roll** der Spielkamera nur aus dem HMD, nicht aus Weapon Sway/Camera Shake.
 
 ## 4. Projektion / FOV
@@ -55,3 +68,19 @@ Public-Tools-Quellen abgeleitet (`RenderCamera`, Kamera-/Rotationstypen),
 
 Kopf links/rechts/oben/unten bewegt die Ansicht in der **erwarteten** Richtung;
 kein künstliches Rollen beim normalen Laufen; Trackingverlust ohne Kamerasprung.
+
+**Gate abgeschlossen.** Live am 24.07.2026 bestätigt:
+
+- alle Rotationsachsen bewegen sich in die richtige Richtung;
+- F9 setzt erfolgreich die Neutralpose;
+- das erste Bild lag zwei OpenXR-Frames hinter der Renderanforderung;
+- Zuordnung der tatsächlich gerenderten Pose zum Bild erlaubt dem OpenXR-
+  Compositor korrektes Timewarp; Benutzerbewertung danach „deutlich besser“.
+- opt-in Translation bewegt sich seitlich und vor/zurück korrekt, kehrt sauber
+  zum Recenter-Punkt zurück und blieb im begrenzten Live-Test stabil.
+
+Der Host veröffentlicht nur gültige, aktuelle Posen. Bei fehlender gültiger
+Pose bleibt die letzte Spielkamera unverändert; es wird keine ungültige
+Transformation eingespeist. Ein physisch erzwungener vollständiger
+Trackingverlust wurde im M4-Abnahmelauf nicht separat provoziert und bleibt als
+gezielte Hardware-Regression dokumentiert.

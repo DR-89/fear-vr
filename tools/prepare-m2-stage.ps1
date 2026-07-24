@@ -1,16 +1,21 @@
 ﻿<#
 .SYNOPSIS
-    Erstellt die Retail-schonende M2-archcfg-Stage.
+    Erstellt eine Retail-schonende M2-, M3- oder M4-archcfg-Stage.
 
 .DESCRIPTION
-    Kopiert den ABI-neutralen GameClient-Loader, die M2-Bridge und das
+    Kopiert den ABI-neutralen GameClient-Loader, die VR-Bridge und das
     unveränderte originale VC7.1-GameClient-Modul ausschließlich nach
     stage\m2-game. Retail wird vor und nach dem Vorgang verifiziert.
 #>
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('M2', 'M3', 'M4')]
+    [string]$Milestone = 'M2'
+)
 
 $ErrorActionPreference = 'Stop'
+$milestoneLabel = $Milestone.ToUpperInvariant()
+$milestoneSlug = $Milestone.ToLowerInvariant()
 . "$PSScriptRoot\_fearvr-env.ps1"
 $cfg = Get-FearVrConfig
 
@@ -36,7 +41,7 @@ foreach ($required in @(
     $bridgeSource
 )) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "M2-Eingabedatei fehlt: $required"
+        throw "$milestoneLabel-Eingabedatei fehlt: $required"
     }
 }
 
@@ -48,10 +53,10 @@ if ($actualOriginalHash -ne $expectedOriginalHash) {
 }
 
 $stageRoot = Assert-UnderProjectRoot (
-    Join-Path $cfg.ProjectRoot 'stage\m2-game'
+    Join-Path $cfg.ProjectRoot "stage\$milestoneSlug-game"
 )
 $userDirectory = Assert-UnderProjectRoot (
-    Join-Path $cfg.ProjectRoot 'stage\userdata-m2'
+    Join-Path $cfg.ProjectRoot "stage\userdata-$milestoneSlug"
 )
 $logDirectory = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot 'logs'
@@ -78,7 +83,7 @@ foreach ($name in $stagedFiles.Keys) {
 }
 
 $archiveConfig = Assert-UnderProjectRoot (
-    Join-Path $cfg.ProjectRoot 'stage\m2.archcfg'
+    Join-Path $cfg.ProjectRoot "stage\$milestoneSlug.archcfg"
 )
 $archiveLines = @(
     Get-Content -LiteralPath $retailArchCfg -Encoding Default |
@@ -98,9 +103,12 @@ $records = foreach ($name in $stagedFiles.Keys) {
     }
 }
 $manifestPath = Assert-UnderProjectRoot (
-    Join-Path $cfg.ProjectRoot 'stage\m2-deployment.json'
+    Join-Path $cfg.ProjectRoot (
+        "stage\$milestoneSlug-deployment.json"
+    )
 )
 [ordered]@{
+    milestone = $milestoneLabel
     preparedUtc = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
     runtimeExe = $retailBefore.Path
     runtimeSha256 = $retailBefore.Sha256
@@ -122,7 +130,8 @@ if ($retailBefore.Sha256 -ne $retailAfter.Sha256) {
     throw 'SICHERHEITSABBRUCH: Retail-FEAR.exe wurde verändert.'
 }
 
-Write-Host 'M2-Stage bereit; Retail unverändert.' -ForegroundColor Green
+Write-Host "$milestoneLabel-Stage bereit; Retail unverändert." `
+    -ForegroundColor Green
 Write-Host "Module:   $stageRoot"
 Write-Host "ArchCfg:  $archiveConfig"
 Write-Host "Manifest: $manifestPath"

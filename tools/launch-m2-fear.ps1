@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Startet F.E.A.R. M2 offiziell über Steam und die isolierte archcfg-Stage.
+    Startet F.E.A.R. M2, M3 oder M4 über Steam und die isolierte archcfg-Stage.
 
 .DESCRIPTION
     Startet den x64-OpenXR-Host, wartet auf XR-ready und ruft danach Steam mit
@@ -12,19 +12,39 @@
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('M2', 'M3', 'M4')]
+    [string]$Milestone = 'M2',
+
+    [switch]$Translation,
+
+    [switch]$StereoHud,
+
+    [switch]$NoHeadBob,
+
     [switch]$Wait
 )
 
 $ErrorActionPreference = 'Stop'
+$milestoneLabel = $Milestone.ToUpperInvariant()
+$milestoneSlug = $Milestone.ToLowerInvariant()
 . "$PSScriptRoot\_fearvr-env.ps1"
 $cfg = Get-FearVrConfig
 $retailBefore = Assert-RetailFearExe
 
+# SteamVR 2.x legt beim offiziellen Start eines Nicht-VR-Spiels sonst
+# automatisch eine Theaterfläche über die bereits laufende OpenXR-Szene.
+& "$PSScriptRoot\disable-steamvr-theater.ps1" -Quiet
+
 $manifestPath = Assert-UnderProjectRoot (
-    Join-Path $cfg.ProjectRoot 'stage\m2-deployment.json'
+    Join-Path $cfg.ProjectRoot (
+        "stage\$milestoneSlug-deployment.json"
+    )
 )
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    throw 'M2-Stage fehlt. Zuerst tools\prepare-m2-stage.ps1 ausführen.'
+    throw (
+        "$milestoneLabel-Stage fehlt. Zuerst die zugehörige " +
+        'prepare-Stage ausführen.'
+    )
 }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 if ((Get-FileSha256 $manifest.runtimeExe) -ne $manifest.runtimeSha256) {
@@ -32,12 +52,15 @@ if ((Get-FileSha256 $manifest.runtimeExe) -ne $manifest.runtimeSha256) {
 }
 if ((Get-FileSha256 $manifest.archiveConfig) -ne
     $manifest.archiveConfigSha256) {
-    throw 'M2-Archivkonfiguration wurde verändert.'
+    throw "$milestoneLabel-Archivkonfiguration wurde verändert."
 }
 foreach ($record in $manifest.files) {
     $path = Join-Path $manifest.moduleDirectory $record.name
     if ((Get-FileSha256 $path) -ne $record.sha256) {
-        throw "M2-Stage-Datei fehlt oder wurde verändert: $($record.name)"
+        throw (
+            "$milestoneLabel-Stage-Datei fehlt oder wurde verändert: " +
+            $record.name
+        )
     }
 }
 
@@ -49,7 +72,7 @@ $moduleProbe = Assert-UnderProjectRoot (
 )
 foreach ($required in @($hostExe, $moduleProbe)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "M2-Laufzeitartefakt fehlt: $required"
+        throw "$milestoneLabel-Laufzeitartefakt fehlt: $required"
     }
 }
 $existingFearIds = @(
@@ -68,7 +91,7 @@ if ($sessionId -eq 0) {
 $sessionText = '0x{0:X16}' -f $sessionId
 $runLogDirectory = Assert-UnderProjectRoot (
     Join-Path $manifest.logDirectory (
-        'm2-fear-' +
+        "$milestoneSlug-fear-" +
         (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
     )
 )
@@ -113,8 +136,21 @@ $steamArguments = @(
     '-fearvr-logdir', "`"$runLogDirectory`"",
     '-archcfg', "`"$($manifest.archiveConfig)`"",
     '-userdirectory', "`"$($manifest.userDirectory)`""
-) -join ' '
-Write-Host '=== F.E.A.R. VR M2 ===' -ForegroundColor Cyan
+)
+if ($Milestone -ne 'M2') {
+    $steamArguments += '-fearvr-stereo-toggle'
+}
+if ($Milestone -eq 'M4' -and $Translation) {
+    $steamArguments += '-fearvr-translation'
+}
+if ($Milestone -eq 'M4' -and $StereoHud) {
+    $steamArguments += '-fearvr-stereo-hud'
+}
+if ($Milestone -eq 'M4' -and $NoHeadBob) {
+    $steamArguments += '-fearvr-no-headbob'
+}
+$steamArguments = $steamArguments -join ' '
+Write-Host "=== F.E.A.R. VR $milestoneLabel ===" -ForegroundColor Cyan
 Write-Host "Session: $sessionText"
 Write-Host "Stage:   $($manifest.moduleDirectory)"
 Write-Host "Logs:    $runLogDirectory"
@@ -124,8 +160,9 @@ Start-Process -FilePath $manifest.steamExe `
     Out-Null
 
 $fear = $null
+$theaterGuard = $null
 function Stop-StartedM2Processes {
-    foreach ($process in @($fear, $hostProcess)) {
+    foreach ($process in @($theaterGuard, $fear, $hostProcess)) {
         if ($null -ne $process) {
             $process.Refresh()
             if (-not $process.HasExited) {
@@ -147,6 +184,25 @@ if ($null -eq $fear) {
     throw 'Steam startete innerhalb von 25 Sekunden keine FEAR.exe.'
 }
 
+$theaterGuardScript = Assert-UnderProjectRoot (
+    Join-Path $cfg.ProjectRoot 'tools\hide-steamvr-theater.ps1'
+)
+$theaterGuardLog = Assert-UnderProjectRoot (
+    Join-Path $runLogDirectory 'steamvr-theater-guard.log'
+)
+$theaterGuardArguments = @(
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', "`"$theaterGuardScript`"",
+    '-GamePid', $fear.Id,
+    '-LogPath', "`"$theaterGuardLog`""
+)
+$theaterGuard = Start-Process `
+    -FilePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+    -ArgumentList $theaterGuardArguments `
+    -WindowStyle Hidden `
+    -PassThru
+
 $expectedModules = @{
     'GameClient.dll' = Join-Path $manifest.moduleDirectory 'GameClient.dll'
     'GameOrig.dll' = Join-Path $manifest.moduleDirectory 'GameOrig.dll'
@@ -159,7 +215,10 @@ do {
     $fear.Refresh()
     if ($fear.HasExited) {
         Stop-StartedM2Processes
-        throw "FEAR.exe endete während der M2-Modulprüfung."
+        throw (
+            "FEAR.exe endete während der " +
+            "$milestoneLabel-Modulprüfung."
+        )
     }
     $moduleLines = @(& $moduleProbe $fear.Id)
     if ($LASTEXITCODE -eq 0) {
@@ -185,20 +244,30 @@ foreach ($name in $expectedModules.Keys) {
             '<nicht geladen>'
         }
         Stop-StartedM2Processes
-        throw "M2-Modul wurde nicht aus der Stage geladen: $name (ist: $actual)"
+        throw (
+            "$milestoneLabel-Modul wurde nicht aus der Stage geladen: " +
+            "$name (ist: $actual)"
+        )
     }
 }
 
 $bridgeReady = $false
 $frameImported = $false
+$hookReady = $Milestone -eq 'M2'
+$stereoReady = $false
 $proxyLog = $null
-$deadline = (Get-Date).AddSeconds(30)
+$deadline = (Get-Date).AddSeconds(
+    $(if ($Milestone -ne 'M2') { 60 } else { 30 })
+)
 do {
     Start-Sleep -Milliseconds 250
     $fear.Refresh()
     if ($fear.HasExited) {
         Stop-StartedM2Processes
-        throw 'FEAR.exe endete während der M2-Bridgeprüfung.'
+        throw (
+            "FEAR.exe endete während der " +
+            "$milestoneLabel-Bridgeprüfung."
+        )
     }
     $proxyLog = Get-ChildItem -LiteralPath $runLogDirectory `
         -Filter 'proxy-*.log' -File -ErrorAction SilentlyContinue |
@@ -214,20 +283,76 @@ do {
             $proxyText -match '"event":"adapter_match"' -and
             $proxyText -match '"event":"shared_resources"' -and
             $proxyText -match '"event":"frame_ready"'
+        if ($Milestone -ne 'M2') {
+            $hookReady =
+                $proxyText -match '"event":"engine_interfaces_found"' -and
+                $proxyText -match '"event":"stereo_hook_armed"'
+            $stereoReady =
+                $proxyText -match '"event":"stereo_render_active"' -and
+                $proxyText -match '"event":"stereo_frame_staged"'
+        }
     }
     $hostText = Get-Content -Raw -LiteralPath $hostLog.FullName
     $frameImported = $hostText -match '"event":"ipc_frame"'
-} until (($bridgeReady -and $frameImported) -or
+} until (($bridgeReady -and $frameImported -and $hookReady) -or
          (Get-Date) -ge $deadline)
-if (-not $bridgeReady -or -not $frameImported) {
+if (-not $bridgeReady -or -not $frameImported -or -not $hookReady) {
     Stop-StartedM2Processes
-    throw ('M2-Bildpfad wurde nicht innerhalb von 30 Sekunden bereit. ' +
-           'Headset aufsetzen/fokussieren und Logs prüfen.')
+    throw (
+        "$milestoneLabel-Bildpfad wurde nicht rechtzeitig bereit. " +
+        'Headset aufsetzen/fokussieren und Logs prüfen.'
+    )
 }
 
-Write-Host "F.E.A.R. läuft mit M2-Bridge (PID $($fear.Id))." `
+Write-Host (
+    "F.E.A.R. läuft mit $milestoneLabel-Bridge (PID $($fear.Id))."
+) `
     -ForegroundColor Green
-Write-Host 'Im Headset muss das normale Spielbild mono in beiden Augen erscheinen.'
+if ($Milestone -ne 'M2') {
+    if ($stereoReady) {
+        Write-Host (
+            'Nativer Stereo-Weltrender ist bereits aktiv. Im Headset ' +
+            'muss Tiefenparallaxe sichtbar sein.'
+        )
+    } else {
+        Write-Host (
+            "$milestoneLabel-Hook ist bereit. Menü und Spielstart bleiben zunächst mono. " +
+            'Erst in der 3D-Welt mit F8 Stereo einschalten.'
+        )
+    }
+    if ($Milestone -eq 'M4') {
+        Write-Host (
+            'M4: HMD-Rotation ist aktiv. F9 setzt die aktuelle Blickrichtung ' +
+            'als Neutralpose; F8 schaltet jederzeit zurück auf mono.'
+        )
+        Write-Host (
+            $(if ($Translation) {
+                'Begrenzte HMD-Translation ist aktiv (maximal 25 cm).'
+            } else {
+                'HMD-Translation ist deaktiviert; mit -Translation opt-in aktivieren.'
+            })
+        )
+        Write-Host (
+            $(if ($NoHeadBob) {
+                'Head-Bob ist für Kamera und Waffe deaktiviert.'
+            } else {
+                'Head-Bob bleibt aktiv; mit -NoHeadBob deaktivieren.'
+            })
+        )
+        Write-Host (
+            'F10 schaltet den raumfesten Komfortbildschirm für ' +
+            'Camera-Shakes und Zwischensequenzen.'
+        )
+    } else {
+        Write-Host (
+            'F8 schaltet jederzeit zurück auf mono. Headtracking folgt erst in M4.'
+        )
+    }
+} else {
+    Write-Host (
+        'Im Headset muss das normale Spielbild mono in beiden Augen erscheinen.'
+    )
+}
 Write-Host "Hostlog: $($hostLog.FullName)"
 Write-Host "Proxylog: $($proxyLog.FullName)"
 
@@ -243,5 +368,7 @@ if ($Wait) {
     if (-not $hostProcess.HasExited) {
         Stop-Process -Id $hostProcess.Id -Force
     }
-    Write-Host 'Spiel beendet; zugehöriger M2-Host beendet.'
+    Write-Host (
+        "Spiel beendet; zugehöriger $milestoneLabel-Host beendet."
+    )
 }

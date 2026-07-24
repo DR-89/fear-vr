@@ -18,6 +18,10 @@
 .PARAMETER ClassicD3D9
     Erzeugt das Testgerät über Direct3DCreate9 statt Direct3DCreate9Ex und
     prüft damit den CPU-zu-D3D9Ex-Kompatibilitätspfad des Retail-Spiels.
+
+.PARAMETER Stereo
+    Rendert synthetisch ein rotes linkes und ein blaues rechtes Auge und
+    prüft zusätzlich den M3-Stereo-Transportvertrag.
 #>
 [CmdletBinding()]
 param(
@@ -26,10 +30,14 @@ param(
 
     [switch]$AbortHost,
 
-    [switch]$ClassicD3D9
+    [switch]$ClassicD3D9,
+
+    [switch]$Stereo
 )
 
 $ErrorActionPreference = 'Stop'
+$milestoneLabel = if ($Stereo) { 'M3' } else { 'M2' }
+$milestoneSlug = $milestoneLabel.ToLowerInvariant()
 . "$PSScriptRoot\_fearvr-env.ps1"
 $cfg = Get-FearVrConfig
 
@@ -73,7 +81,8 @@ if ($existingHosts.Count -ne 0) {
 
 $logDirectory = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot (
-        'logs\m2-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+        "logs\$milestoneSlug-" +
+        (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
     )
 )
 New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
@@ -85,13 +94,18 @@ if ($sessionId -eq 0) {
 }
 $sessionText = '0x{0:X16}' -f $sessionId
 $hostFrames = if ($AbortHost) { 100000 } else { $Frames + 300 }
-Write-Host '=== M2 Bridge-Test (isoliert) ===' -ForegroundColor Cyan
+Write-Host "=== $milestoneLabel Bridge-Test (isoliert) ===" `
+    -ForegroundColor Cyan
 Write-Host "Session:  $sessionText"
 Write-Host "Logs:     $logDirectory"
 Write-Host "Producer: $producerExe"
 Write-Host "Proxy:    $proxyDll"
 $testMode = if ($AbortHost) {
     'Host-Abbruch / Fail-open'
+} elseif ($Stereo -and $ClassicD3D9) {
+    'M3 Stereo / Classic D3D9 / CPU-D3D9Ex + Reset'
+} elseif ($Stereo) {
+    'M3 Stereo / D3D9Ex direkt + Reset + Spielende'
 } elseif ($ClassicD3D9) {
     'Classic D3D9 / CPU-D3D9Ex + Reset'
 } else {
@@ -159,6 +173,10 @@ try {
     if ($ClassicD3D9) {
         $producerArguments += '--classic-d3d9'
     }
+    if ($Stereo) {
+        $producerArguments += '-fearvr-stereo'
+        $producerArguments += '--stereo'
+    }
     $producerProcess = Start-M2Process `
         -FilePath $producerExe `
         -Arguments $producerArguments `
@@ -203,6 +221,10 @@ try {
     }
     $proxyText = Get-Content -Raw -LiteralPath $proxyLog.FullName
     $hostText = Get-Content -Raw -LiteralPath $hostLog.FullName
+    if ($proxyText -match '"level":"ERROR"' -or
+        $hostText -match '"level":"ERROR"') {
+        throw "$milestoneLabel-Gate: Ein Laufzeitfehler wurde protokolliert."
+    }
     $requiredProxyEvents = @(
         'ipc_created',
         'host_connected',
@@ -212,6 +234,9 @@ try {
         'device_reset_begin',
         'device_reset_complete'
     )
+    if ($Stereo) {
+        $requiredProxyEvents += 'stereo_frame_staged'
+    }
     foreach ($event in $requiredProxyEvents) {
         if ($proxyText -notmatch ('"event":"' + [regex]::Escape($event) + '"')) {
             throw "Proxy-Gate fehlt im Log: $event"
@@ -222,12 +247,25 @@ try {
             throw "Host-Gate fehlt im Log: $event"
         }
     }
+    if ($Stereo -and
+        $hostText -notmatch '"event":"symmetric_stereo_fov"') {
+        Write-Warning (
+            'Symmetrisches FOV noch nicht live bestätigt: Die OpenXR-Session ' +
+            'benötigt dafür Headset-Fokus und gültige Views. Der ' +
+            'Stereo-Transport selbst ist bestätigt.'
+        )
+    }
     if ($AbortHost -and
         $proxyText -notmatch '"event":"host_disconnected"') {
         throw 'Fail-open-Gate fehlt: Proxy erkannte den Host-Abbruch nicht.'
     }
 
-    Write-Host 'M2-Bridge-Test bestanden.' -ForegroundColor Green
+    $passed = if ($Stereo) {
+        'M3-Stereo-Transporttest bestanden.'
+    } else {
+        'M2-Bridge-Test bestanden.'
+    }
+    Write-Host $passed -ForegroundColor Green
     Write-Host "Hostlog:  $($hostLog.FullName)"
     Write-Host "Proxylog: $($proxyLog.FullName)"
 } finally {

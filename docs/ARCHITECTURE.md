@@ -129,15 +129,132 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   Flat-Screen verwenden. Dieser Pfad darf nicht stillschweigend als
   Release-/Performancepfad gelten.
 
+### AD-007 — Versionsgeprüfter Retail-PlayerCamera-Hook für M3
+
+- **Problem:** Die veröffentlichte `ILTRenderer`-Deklarationsreihenfolge bildet
+  die Overloads nicht in der Reihenfolge der Retail-VC7.1-VTable ab. Ein Hook
+  des vermeintlichen Slots 15 hatte deshalb eine falsche Signatur.
+- **Messung/Beleg:** Eine read-only Laufzeitprobe zeigte, dass Slot 17 den
+  Kamera-Handle und `nullptr` pusht und über `vtable+0x4c` an Slot 19
+  weiterleitet. Der korrigierte Lauf `logs\m3-fear-20260724-162315` erzeugte
+  mindestens 24.900 vollständige Stereo-Frames in rund 11½ Minuten; der
+  Benutzer bestätigte korrekte 3D-Tiefenwirkung. Details stehen in
+  `STEREO-RESEARCH.md`.
+- **Getestete Optionen:** Header-Reihenfolge als Slot-Reihenfolge, Hook der
+  Technik-Override-Funktion und Laufzeitzuordnung der Retail-Weiterleitung.
+- **Gewählte Lösung:** Nur Slot 17 ersetzen, linkes/rechtes Auge jeweils über
+  den unveränderten Slot 19 rendern und die exakte 15-Byte-Weiterleitung vor
+  jeder Aktivierung prüfen. Kamera-Pose und FOV werden nach beiden Augen sowie
+  im SEH-Fehlerpfad wiederhergestellt.
+- **Bekannte Nachteile:** Der Nachweis gilt für die geprüfte Steam-
+  Retailfassung. M3 erfasst nur die Welt; HUD und Menü werden im Client danach
+  gezeichnet und benötigen die M4-HUD-/Layer-Lösung.
+- **Rückfallpfad:** Bei Signaturabweichung, fehlendem Host, ungültigem
+  Renderauftrag oder F8-Deaktivierung bleibt beziehungsweise wird die originale
+  Slot-17-Weiterleitung aktiv.
+
+### AD-008 — Relatives Headtracking mit bildsynchroner OpenXR-Pose
+
+- **Problem:** Absolute Tracking-Space-Posen dürfen nicht direkt die
+  Spielkamera ersetzen. Zusätzlich war das konsumierte Spielbild zwei
+  OpenXR-Frames älter als die Pose, die der Host zusammen mit dem Bild
+  einreichte; das fühlte sich träge an.
+- **Messung/Beleg:** Public-Tools-Achsen ergeben die zentrale Z-Spiegelung in
+  `COORDINATE-SYSTEM.md`. Der erste M4-Lauf bestätigte alle Achsen und F9,
+  wirkte aber leicht langsam. Der zweite Lauf protokollierte
+  `image_pose_matched` mit `request_age_frames=2`; nach Einreichen der zum Bild
+  gehörenden Renderpose bewertete der Benutzer das Tracking als „deutlich
+  besser“.
+- **Gewählte Lösung:** Beim Stereo-Aktivieren und mit F9 wird die
+  Augenmittelpose als Recenter gespeichert. Pro Auge werden relative Position
+  und Rotation berechnet, nach LithTech konvertiert und lokal auf die
+  bestehende Spielkamera komponiert. Ein 256 Einträge großer Host-Ring ordnet
+  jeder Renderanforderung ihre OpenXR-Pose/FOV zu; der Compositor erhält
+  zusammen mit dem importierten Bild exakt dessen Renderpose und kann korrekt
+  zeitwarpen.
+- **Bekannte Nachteile:** Der klassische D3D9-CPU-Transfer bleibt teuer.
+  Translation besitzt noch keine Weltkollision und bleibt deshalb
+  standardmäßig aus.
+- **Rückfallpfad:** Bei 250 ms ohne frische Pose wird Mono verwendet; die erste
+  wieder gültige Pose wird neu zentriert. F8 stellt den originalen
+  Kamera-Renderpfad wieder her.
+
+### AD-009 — Raumfestes Menüpanel und Stereo-HUD-Prototyp
+
+- **Problem:** Das Hauptmenü besitzt keinen Stereo-Weltdurchlauf. Als
+  Projektionstextur war es lesbar, folgte in `XR_REFERENCE_SPACE_TYPE_VIEW`
+  jedoch störend jeder Kopfbewegung. Im Spiel werden HUD und Pausemenü erst
+  nach den beiden Weltbildern gezeichnet und fehlten deshalb im Stereo-Frame.
+- **Messung/Beleg:** Die Läufe `170417` und `170754` bestätigten ein lesbares,
+  raumfestes Menü sowie funktionierende Übergänge zur Stereo-Spielansicht.
+- **Gewählte Lösung:** Mono-Menüs werden beim Eintritt einmal relativ zur
+  aktuellen Augenmittelpose verankert und danach als Quad im lokalen
+  Referenzraum eingereicht. Ein CPU-Prototyp vergleicht das endgültige
+  Present-Bild mit dem rechten Weltbild und kopiert nur nachträglich geänderte
+  Pixel identisch in beide Augen. Deltas über 65 Prozent gelten als Menü oder
+  Vollbildeffekt und wechseln automatisch auf das raumfeste Panel, damit die
+  Welt nicht versehentlich überwiegend mono bleibt.
+- **Bekannte Nachteile:** Der HUD-Prototyp benötigt ein zusätzliches
+  D3D9-Readback pro Frame und ist kein zulässiger finaler Pfad. Transparente
+  UI-Kanten enthalten den Hintergrund des rechten Auges. Nach dem visuellen
+  Nachweis muss die Trennung GPU-seitig oder über einen nativen UI-Layer
+  erfolgen.
+- **Rückfallpfad:** `-NoStereoHud` am M4-Launcher lässt den bestätigten
+  Weltstereo-/Menü-Quad-Pfad unverändert; der direkte Shared-Texture-Pfad
+  mischt kein HUD.
+
+### AD-010 — SteamVR-Desktop-Theater beim Retail-Start unterdrücken
+
+- **Problem:** F.E.A.R. muss offiziell mit `steam.exe -applaunch 21090`
+  gestartet werden. SteamVR erkennt es trotzdem als Desktopspiel und kann
+  verzögert eine Theaterfläche über der bereits aktiven OpenXR-Szene öffnen.
+- **Messung/Beleg:** `steamvr.vrsettings` nannte
+  `valve.steam.desktopgame.21090` als zuletzt verwendete externe Fläche. Der
+  Benutzer musste sie bei mehreren Läufen manuell schließen. Selbst der
+  dokumentierte Benutzerwert `steamvr.autoShowGameTheater=false` verhinderte
+  die verspätete Einblendung in einem Lauf nicht zuverlässig.
+- **Gewählte Lösung:** Der Launcher setzt den Benutzerwert weiterhin auf
+  `false` und sichert die vorherige Konfiguration im Projekt. Zusätzlich
+  beobachtet ein versteckter, auf den neuen F.E.A.R.-Prozess begrenzter
+  Wächter höchstens fünf Minuten gezielt
+  `valve.steam.desktopgame.21090`. Wird diese Fläche erstmals sichtbar,
+  beendet er zunächst den Theatermodus mit dem Compositor-Befehl
+  `disable_theater_mode` und schließt anschließend das verbleibende Dashboard
+  mit `vrcmd --hidedashboard`.
+- **Bekannte Nachteile:** Der Wächter hängt von den SteamVR-internen
+  Bezeichnungen `valve.steam.desktopgame.21090` und `vrcmd` ab und muss nach
+  größeren SteamVR-Änderungen erneut geprüft werden. Das normale Dashboard
+  wird nicht allein aufgrund seiner Sichtbarkeit geschlossen; Auslöser ist
+  ausschließlich die F.E.A.R.-Theaterfläche.
+- **Rückfallpfad:** Der Wächter endet bei Spielende oder Timeout. F.E.A.R.,
+  SteamVR und der OpenXR-Host werden nicht beendet oder umgangen.
+
+### AD-011 — M4-Komfortoptionen für Bob, Shake und Zwischensequenzen
+
+- **Problem:** Head-Bob, Camera-Shakes und geskriptete Kamerafahrten können in
+  VR unangenehm sein; globale Abschaltung aller ClientFX würde dagegen
+  Partikel und Spielwirkung beschädigen.
+- **Gewählte Lösung:** `-NoHeadBob` setzt ausschließlich die offiziellen
+  `HeadBobDebugMode`-/Amplitude-Konsolenvariablen für Kamera und Waffe.
+  F10 setzt im Renderauftrag `FEARVR_RF_FLATSCREEN`, verwendet den normalen
+  einmaligen Welt-Render und zeigt ihn raumfest als Quad. Beim Verlassen wird
+  neu zentriert. Fehlt in einem Zustand ein vollständiges Stereo-Weltbild,
+  wird der Stereo-Status automatisch gelöscht und derselbe Panelpfad genutzt.
+- **Bekannte Nachteile:** F10 stabilisiert das gesamte Bild, statt einzelne
+  CameraShakeFX selektiv herauszufiltern. Der Benutzer entscheidet daher
+  bewusst pro problematischer Szene.
+- **Rückfallpfad:** Beide Funktionen sind optional; ohne `-NoHeadBob` bleibt
+  das Original-Bob aktiv, F10 kann jederzeit zurückgeschaltet werden.
+
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 
-- [ ] ob und wie `RenderCamera` zweimal **sicher** aufgerufen wird → `STEREO-RESEARCH.md`
-- [ ] HUD-Trennung (Welt-HUD vs. Menü-HUD, Quad-/Cylinder-Layer)
-- [ ] symmetrische vs. asymmetrische Projektion
+- [x] ob und wie `RenderCamera` zweimal **sicher** aufgerufen wird → `STEREO-RESEARCH.md`
+- [x] HUD-Trennung (Welt-HUD vs. Menü-HUD, Quad-Layer) → AD-009
+- [x] symmetrische vs. asymmetrische Projektion → `COORDINATE-SYSTEM.md`
 - [x] D3D9/D3D11-Format und Synchronisation (Query-Event, Ringpuffer)
       → `M2-D3D9-BRIDGE.md`, AD-004 bis AD-006
-- [ ] Koordinatenkonversion → `COORDINATE-SYSTEM.md`
-- [ ] Verhalten bei CameraFX / Zwischensequenzen (Komfortmodus)
+- [x] Koordinatenkonversion → `COORDINATE-SYSTEM.md`
+- [x] Verhalten bei CameraFX / Zwischensequenzen (Komfortmodus) → AD-011
 - [ ] Abgrenzung zu Motion-Controlled Aiming (erst ab M5, mit Nachweis)
 
 ## 4. Nicht verhandelbare Invarianten (§3)

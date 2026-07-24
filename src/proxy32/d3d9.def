@@ -1,10 +1,14 @@
 LIBRARY fearvr-d3d9
 EXPORTS
     FearVr_IsHostConnected
+    FearVr_IsStereoAvailable
+    FearVr_IsStereoEnabled
+    FearVr_RegisterStereoToggleCallback
     FearVr_GetRenderRequest
     FearVr_BeginEye
     FearVr_CaptureEye
     FearVr_EndStereoFrame
+    FearVr_ReportHookStatus
     FearVr_InstallIatHook
     FearVr_Ordinal16 @16 NONAME
     FearVr_Ordinal17 @17 NONAME

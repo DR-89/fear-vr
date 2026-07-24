@@ -29,8 +29,10 @@
 #include <openxr/openxr_platform.h>
 
 #include "fearvr-version.h"
+#include "head_tracking_math.h"
 #include "ipc_bridge.h"
 #include "protocol_utils.h"
+#include "stereo_math.h"
 #include "texture_renderer.h"
 #include "xr_session_state.h"
 
@@ -260,6 +262,14 @@ struct Swapchain {
     std::int32_t height{0};
     std::vector<XrSwapchainImageD3D11KHR> images;
 };
+
+struct RenderPoseSample {
+    std::uint64_t frameId{0};
+    std::array<XrPosef, FEARVR_EYE_COUNT> pose{};
+    std::array<XrFovf, FEARVR_EYE_COUNT> fov{};
+};
+
+constexpr std::size_t kRenderPoseHistorySize = 256;
 
 enum class LoopResult {
     Exit,
@@ -546,7 +556,6 @@ private:
         CheckXr(instance_,
                 xrCreateReferenceSpace(session_, &spaceInfo, &appSpace_),
                 "xrCreateReferenceSpace(LOCAL)");
-
         std::uint32_t blendModeCount = 0;
         CheckXr(instance_,
                 xrEnumerateEnvironmentBlendModes(
@@ -797,6 +806,8 @@ private:
         std::uint32_t layerCount = 0;
         XrCompositionLayerProjection layer{
             XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        XrCompositionLayerQuad quad{
+            XR_TYPE_COMPOSITION_LAYER_QUAD};
 
         if (frameState.shouldRender == XR_TRUE) {
             XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
@@ -818,6 +829,48 @@ private:
                 XR_VIEW_STATE_ORIENTATION_VALID_BIT;
             if (viewCount == 2 &&
                 (viewState.viewStateFlags & requiredFlags) == requiredFlags) {
+                std::array<XrFovf, FEARVR_EYE_COUNT> submittedFov{
+                    locatedViews_[FEARVR_EYE_LEFT].fov,
+                    locatedViews_[FEARVR_EYE_RIGHT].fov};
+                const bool nativeStereo =
+                    ipcBridge_ && ipcBridge_->StereoActive();
+                if (nativeStereo) {
+                    const FearVrFov runtimeLeft{
+                        submittedFov[FEARVR_EYE_LEFT].angleLeft,
+                        submittedFov[FEARVR_EYE_LEFT].angleRight,
+                        submittedFov[FEARVR_EYE_LEFT].angleUp,
+                        submittedFov[FEARVR_EYE_LEFT].angleDown};
+                    const FearVrFov runtimeRight{
+                        submittedFov[FEARVR_EYE_RIGHT].angleLeft,
+                        submittedFov[FEARVR_EYE_RIGHT].angleRight,
+                        submittedFov[FEARVR_EYE_RIGHT].angleUp,
+                        submittedFov[FEARVR_EYE_RIGHT].angleDown};
+                    const SymmetricFov symmetric =
+                        SharedSymmetricFov(runtimeLeft, runtimeRight);
+                    if (symmetric.valid) {
+                        const FearVrFov protocolFov =
+                            ToProtocolFov(symmetric);
+                        for (std::uint32_t eye = 0;
+                             eye < FEARVR_EYE_COUNT; ++eye) {
+                            submittedFov[eye] = {
+                                protocolFov.angleLeft,
+                                protocolFov.angleRight,
+                                protocolFov.angleUp,
+                                protocolFov.angleDown};
+                        }
+                        if (!symmetricStereoLogged_) {
+                            std::ostringstream message;
+                            message << "horizontal="
+                                    << symmetric.halfHorizontal * 2.0F
+                                    << " vertical="
+                                    << symmetric.halfVertical * 2.0F;
+                            logger_.Write(
+                                "INFO", "symmetric_stereo_fov",
+                                message.str());
+                            symmetricStereoLogged_ = true;
+                        }
+                    }
+                }
                 if (ipcBridge_) {
                     FearVrRenderRequest request{};
                     request.frameId = ++requestFrameId_;
@@ -828,7 +881,7 @@ private:
                     for (std::uint32_t eye = 0;
                          eye < FEARVR_EYE_COUNT; ++eye) {
                         const XrPosef& pose = locatedViews_[eye].pose;
-                        const XrFovf& fov = locatedViews_[eye].fov;
+                        const XrFovf& fov = submittedFov[eye];
                         FearVrEyeView& output = request.eye[eye];
                         output.pose.px = pose.position.x;
                         output.pose.py = pose.position.y;
@@ -842,21 +895,150 @@ private:
                         output.fov.angleUp = fov.angleUp;
                         output.fov.angleDown = fov.angleDown;
                     }
+                    RenderPoseSample& sample =
+                        renderPoseHistory_[
+                            request.frameId % kRenderPoseHistorySize];
+                    sample.frameId = request.frameId;
+                    for (std::uint32_t eye = 0;
+                         eye < FEARVR_EYE_COUNT; ++eye) {
+                        sample.pose[eye] = locatedViews_[eye].pose;
+                        sample.fov[eye] = submittedFov[eye];
+                    }
                     ipcBridge_->PublishRenderRequest(request);
                     ipcBridge_->ConsumeLatestPair();
                 }
-                for (std::uint32_t eye = 0; eye < 2; ++eye) {
-                    RenderEye(eye);
-                    projectionViews_[eye].pose = locatedViews_[eye].pose;
-                    projectionViews_[eye].fov = locatedViews_[eye].fov;
+                const RenderPoseSample* imagePose = nullptr;
+                if (nativeStereo && ipcBridge_) {
+                    const std::uint64_t imageFrameId =
+                        ipcBridge_->LatestFrameId();
+                    const RenderPoseSample& candidate =
+                        renderPoseHistory_[
+                            imageFrameId % kRenderPoseHistorySize];
+                    if (imageFrameId != 0 &&
+                        candidate.frameId == imageFrameId) {
+                        imagePose = &candidate;
+                        if (!imagePoseMatchLogged_) {
+                            const std::uint64_t framesBehind =
+                                requestFrameId_ >= imageFrameId
+                                    ? requestFrameId_ - imageFrameId
+                                    : 0;
+                            logger_.Write(
+                                "INFO", "image_pose_matched",
+                                "image_frame=" +
+                                    std::to_string(imageFrameId) +
+                                    " request_age_frames=" +
+                                    std::to_string(framesBehind) +
+                                    "; compositor timewarp can correct "
+                                    "the rendered pose.");
+                            imagePoseMatchLogged_ = true;
+                        }
+                    }
                 }
-                layer.space = appSpace_;
-                layer.viewCount =
-                    static_cast<std::uint32_t>(projectionViews_.size());
-                layer.views = projectionViews_.data();
-                layers[0] =
-                    reinterpret_cast<const XrCompositionLayerBaseHeader*>(
-                        &layer);
+                if (nativeStereo) {
+                    monoQuadAnchored_ = false;
+                    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+                        RenderEye(eye);
+                        projectionViews_[eye].pose =
+                            imagePose == nullptr
+                                ? locatedViews_[eye].pose
+                                : imagePose->pose[eye];
+                        projectionViews_[eye].fov =
+                            imagePose == nullptr
+                                ? submittedFov[eye]
+                                : imagePose->fov[eye];
+                    }
+                    layer.space = appSpace_;
+                    layer.viewCount =
+                        static_cast<std::uint32_t>(
+                            projectionViews_.size());
+                    layer.views = projectionViews_.data();
+                    layers[0] =
+                        reinterpret_cast<
+                            const XrCompositionLayerBaseHeader*>(
+                            &layer);
+                } else {
+                    RenderEye(FEARVR_EYE_LEFT);
+                    if (!monoQuadAnchored_) {
+                        TrackingQuaternion leftRotation{
+                            locatedViews_[FEARVR_EYE_LEFT]
+                                .pose.orientation.x,
+                            locatedViews_[FEARVR_EYE_LEFT]
+                                .pose.orientation.y,
+                            locatedViews_[FEARVR_EYE_LEFT]
+                                .pose.orientation.z,
+                            locatedViews_[FEARVR_EYE_LEFT]
+                                .pose.orientation.w};
+                        TrackingQuaternion rightRotation{
+                            locatedViews_[FEARVR_EYE_RIGHT]
+                                .pose.orientation.x,
+                            locatedViews_[FEARVR_EYE_RIGHT]
+                                .pose.orientation.y,
+                            locatedViews_[FEARVR_EYE_RIGHT]
+                                .pose.orientation.z,
+                            locatedViews_[FEARVR_EYE_RIGHT]
+                                .pose.orientation.w};
+                        leftRotation = Normalize(leftRotation);
+                        rightRotation = Normalize(rightRotation);
+                        if (Dot(leftRotation, rightRotation) < 0.0F) {
+                            rightRotation = {
+                                -rightRotation.x, -rightRotation.y,
+                                -rightRotation.z, -rightRotation.w};
+                        }
+                        const TrackingQuaternion centerRotation =
+                            Normalize({
+                                leftRotation.x + rightRotation.x,
+                                leftRotation.y + rightRotation.y,
+                                leftRotation.z + rightRotation.z,
+                                leftRotation.w + rightRotation.w});
+                        const TrackingVector forward = Rotate(
+                            centerRotation, {0.0F, 0.0F, -1.0F});
+                        monoQuadPose_ = {};
+                        monoQuadPose_.orientation = {
+                            centerRotation.x, centerRotation.y,
+                            centerRotation.z, centerRotation.w};
+                        monoQuadPose_.position = {
+                            (locatedViews_[FEARVR_EYE_LEFT]
+                                 .pose.position.x +
+                             locatedViews_[FEARVR_EYE_RIGHT]
+                                 .pose.position.x) *
+                                    0.5F +
+                                forward.x * 2.0F,
+                            (locatedViews_[FEARVR_EYE_LEFT]
+                                 .pose.position.y +
+                             locatedViews_[FEARVR_EYE_RIGHT]
+                                 .pose.position.y) *
+                                    0.5F +
+                                forward.y * 2.0F,
+                            (locatedViews_[FEARVR_EYE_LEFT]
+                                 .pose.position.z +
+                             locatedViews_[FEARVR_EYE_RIGHT]
+                                 .pose.position.z) *
+                                    0.5F +
+                                forward.z * 2.0F};
+                        monoQuadAnchored_ = true;
+                        logger_.Write(
+                            "INFO", "mono_quad_anchored",
+                            "Menu panel anchored in LOCAL space at "
+                            "the current view direction.");
+                    }
+                    quad.space = appSpace_;
+                    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    quad.subImage = projectionViews_[
+                        FEARVR_EYE_LEFT].subImage;
+                    quad.pose = monoQuadPose_;
+                    quad.size = {2.4F, 1.8F};
+                    layers[0] =
+                        reinterpret_cast<
+                            const XrCompositionLayerBaseHeader*>(
+                            &quad);
+                    if (!monoQuadLogged_) {
+                        logger_.Write(
+                            "INFO", "mono_quad_layer",
+                            "Flat game/menu image is shown as a "
+                            "2.4x1.8m world-locked panel at 2m.");
+                        monoQuadLogged_ = true;
+                    }
+                }
                 layerCount = 1;
                 ++submittedFrames_;
             } else {
@@ -1021,9 +1203,17 @@ private:
     std::vector<XrView> locatedViews_;
     std::vector<XrCompositionLayerProjectionView> projectionViews_;
     std::vector<Swapchain> swapchains_;
+    std::array<RenderPoseSample, kRenderPoseHistorySize>
+        renderPoseHistory_{};
     XrSessionStateMachine lifecycle_;
     std::uint64_t submittedFrames_{0};
     std::uint64_t requestFrameId_{0};
+    bool symmetricStereoLogged_{false};
+    bool imagePoseMatchLogged_{false};
+    bool monoQuadLogged_{false};
+    bool monoQuadAnchored_{false};
+    XrPosef monoQuadPose_{{0.0F, 0.0F, 0.0F, 1.0F},
+                         {0.0F, 0.0F, -2.0F}};
     bool exitRequested_{false};
 };
 

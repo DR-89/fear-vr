@@ -7,6 +7,22 @@ add_executable(test_xr_session_state test_xr_session_state.cpp)
 target_link_libraries(test_xr_session_state PRIVATE fearvr-common fearvr-warnings)
 add_test(NAME xr_session_state COMMAND test_xr_session_state)
 
+add_executable(test_stereo_math test_stereo_math.cpp)
+target_link_libraries(test_stereo_math PRIVATE fearvr-common fearvr-warnings)
+add_test(NAME stereo_math COMMAND test_stereo_math)
+
+add_executable(test_head_tracking_math test_head_tracking_math.cpp)
+target_link_libraries(
+  test_head_tracking_math PRIVATE fearvr-common fearvr-warnings
+)
+add_test(NAME head_tracking_math COMMAND test_head_tracking_math)
+
+add_executable(test_stereo_hud_math test_stereo_hud_math.cpp)
+target_link_libraries(
+  test_stereo_hud_math PRIVATE fearvr-common fearvr-warnings
+)
+add_test(NAME stereo_hud_math COMMAND test_stereo_hud_math)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND TARGET fearvr-proxy)
   # Isolierter M2-Producer: Der echte System-Import bleibt d3d9.lib; erst
   # nach dem Link wird ausschließlich neben diese Test-EXE der Proxy kopiert.

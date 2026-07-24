@@ -84,8 +84,22 @@ Exitcodes:
   `IDLE → READY → SYNCHRONIZED → VISIBLE → FOCUSED → VISIBLE →`
   `SYNCHRONIZED → STOPPING → IDLE → EXITING`
 
+## Manueller Test vom 2026-07-24
+
+Der Benutzer bestätigte im Headset:
+
+- linkes Auge rot, rechtes Auge blau;
+- beide Bilder kehren nach Absetzen/Wiederaufsetzen zurück;
+- eine Steam-Link-Unterbrechung und Wiederverbindung wird ohne Absturz
+  überstanden.
+
+Das Hostlog `host-20260724-113657.log` belegt zweimal
+`FOCUSED → VISIBLE → FOCUSED`, rund 20.400 eingereichte Frames und einen
+sauberen `host_stop`.
+
 Der Unit-Test `test_xr_session_state` deckt außerdem
 `XR_SESSION_LOSS_PENDING` und die erneute READY-/BeginSession-Sequenz ohne
-Headset ab. Die ausdrückliche visuelle Links-/Rechts-Bestätigung, Standby und
-ein echter Sessionverlust bleiben als manuelle Live-Tests offen; bis dahin
-ist das vollständige M1-Gate noch nicht abgehakt.
+Headset ab. SteamVR hielt bei der Link-Unterbrechung dieselbe OpenXR-Session
+am Leben und sein normaler `-shutdown`-Befehl wurde bei aktiver Anwendung
+nicht ausgeführt. Ein echter, von der Runtime gemeldeter
+`XR_SESSION_LOSS_PENDING`-Wechsel bleibt deshalb als letzter Live-Test offen.

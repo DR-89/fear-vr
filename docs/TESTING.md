@@ -90,11 +90,19 @@ Bestanden:
   sauberer STOPPING-/EXITING-Lebenszyklus;
 - x64 und x86 mit `/W4 /WX`; je zwei CTest-Tests bestanden.
 
-Noch manuell offen:
+Manuell bestanden:
 
-- die visuelle Zuordnung „linkes Auge rot / rechtes Auge blau“ im Headset
-  ausdrücklich bestätigen;
-- Headset während eines längeren Hostlaufs gezielt in Standby versetzen und
-  wieder aufwecken;
-- einen echten Runtime-/Session-Verlust provozieren und die automatische
-  Session-Neuerstellung zusätzlich zum Unit-Test live bestätigen.
+- Benutzerbestätigung: linkes Auge rot, rechtes Auge blau;
+- Absetzen und Wiederaufsetzen: `FOCUSED → VISIBLE → FOCUSED`, Testbild danach
+  wieder sichtbar;
+- Steam-Link-Unterbrechung und Wiederverbindung: Headset/Controller wurden
+  reaktiviert, der Host renderte ohne Absturz weiter;
+- längerer Testlauf mit rund 20.400 Frames, danach `host_stop`.
+
+Noch offen:
+
+- einen echten `XR_SESSION_LOSS_PENDING`-Wechsel provozieren und die
+  automatische Session-Neuerstellung zusätzlich zum Unit-Test live
+  bestätigen. Steam Link hielt beim Verbindungsabbruch dieselbe OpenXR-Session
+  am Leben; der normale SteamVR-`-shutdown`-Befehl wurde bei aktiver Anwendung
+  nicht ausgeführt.

@@ -12,8 +12,9 @@
   OpenXR-/D3D11-Lebenszyklus und sendet Stereo-Testbilder an SteamVR.
 - OpenXR-SDK 1.1.59 ist lokal fest gepinnt; der Host fordert für die
   Kompatibilität mit SteamVR OpenXR 1.0 an.
-- Der Live-Test mit Quest 3 reichte 120 Frames ein und beendete die Session
-  sauber. Standby und ein echter Sessionverlust sind noch manuell zu prüfen.
+- Der Live-Test mit Quest 3 reichte zunächst 120 Frames ein und beendete die
+  Session sauber. Ein zusätzlicher manueller Lauf überstand Standby und
+  Steam-Link-Neuverbindung über rund 20.400 Frames.
 - F.E.A.R. 1.08 und die Public Tools 1.08 sind lokal verifiziert.
 - Die alte VS-2003-Solution wurde nach VS2022 migriert. Alle drei
   Public-Tools-Spielmodule kompilieren und linken mit v141 erfolgreich.
@@ -225,10 +226,17 @@ Khronos-`hello_xr` fordert der Host deshalb explizit `XR_API_VERSION_1_0` an.
 
 Noch offen für das vollständige M1-Gate:
 
-- visuell im Headset bestätigen, dass links rot und rechts blau erscheint;
-- Headset während eines Hostlaufs in Standby versetzen und aufwecken;
-- echten Session-/Runtimeverlust live provozieren und die bereits per Unit-Test
-  geprüfte Session-Neuerstellung beobachten.
+- echten `XR_SESSION_LOSS_PENDING`-Wechsel live provozieren und die bereits per
+  Unit-Test geprüfte Session-Neuerstellung beobachten. Steam Link hielt beim
+  manuellen Verbindungsabbruch dieselbe OpenXR-Session am Leben.
+
+Zusätzlicher manueller Nachweis am 24.07.2026:
+
+- Benutzer bestätigt: linkes Auge rot, rechtes Auge blau;
+- Absetzen/Wiederaufsetzen:
+  `FOCUSED → VISIBLE → FOCUSED`, Bilder danach wieder sichtbar;
+- Steam-Link-Unterbrechung/Wiederverbindung ohne Hostabsturz;
+- rund 20.400 Frames, anschließend sauberer `host_stop`.
 
 Details: `docs/M1-OPENXR-HOST.md`.
 

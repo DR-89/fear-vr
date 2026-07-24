@@ -1,0 +1,18 @@
+F.E.A.R. VR — Projektlizenz (noch festzulegen)
+================================================
+
+Für die selbst geschriebenen Bestandteile dieses Projekts (Host, Proxy,
+Launcher, IPC-Vertrag, Shader, Tests, Tools, Dokumentation) ist noch eine
+Open-Source-Lizenz auszuwählen und hier einzutragen.
+
+Die Wahl ist nicht trivial, weil das lokal neu gebaute GameClient-Modul gegen
+die offiziellen F.E.A.R.-Public-Tools und ggf. gegen Bestandteile mit
+GPL-/MIT-/proprietären Grenzen linkt (siehe THIRD_PARTY_NOTICES.md und
+ANWEISUNG.md §18). Die Projektlizenz muss mit diesen Grenzen verträglich sein.
+
+Bis zur Festlegung gilt: Dieses Repository enthält ausschließlich selbst
+geschriebene Quelldateien und Dokumentation. Es enthält KEINE Retail-Dateien,
+KEINE proprietären SDK-Quellen und KEINE extrahierten Assets.
+
+TODO: Konkrete Lizenz (z. B. MIT, Apache-2.0 oder GPL-kompatibel) eintragen,
+sobald die Lizenzgrenzen der GameClient-Abhängigkeiten geprüft sind.

@@ -54,7 +54,8 @@ Siehe `docs/ENVIRONMENT.md` für den geprüften Ist-Zustand und die noch
 fehlenden Komponenten. Kurz:
 
 - F.E.A.R. 1.08 (Ultimate Shooter Edition), legal installiert
-- Visual Studio 2022 mit „Desktopentwicklung mit C++" (+ Toolset v141)
+- Visual Studio 2022 mit „Desktopentwicklung mit C++" (+ Toolset v141 für
+  Compile-/Quellanalyse; laufzeitfähige Public-Tools-Module benötigen VC7.1)
 - CMake, Git
 - SteamVR als aktive OpenXR-Runtime + Headset
 - lokaler offizieller Public-Tools-Installer 1.08

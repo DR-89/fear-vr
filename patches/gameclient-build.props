@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  F.E.A.R-VR — Build-Overrides für den offiziellen Public-Tools-GameClient.
+
+  Wird per  /p:ForceImportAfterCppTargets=<Pfad zu dieser Datei>  in JEDES
+  Projekt der Game.sln injiziert, OHNE die vendorten SDK-Projektdateien zu
+  ändern. So bleibt der Stock-Client unverändert und der Build ist
+  reproduzierbar (ANWEISUNG.md §10, §11).
+
+  Zweck der einzelnen Overrides:
+   - ForceConformanceInForLoopScope=false  -> altes for()-Scoping (der Code
+     nutzt Schleifenvariablen nach der Schleife). Ersetzt /Zc:forScope-.
+   - _SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS -> <hash_map> ist in der
+     modernen STL nur noch mit diesem Define nutzbar.
+   - _CRT_SECURE_NO_WARNINGS / _CRT_NONSTDC_NO_DEPRECATE -> Alt-CRT-APIs.
+   - legacy_stdio_definitions.lib -> stellt _snprintf u.a. bereit, die in der
+     UCRT als Inline-Funktionen entfielen (Linkerfehler __imp___snprintf).
+   - CustomBuildStep-Items entfernt -> die xcopy-Deploy-Schritte des SDK
+     schlagen mit relativen Pfaden fehl (MSB3073); Deploy erfolgt separat
+     beim Staging.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!--
+    Die konvertierten vcxproj erzeugen in Microsoft.Cpp.Common.props bereits
+    ein CustomBuildStep-Item. Ein späteres Überschreiben der ItemDefinition
+    ändert dessen kopierte Metadaten nicht mehr. Da diese Datei nach den
+    Cpp-Targets importiert wird, entfernen wir die vorhandenen Items direkt.
+  -->
+  <ItemGroup>
+    <CustomBuildStep Remove="@(CustomBuildStep)" />
+  </ItemGroup>
+  <!--
+    VS 2003 allowed Link.OutputFile to disagree with TargetName/TargetExt.
+    Modern MSBuild warns and makes $(TargetPath) point at a nonexistent file.
+    Mirror the SDK's authored linker output names as target properties.
+  -->
+  <PropertyGroup Condition="'$(ProjectName)' == 'Game_ClientShell'">
+    <TargetName>GameClient</TargetName>
+    <TargetExt>.dll</TargetExt>
+    <TargetFileName>GameClient.dll</TargetFileName>
+    <TargetPath>$(OutDir)GameClient.dll</TargetPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ProjectName)' == 'Game_ServerShell'">
+    <TargetName>GameServer</TargetName>
+    <TargetExt>.dll</TargetExt>
+    <TargetFileName>GameServer.dll</TargetFileName>
+    <TargetPath>$(OutDir)GameServer.dll</TargetPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(ProjectName)' == 'Game_ClientFX'">
+    <TargetName>ClientFx</TargetName>
+    <TargetExt>.fxd</TargetExt>
+    <TargetFileName>ClientFx.fxd</TargetFileName>
+    <TargetPath>$(OutDir)ClientFx.fxd</TargetPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <ForceConformanceInForLoopScope>false</ForceConformanceInForLoopScope>
+      <PreprocessorDefinitions>_SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>legacy_stdio_definitions.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

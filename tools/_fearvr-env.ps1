@@ -22,7 +22,18 @@ function Get-FearVrConfig { return $script:FearVr }
 
 function Get-FileSha256([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToUpperInvariant()
+
+    # Get-FileHash bindet Dateipfade über den PowerShell-Provider. Unter einem
+    # geerbten -WhatIf kann PowerShell 5.1 dabei $null statt eines Hashobjekts
+    # liefern. Direkter, read-only Dateizugriff vermeidet diese Nebenwirkung.
+    $stream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '')
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
 }
 
 # Prüft, dass ein Zielpfad NUR unterhalb der Projektwurzel liegt (§12).
@@ -43,7 +54,10 @@ function Assert-RetailFearExe {
     if (-not (Test-Path -LiteralPath $exe)) {
         throw "FEAR.exe nicht gefunden: $exe"
     }
-    $ver = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
+    # Get-Item unterstützt ShouldProcess. Ein -WhatIf eines aufrufenden Skripts
+    # würde deshalb bis hierher vererbt und statt eines FileInfo-Objekts $null
+    # liefern. Die .NET-Abfrage ist read-only und funktioniert unabhängig davon.
+    $ver = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe).FileVersion
     $sha = Get-FileSha256 $exe
     if ($ver -ne $cfg.ExpectedVersion) {
         throw "Falsche FEAR.exe-Version: '$ver' (erwartet '$($cfg.ExpectedVersion)'). Versionsabhängige Hooks bleiben DEAKTIVIERT."

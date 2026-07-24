@@ -66,7 +66,14 @@ Erforderlich:
 
 1. Visual Studio 2022 mit „Desktopentwicklung mit C++“.
 2. MSVC-x86/x64-Tools und ein aktuelles Windows 10/11 SDK.
-3. Zusätzlich das Toolset **v141**, falls der offizielle F.E.A.R.-Clientquellcode mit v143 nicht sauber bzw. ABI-kompatibel baut. Ein aktuelles F.E.A.R.-Referenzprojekt hat den x86-Build mit VS 2022 und v141 nachgewiesen.
+3. Zusätzlich das Toolset **v141** für Compile-/Quellanalyse des offiziellen
+   F.E.A.R.-Clientquellcodes. Ein lokaler Live-Test am 24.07.2026 hat
+   nachgewiesen, dass die resultierenden Module **nicht** ABI-kompatibel sind:
+   Originale importieren MSVCP71/MSVCR71, v141-Artefakte
+   MSVCP140/VCRUNTIME140/UCRT; der v141-GameClient stürzt in MSVCR71 ab.
+   Für ein auslieferbares GameClient-Modul ist deshalb eine echte
+   VC7.1-/Visual-Studio-.NET-2003-Toolchain nötig. Bis dahin den D3D9-Proxyweg
+   verwenden und keine v141-Spielmodule deployen.
 4. CMake, vorzugsweise die mit Visual Studio gelieferte Version oder eine aktuelle offizielle Version.
 5. Git.
 6. SteamVR als aktive OpenXR-Runtime und ein angeschlossenes Headset für Live-Tests.
@@ -355,7 +362,11 @@ cmake -S . -B build\x64 -A x64 -DFEARVR_BUILD_PROXY=OFF -DFEARVR_BUILD_HOST=ON
 cmake --build build\x64 --config RelWithDebInfo
 ```
 
-Das Public-Tools-GameClient-Projekt kann einen separaten x86-Build mit v141 benötigen. Kapsle es so, dass moderne Hostquellen nicht auf alte Compiler-/CRT-Annahmen herabgesetzt werden.
+Das Public-Tools-GameClient-Projekt benötigt für die Laufzeit einen separaten
+x86-Build mit VC7.1. v141 ist nur für Compile-/Quellanalyse zulässig und muss
+vor dem Deployment anhand der CRT-Imports abgelehnt werden. Kapsle den
+historischen Build so, dass moderne Hostquellen nicht auf alte
+Compiler-/CRT-Annahmen herabgesetzt werden.
 
 Pflichten:
 

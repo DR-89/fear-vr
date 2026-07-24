@@ -68,9 +68,10 @@ Standardarchitektur:
 | Visual Studio 2022 Community `17.14.37` | IDE, Compiler/Linker/MSBuild | ✅ installiert | M0 |
 | MSVC x86- und x64-Toolset (v143 `14.44.35207`) | Proxy (x86) + Host (x64) | ✅ (cl.exe Host x64/x86) | M0 |
 | Windows 10/11 SDK `10.0.26100.0` | D3D9/D3D11, DirectXMath, DXGI | ✅ installiert | M1/M2 |
-| Toolset **v141** `14.16.27023` | offizieller Clientquellcode (ABI/CRT) | ✅ installiert | M0 (GameClient) |
+| Toolset **v141** `14.16.27023` | offizieller Clientquellcode, nur Compile-/Quellanalyse | ✅ installiert; Live-Test nicht ABI-kompatibel | M0-Diagnose |
+| Toolset **VC7.1** (VS .NET 2003) | laufzeitfähiger GameClient mit MSVCP71/MSVCR71 | ❌ nicht installiert | spätere GameClient-Änderungen |
 | CMake (Kitware `4.4.0`) | Buildsystem (Win32 + x64 getrennt) | ✅ `C:\Program Files\CMake\bin` | M0 |
-| Public Tools 1.08 (aus lokalem Installer, nach `vendor-local`) | offizielle Client-APIs / GameClient-Quellen | ⏳ Installer vorhanden, noch nicht installiert | M0 (GameClient) |
+| Public Tools 1.08 (aus lokalem Installer, nach `vendor-local`) | offizielle Client-APIs / GameClient-Quellen | ✅ installiert und Buildquellen verifiziert | M0-Diagnose |
 
 > Hinweis: `cl.exe`/`MSBuild.exe` liegen bewusst **nicht** auf dem globalen PATH;
 > sie werden über die VS-Umgebung bzw. den CMake-„Visual Studio 17 2022"-Generator

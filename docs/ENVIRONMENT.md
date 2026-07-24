@@ -38,6 +38,10 @@ mit ANWEISUNG.md §2 überein.
 
 Legende: ✅ bestätigt · ⏳ später zu verifizieren · ℹ️ dokumentiert, nicht messbar
 
+> Hinweis: Die Build-Tools (CMake/`cl`/MSBuild) waren zum Zeitpunkt dieses
+> Ausgangs-Snapshots noch nicht installiert. Der aktuelle, installierte Stand
+> steht in Abschnitt 2.
+
 ### Architektur-Konsequenz (§2 / §5)
 
 Der 32-Bit-OpenXR-Runtime-Eintrag unter `WOW6432Node` **fehlt** und SteamVR
@@ -50,23 +54,27 @@ Standardarchitektur:
 > OpenXR-Session.** OpenXR wird **nicht** dauerhaft direkt in die x86-`FEAR.exe`
 > eingebaut. Siehe `docs/ARCHITECTURE.md`.
 
-## 2. Fehlende Komponenten (§4)
+## 2. Build-Toolchain (§4)
 
-> **Wichtig:** Es wird nichts ungefragt systemweit installiert (§4).
-> Diese Liste dokumentiert nur, was für die jeweiligen Meilensteine
-> nachinstalliert werden muss. Die Zustimmung zur Installation holt der
-> Benutzer selbst ein bzw. gibt sie explizit frei.
+> **Am 2026-07-24 auf ausdrücklichen Wunsch des Benutzers installiert.** Die
+> Installation lief einmalig erhöht (UAC bestätigt), still über winget, ohne
+> Retail-Dateien zu berühren. Verifiziert über `vswhere` und einen echten
+> x86-/x64-Build des Gerüsts (siehe §4 dieses Dokuments).
 
-### Zwingend erforderlich (blockiert ab M0-Build)
+### Zwingend erforderlich (Stand nach Installation)
 
 | Komponente | Zweck | Status | Benötigt ab |
 |---|---|---|---|
-| Visual Studio 2022 + „Desktopentwicklung mit C++" | Compiler/Linker/MSBuild | ❌ nicht installiert | M0 |
-| MSVC x86- und x64-Toolset | Proxy (x86) + Host (x64) | ❌ (Teil von VS) | M0 |
-| Windows 10/11 SDK (aktuell) | D3D9/D3D11, DirectXMath, DXGI | ❌ (Teil von VS) | M1/M2 |
-| Toolset **v141** | Fallback für offiziellen Clientquellcode (ABI/CRT) | ❌ (VS-Einzelkomponente) | M0 (GameClient) |
-| CMake (VS-eigene oder aktuelle offizielle) | Buildsystem (Win32 + x64 getrennt) | ❌ nicht installiert | M0 |
+| Visual Studio 2022 Community `17.14.37` | IDE, Compiler/Linker/MSBuild | ✅ installiert | M0 |
+| MSVC x86- und x64-Toolset (v143 `14.44.35207`) | Proxy (x86) + Host (x64) | ✅ (cl.exe Host x64/x86) | M0 |
+| Windows 10/11 SDK `10.0.26100.0` | D3D9/D3D11, DirectXMath, DXGI | ✅ installiert | M1/M2 |
+| Toolset **v141** `14.16.27023` | offizieller Clientquellcode (ABI/CRT) | ✅ installiert | M0 (GameClient) |
+| CMake (Kitware `4.4.0`) | Buildsystem (Win32 + x64 getrennt) | ✅ `C:\Program Files\CMake\bin` | M0 |
 | Public Tools 1.08 (aus lokalem Installer, nach `vendor-local`) | offizielle Client-APIs / GameClient-Quellen | ⏳ Installer vorhanden, noch nicht installiert | M0 (GameClient) |
+
+> Hinweis: `cl.exe`/`MSBuild.exe` liegen bewusst **nicht** auf dem globalen PATH;
+> sie werden über die VS-Umgebung bzw. den CMake-„Visual Studio 17 2022"-Generator
+> gefunden. `verify-install.ps1` erkennt VS/MSVC/v141 daher über `vswhere`.
 
 ### Bereits vorhanden
 
@@ -119,9 +127,24 @@ Bequemer über den mitgelieferten Prüfer:
 pwsh -File tools\verify-install.ps1
 ```
 
-## 4. Nächster Schritt
+## 4. Verifikation durch echten Build (2026-07-24)
 
-Meilenstein **M0** (siehe ANWEISUNG.md §13): Build-Toolchain bereitstellen
-(nach Freigabe des Benutzers), Public Tools nur lokal nach `vendor-local`
-installieren, unveränderten GameClient als x86 bauen und die isolierte
-Flat-Screen-Stage starten — ohne jede Änderung an Retail-Dateien.
+Die installierte Toolchain wurde nicht nur über `vswhere` geprüft, sondern durch
+einen tatsächlichen Build des Gerüsts in **beiden** Architekturen:
+
+```powershell
+cmake -S . -B build\x64 -G "Visual Studio 17 2022" -A x64   -DFEARVR_BUILD_HOST=ON  -DFEARVR_BUILD_PROXY=OFF
+cmake --build build\x64 --config RelWithDebInfo      # -> fearvr-host.exe, test_protocol.exe
+cmake -S . -B build\x86 -G "Visual Studio 17 2022" -A Win32 -DFEARVR_BUILD_PROXY=ON -DFEARVR_BUILD_HOST=OFF
+cmake --build build\x86 --config RelWithDebInfo      # -> d3d9.dll, fearvr-launcher.exe, test_protocol.exe
+```
+
+Ergebnis: beide Builds **warning-clean** (`/W4`), `test_protocol` besteht in
+x64 (`ptr=64 bit`) und x86 (`ptr=32 bit`) → `protocol.h` ist in beiden
+Architekturen layout-identisch.
+
+## 5. Nächster Schritt
+
+Meilenstein **M0** (siehe ANWEISUNG.md §13): Public Tools nur lokal nach
+`vendor-local` installieren, unveränderten GameClient als x86 (v141) bauen und
+die isolierte Flat-Screen-Stage starten — ohne jede Änderung an Retail-Dateien.

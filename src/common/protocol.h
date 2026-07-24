@@ -92,7 +92,7 @@ typedef struct FearVrRenderRequest {
   uint32_t flags;                   /* FEARVR_RF_*                           */
 } FearVrRenderRequest;
 FEARVR_STATIC_ASSERT(sizeof(FearVrRenderRequest) == 8 + 8 + 88 + 4 + 4,
-                     "FearVrRenderRequest size (104)");
+                     "FearVrRenderRequest size (112)");
 
 /* ---- Slot-Deskriptor (ein Ring-Slot, ein Auge) --------------------------- */
 typedef struct FearVrSlot {

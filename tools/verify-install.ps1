@@ -76,10 +76,40 @@ if (Test-Path -LiteralPath $sdk) {
 
 # --- Build-Tools ---
 Write-Host "--- Build-Tools ---"
-foreach ($t in 'git','cmake','ninja','cl','msbuild') {
-    $c = Get-Command $t -ErrorAction SilentlyContinue
-    if ($c) { Info $t $c.Source } else { Info $t 'NICHT gefunden' }
+$g = Get-Command git -ErrorAction SilentlyContinue
+Info 'git' $(if ($g) { $g.Source } else { 'NICHT gefunden' })
+
+# cmake: PATH oder Standardinstallation
+$cm = Get-Command cmake -ErrorAction SilentlyContinue
+if ($cm) {
+    Info 'cmake' ("$($cm.Source)  (" + ((& $cm.Source --version | Select-Object -First 1)) + ")")
+} elseif (Test-Path 'C:\Program Files\CMake\bin\cmake.exe') {
+    $v = (& 'C:\Program Files\CMake\bin\cmake.exe' --version | Select-Object -First 1)
+    Info 'cmake' "C:\Program Files\CMake\bin\cmake.exe ($v; neue Shell nötig für PATH)"
+} else { Info 'cmake' 'NICHT gefunden' }
+
+# Visual Studio / MSVC via vswhere (cl/msbuild liegen nicht global auf PATH).
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $vswhere) {
+    $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+    if ($vsPath) {
+        $vsName = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property displayName 2>$null
+        $vsVer  = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property catalog_productDisplayVersion 2>$null
+        Info 'Visual Studio (C++ Tools)' "$vsName $vsVer"
+        $v141 = @(Get-ChildItem (Join-Path $vsPath 'VC\Tools\MSVC') -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '14.16.*' })
+        Info 'MSVC v141-Toolset' $(if ($v141.Count) { $v141[0].Name } else { 'NICHT installiert' })
+    } else {
+        Info 'Visual Studio (C++ Tools)' 'NICHT gefunden (VC.Tools fehlt)'
+    }
+} else {
+    Info 'Visual Studio' 'kein vswhere / nicht installiert'
 }
+
+# Windows 10/11 SDK
+$sdkInc = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+if (Test-Path $sdkInc) {
+    Info 'Windows SDK' (((Get-ChildItem $sdkInc -Directory | Select-Object -ExpandProperty Name) -join ', '))
+} else { Info 'Windows SDK' 'NICHT gefunden' }
 
 # --- Fazit ---
 Write-Host ("=== Ergebnis: {0} ===" -f $(if ($ok) { 'Retail verifiziert' } else { 'Abweichungen gefunden' })) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })

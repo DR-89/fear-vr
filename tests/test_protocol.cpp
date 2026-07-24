@@ -6,6 +6,18 @@
 
 #include "protocol.h"
 
+// --- Feste Größen & Offsets: kompilezeit geprüft (identisch x86/x64) ---------
+static_assert(sizeof(FearVrPose) == 28, "FearVrPose");
+static_assert(sizeof(FearVrFov) == 16, "FearVrFov");
+static_assert(sizeof(FearVrEyeView) == 44, "FearVrEyeView");
+static_assert(sizeof(FearVrRenderRequest) == 112, "FearVrRenderRequest");
+static_assert(sizeof(FearVrSlot) == 40, "FearVrSlot");
+static_assert(offsetof(FearVrSharedHeader, magic) == 0, "off magic");
+static_assert(offsetof(FearVrSharedHeader, version) == 4, "off version");
+static_assert(offsetof(FearVrSharedHeader, headerSize) == 8, "off headerSize");
+static_assert(offsetof(FearVrSharedHeader, hostHeartbeat) == 24, "off hostHb");
+static_assert(offsetof(FearVrSharedHeader, gameHeartbeat) == 32, "off gameHb");
+
 static int g_failed = 0;
 
 #define CHECK(cond)                                                            \
@@ -27,20 +39,6 @@ static bool AcceptHeader(const FearVrSharedHeader& h) {
 }
 
 int main(void) {
-    // --- Feste Größen (identisch x86/x64) ---
-    CHECK(sizeof(FearVrPose) == 28);
-    CHECK(sizeof(FearVrFov) == 16);
-    CHECK(sizeof(FearVrEyeView) == 44);
-    CHECK(sizeof(FearVrRenderRequest) == 104);
-    CHECK(sizeof(FearVrSlot) == 40);
-
-    // --- Offsets im Shared-Header ---
-    CHECK(offsetof(FearVrSharedHeader, magic) == 0);
-    CHECK(offsetof(FearVrSharedHeader, version) == 4);
-    CHECK(offsetof(FearVrSharedHeader, headerSize) == 8);
-    CHECK(offsetof(FearVrSharedHeader, hostHeartbeat) == 24);
-    CHECK(offsetof(FearVrSharedHeader, gameHeartbeat) == 32);
-
     // --- Gültiger Header wird akzeptiert ---
     FearVrSharedHeader h;
     std::memset(&h, 0, sizeof(h));
@@ -51,7 +49,7 @@ int main(void) {
     h.slotsPerEye = FEARVR_SLOTS_PER_EYE;
     CHECK(AcceptHeader(h));
 
-    // --- Ungültige Varianten werden abgelehnt ---
+    // --- Ungültige Varianten werden abgelehnt (Laufzeitwerte) ---
     { FearVrSharedHeader b = h; b.magic ^= 0xFFu;      CHECK(!AcceptHeader(b)); }
     { FearVrSharedHeader b = h; b.version += 1;         CHECK(!AcceptHeader(b)); }
     { FearVrSharedHeader b = h; b.headerSize += 1;      CHECK(!AcceptHeader(b)); }
@@ -62,6 +60,6 @@ int main(void) {
         std::printf("test_protocol: OK (ptr=%zu bit)\n", sizeof(void*) * 8);
         return 0;
     }
-    std::printf("test_protocol: %d Prüfung(en) fehlgeschlagen\n", g_failed);
+    std::printf("test_protocol: %d Pruefung(en) fehlgeschlagen\n", g_failed);
     return 1;
 }

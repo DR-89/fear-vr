@@ -7,7 +7,13 @@
 
 ## 0. Kurzfassung
 
-- M0-Umgebung und Projektgerüst sind vorhanden; x86- und x64-Gerüst bauen.
+- M0-Umgebung und Projektgerüst sind vorhanden; x86 und x64 bauen sauber.
+- Der eigenständige M1-x64-Host besitzt einen vollständigen
+  OpenXR-/D3D11-Lebenszyklus und sendet Stereo-Testbilder an SteamVR.
+- OpenXR-SDK 1.1.59 ist lokal fest gepinnt; der Host fordert für die
+  Kompatibilität mit SteamVR OpenXR 1.0 an.
+- Der Live-Test mit Quest 3 reichte 120 Frames ein und beendete die Session
+  sauber. Standby und ein echter Sessionverlust sind noch manuell zu prüfen.
 - F.E.A.R. 1.08 und die Public Tools 1.08 sind lokal verifiziert.
 - Die alte VS-2003-Solution wurde nach VS2022 migriert. Alle drei
   Public-Tools-Spielmodule kompilieren und linken mit v141 erfolgreich.
@@ -17,9 +23,10 @@
   mit der VC7.1-F.E.A.R.-Runtime und dürfen nicht deployt werden.
 - Die ursprünglichen Public-Tools-Module sind wiederhergestellt. Die
   Steam-/Retail-Installation wurde nie verändert.
-- Der nächste unabhängige Implementierungsschritt ist M1 über den
-  D3D9-Proxy und den separaten x64-OpenXR-Host. Änderungen am GameClient
-  warten auf eine echte VC7.1-Toolchain.
+- Der nächste unabhängige Implementierungsschritt ist M2: den D3D9-Proxy
+  vollständig weiterleitend und fail-open ausbauen und IPC/Shared-Texture-
+  Diagnose vorbereiten. Änderungen am GameClient warten auf eine echte
+  VC7.1-Toolchain.
 
 ## 1. Verifizierte Umgebung
 
@@ -31,6 +38,9 @@
 | Steam-App-ID | `21090` |
 | OpenXR | SteamVR x64 aktiv |
 | 32-Bit-OpenXR | `WOW6432Node`-Runtime fehlt; separater x64-Host bleibt Pflicht |
+| OpenXR-SDK | `release-1.1.59`, Commit `e5df31de6c15b4900aee3092273194e51282000d` |
+| M1-Live-HMD | Quest 3 über Steam Link, SteamVR/OpenXR `2.16.7` |
+| M1-Runtime-GPU | NVIDIA GeForce RTX 3050 Laptop GPU, LUID `0x0:C91C` |
 | Public Tools | `vendor-local\publictools` (proprietär, gitignored) |
 
 Weitere Details: `docs/ENVIRONMENT.md`.
@@ -182,10 +192,49 @@ bei der Ablehnung keine Runtime-Datei verändert wird.
 Der Launcher ist erst wieder für einen vollständigen M0-Lauf zu verwenden,
 wenn ein VC7.1-kompatibles Modulset vorliegt.
 
-## 8. Empfohlene nächste Schritte
+## 8. M1 — OpenXR-/D3D11-Host
 
-1. **M1 unabhängig fortsetzen:** x64-OpenXR-Host implementieren und den
-   OpenXR-Instanz-/System-/Session-/Frame-Lebenszyklus gegen SteamVR testen.
+Implementiert:
+
+- fest gepinntes Khronos OpenXR-SDK `release-1.1.59`;
+- statischer offizieller OpenXR-Loader;
+- `XR_KHR_D3D11_enable`, Graphics-Requirements und exakte Adapter-LUID;
+- D3D11-Gerät, OpenXR-Session, Local-Space und zwei getrennte Swapchains;
+- Frame-Lebenszyklus mit `wait/begin/locate/end`;
+- links rotes, rechts blaues Stereo-Testbild;
+- Zustandsautomat für READY, STOPPING, EXITING und LOSS_PENDING;
+- JSON-Lines-Logs und klare Diagnose ohne Runtime;
+- reproduzierbarer Abhängigkeitsprüfer
+  `tools/prepare-dependencies.ps1`.
+
+Live-Nachweis am 24.07.2026:
+
+1. `--validate-only` bestand gegen SteamVR/OpenXR 2.16.7 und Quest 3.
+2. Exakter Runtime-Adapter:
+   NVIDIA GeForce RTX 3050 Laptop GPU, LUID `0x0:C91C`.
+3. Zwei Swapchains mit je `1624x1736`,
+   `DXGI_FORMAT_R8G8B8A8_UNORM_SRGB`.
+4. 120 Stereo-Frames und sauberer Übergang über STOPPING bis EXITING.
+5. Fehlende Runtime künstlich geprüft: verständliche Diagnose, Exitcode 10.
+6. x86 und x64 bauen mit `/W4 /WX`; je zwei CTest-Tests bestehen.
+
+Wichtiger Live-Test-Fund: Das aktuelle OpenXR-SDK definiert
+`XR_CURRENT_API_VERSION` als 1.1. SteamVR 2.16.7 beantwortete diese
+Anforderung mit `XR_ERROR_API_VERSION_UNSUPPORTED`. Wie das aktuelle
+Khronos-`hello_xr` fordert der Host deshalb explizit `XR_API_VERSION_1_0` an.
+
+Noch offen für das vollständige M1-Gate:
+
+- visuell im Headset bestätigen, dass links rot und rechts blau erscheint;
+- Headset während eines Hostlaufs in Standby versetzen und aufwecken;
+- echten Session-/Runtimeverlust live provozieren und die bereits per Unit-Test
+  geprüfte Session-Neuerstellung beobachten.
+
+Details: `docs/M1-OPENXR-HOST.md`.
+
+## 9. Empfohlene nächste Schritte
+
+1. Die zwei offenen manuellen M1-Lifecycle-Tests durchführen.
 2. **M2 vorbereiten:** bestehenden x86-`d3d9.dll`-Proxy erweitern,
    Retail-D3D9 vollständig weiterleiten und zunächst nur Diagnose/IPC
    ergänzen. Dafür wird kein neu gebauter GameClient benötigt.
@@ -197,7 +246,7 @@ wenn ein VC7.1-kompatibles Modulset vorliegt.
 5. Erst ein VC7.1-Stockmodul durch den vorhandenen ABI-Guard und M0-Lauftest
    bringen; danach VR-Änderungen in den Clientquellen beginnen.
 
-## 9. Repository-Regeln
+## 10. Repository-Regeln
 
 - `vendor-local/` niemals committen.
 - Retail-Verzeichnis immer read-only behandeln.

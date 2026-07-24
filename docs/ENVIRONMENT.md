@@ -93,7 +93,7 @@ Commit/Tag** eingebunden und in `THIRD_PARTY_NOTICES.md` dokumentiert:
 
 | Abhängigkeit | Zweck | Pin |
 |---|---|---|
-| Khronos OpenXR-SDK / -Loader | x64-Host | TBD (Tag festschreiben) |
+| Khronos OpenXR-SDK / statischer Loader | x64-Host | `release-1.1.59` / `e5df31de6c15b4900aee3092273194e51282000d` |
 | MinHook | gezielte x86-Hooks (falls COM-Wrapper nicht reicht) | TBD |
 | DirectXMath | Mathe (aus Windows SDK) | via Windows SDK |
 
@@ -144,8 +144,14 @@ Ergebnis: beide Builds **warning-clean** (`/W4`), `test_protocol` besteht in
 x64 (`ptr=64 bit`) und x86 (`ptr=32 bit`) → `protocol.h` ist in beiden
 Architekturen layout-identisch.
 
-## 5. Nächster Schritt
+## 5. OpenXR-Livezustand (M1, 2026-07-24)
 
-Meilenstein **M0** (siehe ANWEISUNG.md §13): Public Tools nur lokal nach
-`vendor-local` installieren, unveränderten GameClient als x86 (v141) bauen und
-die isolierte Flat-Screen-Stage starten — ohne jede Änderung an Retail-Dateien.
+- SteamVR/OpenXR `2.16.7`
+- Headset: Quest 3 über Steam Link (`oculus`, Vendor-ID `10462`)
+- Runtime-GPU: NVIDIA GeForce RTX 3050 Laptop GPU, LUID `0x0:C91C`
+- Stereo-Swapchains: zweimal `1624x1736`, Format `DXGI_FORMAT_R8G8B8A8_UNORM_SRGB`
+
+Der x64-Host initialisiert Instance, HMD-System, den exakt von der Runtime
+verlangten D3D11-Adapter, Session, Local-Space und beide Swapchains erfolgreich.
+Ein Live-Lauf reichte 120 Stereo-Frames ein und durchlief anschließend
+`FOCUSED → VISIBLE → SYNCHRONIZED → STOPPING → IDLE → EXITING` ohne Fehler.

@@ -5,15 +5,16 @@ festen **Commit oder Tag** festgeschrieben (ANWEISUNG.md §4, §11) und hier
 dokumentiert. Es werden **keine** Retail-Dateien, proprietäre SDK-Quellen oder
 extrahierten Assets mitgeliefert.
 
-> Status: Gerüst. Pins werden eingetragen, sobald die jeweilige Abhängigkeit
-> tatsächlich integriert wird (M1 für OpenXR, M2 für MinHook usw.).
+> Die M1-OpenXR-Abhängigkeiten werden durch
+> `tools/prepare-dependencies.ps1` exakt geprüft. Der Build arbeitet nur mit
+> diesen lokalen Checkouts; das Spiel lädt keine Abhängigkeit aus dem Netz.
 
 ## Geplante / eingebundene Abhängigkeiten
 
 | Komponente | Verwendung | Bezug | Lizenz | Pin (Commit/Tag) |
 |---|---|---|---|---|
-| Khronos OpenXR-SDK | x64-Host: Header/Loader | https://github.com/KhronosGroup/OpenXR-SDK | Apache-2.0 | _TBD_ |
-| Khronos OpenXR-SDK-Source (`hello_xr` als Referenz) | Host-Lebenszyklus-Vorlage | https://github.com/KhronosGroup/OpenXR-SDK-Source | Apache-2.0 | _TBD_ |
+| Khronos OpenXR-SDK | x64-Host: Header/statischer Loader | https://github.com/KhronosGroup/OpenXR-SDK | Apache-2.0 | `release-1.1.59`, Commit `e5df31de6c15b4900aee3092273194e51282000d` |
+| Khronos OpenXR-SDK-Source (`hello_xr` als Referenz) | Host-Lebenszyklus-Vorlage, nicht mitgebaut | https://github.com/KhronosGroup/OpenXR-SDK-Source | Apache-2.0 | `release-1.1.59`, Commit `04e92820192a6eec490e5eb8ffbd8211bafb0551` |
 | MinHook | gezielte x86-Hooks | https://github.com/TsudaKageyu/minhook | BSD-2-Clause | _TBD_ |
 | DirectXMath | Mathe (Posen, Projektion) | Teil des Windows 10/11 SDK | MIT | via Windows SDK |
 

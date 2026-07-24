@@ -42,7 +42,35 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   Shared-Texture-Interop.
 - **Rückfallpfad:** Flat-Screen ohne Host bleibt jederzeit möglich.
 
-_Weitere Entscheidungen (AD-002 …) werden pro Meilenstein ergänzt._
+### AD-002 — Statischer OpenXR-Loader mit festem SDK-Pin
+
+- **Problem:** Der Host braucht reproduzierbare Header und einen Loader, darf
+  aber keine zufällige DLL neben dem Spiel bevorzugen.
+- **Messung/Beleg:** OpenXR-SDK `release-1.1.59` baut unter Windows einen
+  statischen Loader; die Runtime-Auswahl bleibt beim registrierten
+  `ActiveRuntime`-Manifest.
+- **Gewählte Lösung:** lokaler, gitignorierter Checkout auf Commit
+  `e5df31de6c15b4900aee3092273194e51282000d`, Prüfung über
+  `tools/prepare-dependencies.ps1`, Link gegen `OpenXR::openxr_loader`.
+- **Bekannter Nachteil:** Der Loader wird Bestandteil jedes Host-Builds.
+- **Rückfallpfad:** Ein dynamischer Loader kann später als separat gepinnte
+  Distributionsdatei gebaut werden.
+
+### AD-003 — Zwei Swapchains und OpenXR-1.0-Anwendungsniveau
+
+- **Problem:** M1 muss Links/Rechts eindeutig unterscheiden und auch mit
+  älteren, OpenXR-1.0-kompatiblen Runtimes funktionieren.
+- **Messung/Beleg:** SteamVR/OpenXR 2.16.7 lehnte eine 1.1-Anforderung mit
+  `XR_ERROR_API_VERSION_UNSUPPORTED` ab. Khronos `hello_xr` fordert ebenfalls
+  `XR_API_VERSION_1_0` an. Der Live-Test akzeptierte zwei Swapchains mit je
+  `1624x1736`.
+- **Gewählte Lösung:** OpenXR 1.0 anfordern, `XR_KHR_D3D11_enable` verwenden,
+  je Auge eine Swapchain erzeugen und links rot/rechts blau leeren.
+- **Bekannte Nachteile:** Zwei Swapchains verursachen mehr Objekte; M1 rendert
+  noch keine Spielbilder.
+- **Rückfallpfad:** Bei späterem Profiling kann auf eine Array-Swapchain
+  gewechselt werden, sofern die Links-/Rechts-Zuordnung gleichwertig testbar
+  bleibt.
 
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 

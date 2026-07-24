@@ -1,22 +1,121 @@
-// fearvr-host.exe — x64 OpenXR-Host (ANWEISUNG.md §5.1)
-//
-// M0-Stub: Nur Versionsausgabe und ein klarer Hinweis, dass der eigentliche
-// OpenXR-/D3D11-Lebenszyklus in M1 implementiert wird (nach hello_xr-Vorbild).
-// KEINE OpenXR-/D3D-Initialisierung hier, solange die Abhängigkeiten (M1) nicht
-// mit festem Pin eingebunden sind.
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <filesystem>
+#include <limits>
+#include <string>
 
-#include "protocol.h"
+#include <Windows.h>
+
 #include "fearvr-version.h"
+#include "openxr_host.h"
+#include "protocol.h"
+
+namespace {
+
+BOOL WINAPI ConsoleControlHandler(DWORD controlType) {
+    switch (controlType) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        fearvr::RequestOpenXrHostStop();
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+void PrintUsage() {
+    std::printf(
+        "Aufruf: fearvr-host [Optionen]\n"
+        "  --log-dir <Pfad>     Logverzeichnis (Standard: .\\logs)\n"
+        "  --max-frames <N>     Nach N eingereichten XR-Frames sauber beenden\n"
+        "  --validate-only      Instance/System/D3D11/Session/Swapchains pruefen\n"
+        "  --d3d-debug          D3D11-Debug-Layer anfordern (falls installiert)\n"
+        "  --help               Diese Hilfe anzeigen\n");
+}
+
+bool ParseUnsigned(const char* text, std::uint64_t& value) {
+    if (text == nullptr || text[0] == '\0' || text[0] == '-') {
+        return false;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') {
+        return false;
+    }
+    if (parsed > (std::numeric_limits<std::uint64_t>::max)()) {
+        return false;
+    }
+    value = static_cast<std::uint64_t>(parsed);
+    return true;
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
-    std::printf("fearvr-host %s (%s)\n", FEARVR_VERSION_STRING, FEARVR_GIT_HASH);
+    std::printf("fearvr-host %s (%s)\n", FEARVR_VERSION_STRING,
+                FEARVR_GIT_HASH);
     std::printf("Protokoll: magic=0x%08X version=%u header=%zu bytes\n",
-                (unsigned)FEARVR_PROTOCOL_MAGIC,
-                (unsigned)FEARVR_PROTOCOL_VERSION,
+                static_cast<unsigned>(FEARVR_PROTOCOL_MAGIC),
+                static_cast<unsigned>(FEARVR_PROTOCOL_VERSION),
                 sizeof(FearVrSharedHeader));
-    std::printf("M0-Stub: OpenXR-/D3D11-Lebenszyklus folgt in M1.\n");
-    return 0;
+
+    fearvr::OpenXrHostOptions options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument = argv[index];
+        if (argument == "--help" || argument == "-h") {
+            PrintUsage();
+            return 0;
+        }
+        if (argument == "--validate-only") {
+            options.validateOnly = true;
+            continue;
+        }
+        if (argument == "--d3d-debug") {
+            options.enableD3dDebug = true;
+            continue;
+        }
+        if (argument == "--log-dir") {
+            if (++index >= argc) {
+                std::fprintf(stderr, "--log-dir benoetigt einen Pfad.\n");
+                return 2;
+            }
+            options.logDirectory = std::filesystem::u8path(argv[index]);
+            continue;
+        }
+        if (argument == "--max-frames") {
+            if (++index >= argc ||
+                !ParseUnsigned(argv[index], options.maxFrames) ||
+                options.maxFrames == 0) {
+                std::fprintf(stderr,
+                             "--max-frames benoetigt eine positive Ganzzahl.\n");
+                return 2;
+            }
+            continue;
+        }
+
+        std::fprintf(stderr, "Unbekannte Option: %s\n", argument.c_str());
+        PrintUsage();
+        return 2;
+    }
+
+    if (!SetConsoleCtrlHandler(ConsoleControlHandler, TRUE)) {
+        std::fprintf(stderr,
+                     "Warnung: Console-Control-Handler konnte nicht gesetzt "
+                     "werden (Win32=%lu).\n",
+                     GetLastError());
+    }
+
+    try {
+        return fearvr::RunOpenXrHost(options);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "Unbehandelter Hostfehler: %s\n", error.what());
+        return 1;
+    }
 }

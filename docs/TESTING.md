@@ -6,14 +6,14 @@ Grundlage: ANWEISUNG.md §14 (Tests) und die Gates aus §13.
 
 Als CMake/CTest-Ziele unter `tests/` (baubar ohne Headset):
 
-- [ ] Protokollgrößen und -Offsets in **x86 und x64** (`static_assert` +
+- [x] Protokollgrößen und -Offsets in **x86 und x64** (`static_assert` +
       Laufzeit-Roundtrip)
 - [ ] Ablehnung ungültiger Magic / Version / Größe
 - [ ] Quaternion-Normalisierung und Achsenabbildung
 - [ ] Pose relativ zum Recenter-Ursprung
 - [ ] FOV-Winkel → Projektionsmatrizen
 - [ ] Ringpuffer-Generationen und Timeout-Pfade
-- [ ] OpenXR-State-Machine als testbare Logik **ohne** Headset
+- [x] OpenXR-State-Machine als testbare Logik **ohne** Headset
 - [ ] EXE-Hashprüfung
 - [ ] Stage-Pfad bleibt unter der Projektwurzel
 - [ ] Retail-Hash vor/nach Vorbereitung und Live-Test
@@ -77,3 +77,24 @@ ctest --test-dir build/x86 -C RelWithDebInfo --output-on-failure
 # Umgebungs-/Retail-Integritätsprüfung (jederzeit, read-only)
 pwsh -File tools/verify-install.ps1
 ```
+
+## 6. M1-Live-Test vom 2026-07-24
+
+Bestanden:
+
+- fehlende Runtime künstlich über `XR_RUNTIME_JSON` geprüft: klare Diagnose
+  und Exitcode `10`;
+- `--validate-only`: SteamVR/OpenXR 2.16.7, Quest 3, exakte Adapter-LUID und
+  zwei `1624x1736`-Swapchains erfolgreich;
+- `--max-frames 120`: 120 echte Stereo-Frames, links rot/rechts blau, danach
+  sauberer STOPPING-/EXITING-Lebenszyklus;
+- x64 und x86 mit `/W4 /WX`; je zwei CTest-Tests bestanden.
+
+Noch manuell offen:
+
+- die visuelle Zuordnung „linkes Auge rot / rechtes Auge blau“ im Headset
+  ausdrücklich bestätigen;
+- Headset während eines längeren Hostlaufs gezielt in Standby versetzen und
+  wieder aufwecken;
+- einen echten Runtime-/Session-Verlust provozieren und die automatische
+  Session-Neuerstellung zusätzlich zum Unit-Test live bestätigen.

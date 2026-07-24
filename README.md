@@ -3,9 +3,10 @@
 Quelloffener, lokal baubarer VR-Mod für die **Singleplayer-Basisversion von
 F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
-> **Status:** M0 — Arbeitsumgebung / Projektgerüst. Noch kein spielbarer
-> VR-Stand. Siehe `docs/` und `ANWEISUNG.md` für den vollständigen Auftrag,
-> die Meilensteine (M0–M6) und die harten Gates.
+> **Status:** M1 — eigenständiger x64-OpenXR-/D3D11-Host sendet getestete
+> Stereo-Testbilder an SteamVR. F.E.A.R. ist noch nicht angebunden und daher
+> noch kein spielbarer VR-Stand. Siehe `docs/` und `ANWEISUNG.md` für den
+> vollständigen Auftrag und die Meilensteine.
 
 ## Grundprinzipien
 
@@ -69,16 +70,25 @@ pwsh -File tools/verify-install.ps1
 Prüft Retail-Pfad, `FEAR.exe`-Hash/-Version, OpenXR-Runtime, Registry und
 vorhandene Build-Tools und meldet fehlende Komponenten — ohne etwas zu ändern.
 
-## Build (sobald die Toolchain vorhanden ist)
+## Build
 
 x86 (Proxy) und x64 (Host) werden **getrennt** gebaut:
 
 ```powershell
+pwsh -File tools\prepare-dependencies.ps1
+
 cmake -S . -B build\x86 -A Win32 -DFEARVR_BUILD_PROXY=ON -DFEARVR_BUILD_HOST=OFF
 cmake --build build\x86 --config RelWithDebInfo
 
 cmake -S . -B build\x64 -A x64 -DFEARVR_BUILD_PROXY=OFF -DFEARVR_BUILD_HOST=ON
 cmake --build build\x64 --config RelWithDebInfo
+```
+
+M1-Host gegen die aktive OpenXR-Runtime prüfen:
+
+```powershell
+build\x64\src\host64\RelWithDebInfo\fearvr-host.exe --validate-only
+build\x64\src\host64\RelWithDebInfo\fearvr-host.exe --max-frames 120
 ```
 
 ## Lizenz

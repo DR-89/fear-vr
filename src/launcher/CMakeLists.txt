@@ -10,3 +10,9 @@ target_link_libraries(fearvr-launcher PRIVATE
   fearvr-warnings
 )
 set_target_properties(fearvr-launcher PROPERTIES OUTPUT_NAME "fearvr-launcher")
+
+# PowerShell x64 kann die Modulliste eines alten x86-Prozesses je nach
+# Windows-Build mit ERROR_PARTIAL_COPY nicht zuverlässig lesen. Dieser kleine
+# gleichbittige Probe wird vom sicheren M2-Startskript verwendet.
+add_executable(fearvr-module-probe module_probe.cpp)
+target_link_libraries(fearvr-module-probe PRIVATE fearvr-warnings)

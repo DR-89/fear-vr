@@ -94,7 +94,7 @@ Commit/Tag** eingebunden und in `THIRD_PARTY_NOTICES.md` dokumentiert:
 | Abhängigkeit | Zweck | Pin |
 |---|---|---|
 | Khronos OpenXR-SDK / statischer Loader | x64-Host | `release-1.1.59` / `e5df31de6c15b4900aee3092273194e51282000d` |
-| MinHook | gezielte x86-Hooks (falls COM-Wrapper nicht reicht) | TBD |
+| MinHook | x86-Late-Hooks für ein bereits erzeugtes D3D9-Gerät | `v1.3.4` / `c3fcafdc10146beb5919319d0683e44e3c30d537` |
 | DirectXMath | Mathe (aus Windows SDK) | via Windows SDK |
 
 ### Optionale Entwicklungswerkzeuge (§4)

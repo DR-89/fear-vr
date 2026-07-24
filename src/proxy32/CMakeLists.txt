@@ -1,26 +1,46 @@
 # x86 d3d9.dll Proxy/Bridge — ANWEISUNG.md §5.2
 #
-# Erzeugt eine DLL mit dem Ausgabenamen "d3d9.dll", die NUR in der isolierten
-# Stage neben einer kopierten FEAR.exe liegt — NIEMALS in der Retail-Installation.
-# M0: Gerüst. Weiterleitung aller D3D9-Exports + Reset/Present-Hooks folgen in M2.
+# Baut die Bridge unter dem eindeutigen Namen fearvr-d3d9.dll. Der synthetische
+# Test kopiert sie ausschließlich in sein eigenes Ausgabeverzeichnis als
+# d3d9.dll. Die echte FEAR-Stage lädt den eindeutigen Namen über den
+# ABI-neutralen archcfg-Loader. NIEMALS in die Retail-Installation kopieren.
+set(FEARVR_MINHOOK_ROOT
+  "${CMAKE_SOURCE_DIR}/vendor-local/minhook"
+  CACHE PATH "Local pinned checkout of MinHook")
+if(NOT EXISTS "${FEARVR_MINHOOK_ROOT}/CMakeLists.txt")
+  message(FATAL_ERROR
+    "MinHook missing at ${FEARVR_MINHOOK_ROOT}. "
+    "Run tools/prepare-dependencies.ps1 first.")
+endif()
+add_subdirectory(
+  "${FEARVR_MINHOOK_ROOT}"
+  "${CMAKE_BINARY_DIR}/third_party/minhook"
+  EXCLUDE_FROM_ALL
+)
+
 add_library(fearvr-proxy SHARED
+  bridge.cpp
+  bridge.h
+  d3d9.def
   dllmain.cpp
+  iat_hook.cpp
+  iat_hook.h
+  proxy_exports.cpp
+  system_d3d9.cpp
+  system_d3d9.h
 )
 target_link_libraries(fearvr-proxy PRIVATE
   fearvr-common
   fearvr-version
   fearvr-warnings
+  minhook
+  dxgi
+  shell32
 )
 
-# Ausgabename exakt d3d9.dll (der Loader von FEAR.exe sucht nach diesem Namen).
+# Eindeutiger Modulname für die offizielle archcfg-Stage. Der isolierte
+# D3D9-Test kopiert dieselbe Binärdatei gezielt als d3d9.dll neben seine EXE.
 set_target_properties(fearvr-proxy PROPERTIES
-  OUTPUT_NAME "d3d9"
+  OUTPUT_NAME "fearvr-d3d9"
   PREFIX ""
 )
-
-# In M2 hinzuzufügen:
-#   - Vollständige Export-Weiterleitung an %SystemRoot%\SysWOW64\d3d9.dll
-#     (absolut aufgelöster Systempfad), z. B. via .def-Datei mit Forwardern.
-#   - Hooks: Direct3DCreate9, IDirect3D9::CreateDevice,
-#            IDirect3DDevice9::Reset, Present.
-#   - MinHook nur, falls COM-Wrapper nicht ausreicht (fester Pin).

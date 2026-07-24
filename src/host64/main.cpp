@@ -34,6 +34,8 @@ void PrintUsage() {
         "Aufruf: fearvr-host [Optionen]\n"
         "  --log-dir <Pfad>     Logverzeichnis (Standard: .\\logs)\n"
         "  --max-frames <N>     Nach N eingereichten XR-Frames sauber beenden\n"
+        "  --ipc-session <ID>   M2-IPC-ID (dezimal oder 0x-hexadezimal)\n"
+        "  --exit-on-game-disconnect  Nach Game-Heartbeat-Timeout beenden\n"
         "  --validate-only      Instance/System/D3D11/Session/Swapchains pruefen\n"
         "  --d3d-debug          D3D11-Debug-Layer anfordern (falls installiert)\n"
         "  --help               Diese Hilfe anzeigen\n");
@@ -50,6 +52,20 @@ bool ParseUnsigned(const char* text, std::uint64_t& value) {
         return false;
     }
     if (parsed > (std::numeric_limits<std::uint64_t>::max)()) {
+        return false;
+    }
+    value = static_cast<std::uint64_t>(parsed);
+    return true;
+}
+
+bool ParseSessionId(const char* text, std::uint64_t& value) {
+    if (text == nullptr || text[0] == '\0' || text[0] == '-') {
+        return false;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0' || parsed == 0) {
         return false;
     }
     value = static_cast<std::uint64_t>(parsed);
@@ -81,6 +97,10 @@ int main(int argc, char** argv) {
             options.enableD3dDebug = true;
             continue;
         }
+        if (argument == "--exit-on-game-disconnect") {
+            options.exitOnGameDisconnect = true;
+            continue;
+        }
         if (argument == "--log-dir") {
             if (++index >= argc) {
                 std::fprintf(stderr, "--log-dir benoetigt einen Pfad.\n");
@@ -95,6 +115,16 @@ int main(int argc, char** argv) {
                 options.maxFrames == 0) {
                 std::fprintf(stderr,
                              "--max-frames benoetigt eine positive Ganzzahl.\n");
+                return 2;
+            }
+            continue;
+        }
+        if (argument == "--ipc-session") {
+            if (++index >= argc ||
+                !ParseSessionId(argv[index], options.ipcSessionId)) {
+                std::fprintf(
+                    stderr,
+                    "--ipc-session benoetigt eine von Null verschiedene ID.\n");
                 return 2;
             }
             continue;

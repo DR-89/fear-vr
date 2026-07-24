@@ -1,0 +1,1529 @@
+#include "bridge.h"
+
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <mutex>
+#include <sstream>
+#include <string>
+
+#include <Shellapi.h>
+#include <dxgi1_2.h>
+#include <MinHook.h>
+#include <wrl/client.h>
+
+#include "fearvr-version.h"
+#include "ipc_names.h"
+#include "protocol_utils.h"
+#include "system_d3d9.h"
+
+namespace fearvr {
+namespace {
+
+using Microsoft::WRL::ComPtr;
+
+std::string JsonEscape(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (const char character : value) {
+        switch (character) {
+        case '\\':
+            escaped += "\\\\";
+            break;
+        case '"':
+            escaped += "\\\"";
+            break;
+        case '\n':
+            escaped += "\\n";
+            break;
+        case '\r':
+            escaped += "\\r";
+            break;
+        case '\t':
+            escaped += "\\t";
+            break;
+        default:
+            escaped += character;
+            break;
+        }
+    }
+    return escaped;
+}
+
+std::string UtcTimestamp(bool fileSafe) {
+    SYSTEMTIME time{};
+    GetSystemTime(&time);
+    std::ostringstream output;
+    output << std::setfill('0') << std::setw(4) << time.wYear;
+    if (fileSafe) {
+        output << std::setw(2) << time.wMonth << std::setw(2) << time.wDay
+               << '-' << std::setw(2) << time.wHour << std::setw(2)
+               << time.wMinute << std::setw(2) << time.wSecond << '-'
+               << GetCurrentProcessId();
+    } else {
+        output << '-' << std::setw(2) << time.wMonth << '-' << std::setw(2)
+               << time.wDay << 'T' << std::setw(2) << time.wHour << ':'
+               << std::setw(2) << time.wMinute << ':' << std::setw(2)
+               << time.wSecond << '.' << std::setw(3) << time.wMilliseconds
+               << 'Z';
+    }
+    return output.str();
+}
+
+class Logger {
+public:
+    void Open(const std::filesystem::path& directory) noexcept {
+        try {
+            std::error_code error;
+            std::filesystem::create_directories(directory, error);
+            if (error) {
+                return;
+            }
+            path_ = directory /
+                    ("proxy-" + UtcTimestamp(true) + ".log");
+            stream_.open(path_, std::ios::out | std::ios::trunc);
+        } catch (...) {
+        }
+    }
+
+    void Write(const char* level, const char* event,
+               const std::string& message) noexcept {
+        try {
+            if (!stream_.is_open()) {
+                return;
+            }
+            stream_ << "{\"time\":\"" << UtcTimestamp(false)
+                    << "\",\"level\":\"" << JsonEscape(level)
+                    << "\",\"event\":\"" << JsonEscape(event)
+                    << "\",\"message\":\"" << JsonEscape(message)
+                    << "\"}\n";
+            stream_.flush();
+        } catch (...) {
+        }
+    }
+
+private:
+    std::filesystem::path path_;
+    std::ofstream stream_;
+};
+
+struct CommandLineConfig {
+    std::uint64_t sessionId{0};
+    std::filesystem::path logDirectory;
+};
+
+CommandLineConfig ReadConfig() noexcept {
+    CommandLineConfig config;
+    int argumentCount = 0;
+    wchar_t** arguments =
+        CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+    if (arguments == nullptr) {
+        return config;
+    }
+    for (int index = 1; index < argumentCount; ++index) {
+        if (_wcsicmp(arguments[index], L"-fearvr-session") == 0 &&
+            index + 1 < argumentCount) {
+            wchar_t* end = nullptr;
+            const unsigned long long parsed =
+                _wcstoui64(arguments[++index], &end, 0);
+            if (end != arguments[index] && *end == L'\0' && parsed != 0) {
+                config.sessionId = static_cast<std::uint64_t>(parsed);
+            }
+        } else if (_wcsicmp(arguments[index], L"-fearvr-logdir") == 0 &&
+                   index + 1 < argumentCount) {
+            config.logDirectory = arguments[++index];
+        }
+    }
+    LocalFree(arguments);
+    return config;
+}
+
+volatile LONG* AtomicState(FearVrSlot& slot) noexcept {
+    return reinterpret_cast<volatile LONG*>(&slot.state);
+}
+
+volatile LONG* AtomicFlags(FearVrSharedHeader& header) noexcept {
+    return reinterpret_cast<volatile LONG*>(&header.bridgeFlags);
+}
+
+volatile LONG64* Atomic64(std::uint64_t& value) noexcept {
+    return reinterpret_cast<volatile LONG64*>(&value);
+}
+
+std::uint64_t ReadAtomic64(std::uint64_t& value) noexcept {
+    return static_cast<std::uint64_t>(
+        InterlockedCompareExchange64(Atomic64(value), 0, 0));
+}
+
+struct SlotResource {
+    ComPtr<IDirect3DTexture9> texture;
+    ComPtr<IDirect3DSurface9> surface;
+    ComPtr<IDirect3DQuery9> completion;
+    HANDLE sharedHandle{nullptr};
+};
+
+enum class TransferMode {
+    None,
+    DirectShared,
+    CpuViaD3D9Ex
+};
+
+class Bridge {
+public:
+    Bridge() : config_(ReadConfig()) {
+        if (config_.sessionId != 0) {
+            if (config_.logDirectory.empty()) {
+                wchar_t temporary[MAX_PATH]{};
+                if (GetTempPathW(MAX_PATH, temporary) != 0) {
+                    config_.logDirectory =
+                        std::filesystem::path(temporary) / "FearVr";
+                }
+            }
+            logger_.Open(config_.logDirectory);
+            std::ostringstream message;
+            message << "version=" << FEARVR_VERSION_STRING
+                    << " git=" << FEARVR_GIT_HASH
+                    << " pid=" << GetCurrentProcessId()
+                    << " session=0x" << std::hex << std::uppercase
+                    << config_.sessionId;
+            logger_.Write("INFO", "proxy_start", message.str());
+        }
+    }
+
+    ~Bridge() {
+        ReleaseResources();
+        if (shared_ != nullptr) {
+            UnmapViewOfFile(shared_);
+        }
+        if (mapping_ != nullptr) {
+            CloseHandle(mapping_);
+        }
+        if (frameReadyEvent_ != nullptr) {
+            CloseHandle(frameReadyEvent_);
+        }
+        if (slotConsumedEvent_ != nullptr) {
+            CloseHandle(slotConsumedEvent_);
+        }
+    }
+
+    void LogHookStatus(const char* level, const char* event,
+                       const std::string& message) noexcept {
+        logger_.Write(level, event, message);
+    }
+
+    void CapturePresent(IDirect3DDevice9* device) noexcept {
+        if (device == nullptr || config_.sessionId == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!EnsureIpc()) {
+            return;
+        }
+
+        InterlockedIncrement64(Atomic64(shared_->gameHeartbeat));
+        PollPending();
+        UpdateHostConnection();
+        EnsureDeviceMetadata(device);
+        UpdateAdapterMatch();
+
+        if (!hostConnected_ ||
+            (shared_->bridgeFlags & FEARVR_BF_ADAPTER_MATCH) == 0) {
+            return;
+        }
+
+        ComPtr<IDirect3DSurface9> backBuffer;
+        HRESULT result = device->GetBackBuffer(
+            0, 0, D3DBACKBUFFER_TYPE_MONO,
+            backBuffer.ReleaseAndGetAddressOf());
+        if (FAILED(result)) {
+            if (result == D3DERR_DEVICELOST) {
+                InterlockedOr(AtomicFlags(*shared_), FEARVR_BF_DEVICE_LOST);
+            }
+            LogHresult("get_backbuffer_failed", result);
+            return;
+        }
+
+        D3DSURFACE_DESC description{};
+        result = backBuffer->GetDesc(&description);
+        if (FAILED(result)) {
+            LogHresult("get_backbuffer_desc_failed", result);
+            return;
+        }
+        if (!EnsureResources(device, description.Width, description.Height)) {
+            return;
+        }
+        if (pending_.active) {
+            return;
+        }
+
+        std::uint32_t slotIndex = 0;
+        if (!ClaimWritablePair(slotIndex)) {
+            ++droppedFrames_;
+            if (droppedFrames_ == 1 || droppedFrames_ % 30000 == 0) {
+                logger_.Write(
+                    "WARN", "ring_full",
+                    "dropped=" + std::to_string(droppedFrames_));
+            }
+            return;
+        }
+
+        const std::uint64_t frameId = ++frameId_;
+        const std::uint64_t generation = ++generation_;
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            FearVrSlot& slot = shared_->slot[eye][slotIndex];
+            slot.frameId = frameId;
+            slot.generation = generation;
+        }
+
+        bool copied = transferMode_ == TransferMode::CpuViaD3D9Ex
+            ? CopyFrameViaCpu(device, backBuffer.Get(), slotIndex)
+            : CopyFrameDirect(device, backBuffer.Get(), slotIndex);
+
+        if (!copied) {
+            ReleaseClaimedPair(slotIndex);
+            return;
+        }
+
+        pending_.active = true;
+        pending_.slotIndex = slotIndex;
+        pending_.frameId = frameId;
+        pending_.generation = generation;
+
+        const ULONGLONG deadline = GetTickCount64() + 3;
+        do {
+            if (PollPending()) {
+                break;
+            }
+            SwitchToThread();
+        } while (GetTickCount64() < deadline);
+    }
+
+    void BeforeReset() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        logger_.Write("INFO", "device_reset_begin",
+                      "D3DPOOL_DEFAULT bridge resources released.");
+        ReleaseResources();
+        if (shared_ != nullptr) {
+            InterlockedOr(AtomicFlags(*shared_), FEARVR_BF_DEVICE_LOST);
+        }
+        device_ = nullptr;
+        deviceMetadataReady_ = false;
+    }
+
+    void AfterReset(HRESULT result) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shared_ == nullptr) {
+            return;
+        }
+        if (SUCCEEDED(result)) {
+            InterlockedAnd(
+                AtomicFlags(*shared_),
+                static_cast<LONG>(~FEARVR_BF_DEVICE_LOST));
+            logger_.Write("INFO", "device_reset_complete",
+                          "Reset successful; resources will be recreated.");
+        } else {
+            LogHresult("device_reset_failed", result);
+        }
+    }
+
+    BOOL IsConnected() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!EnsureIpc()) {
+            return FALSE;
+        }
+        UpdateHostConnection();
+        return hostConnected_ ? TRUE : FALSE;
+    }
+
+    BOOL ReadRenderRequest(FearVrRenderRequest* output) noexcept {
+        if (output == nullptr) {
+            return FALSE;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!EnsureIpc()) {
+            return FALSE;
+        }
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            const std::uint64_t before =
+                ReadAtomic64(shared_->requestSequence);
+            if ((before & 1ULL) != 0 || before == 0) {
+                continue;
+            }
+            FearVrRenderRequest snapshot = shared_->request;
+            MemoryBarrier();
+            const std::uint64_t after =
+                ReadAtomic64(shared_->requestSequence);
+            if (before == after && (after & 1ULL) == 0 &&
+                (snapshot.flags & FEARVR_RF_VALID) != 0) {
+                *output = snapshot;
+                return TRUE;
+            }
+        }
+        return FALSE;
+    }
+
+private:
+    struct PendingFrame {
+        bool active{false};
+        std::uint32_t slotIndex{0};
+        std::uint64_t frameId{0};
+        std::uint64_t generation{0};
+    };
+
+    bool EnsureIpc() noexcept {
+        if (shared_ != nullptr) {
+            return true;
+        }
+
+        const std::wstring mappingName =
+            MakeIpcObjectName(config_.sessionId, L"Mapping");
+        mapping_ = CreateFileMappingW(
+            INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+            static_cast<DWORD>(sizeof(FearVrSharedHeader)),
+            mappingName.c_str());
+        if (mapping_ == nullptr) {
+            LogWin32("mapping_create_failed", GetLastError());
+            return false;
+        }
+        const bool existed = GetLastError() == ERROR_ALREADY_EXISTS;
+        shared_ = static_cast<FearVrSharedHeader*>(
+            MapViewOfFile(mapping_, FILE_MAP_ALL_ACCESS, 0, 0,
+                          sizeof(FearVrSharedHeader)));
+        if (shared_ == nullptr) {
+            LogWin32("mapping_view_failed", GetLastError());
+            CloseHandle(mapping_);
+            mapping_ = nullptr;
+            return false;
+        }
+        if (existed) {
+            if (!IsProtocolHeaderValid(*shared_)) {
+                logger_.Write("ERROR", "protocol_mismatch",
+                              "Existing mapping has incompatible header.");
+                InterlockedOr(AtomicFlags(*shared_),
+                              FEARVR_BF_PROTOCOL_ERROR);
+                return false;
+            }
+        } else {
+            InitializeProtocolHeader(*shared_);
+        }
+
+        const std::wstring frameReadyName =
+            MakeIpcObjectName(config_.sessionId, L"FrameReady");
+        const std::wstring consumedName =
+            MakeIpcObjectName(config_.sessionId, L"SlotConsumed");
+        frameReadyEvent_ =
+            CreateEventW(nullptr, FALSE, FALSE, frameReadyName.c_str());
+        slotConsumedEvent_ =
+            CreateEventW(nullptr, FALSE, FALSE, consumedName.c_str());
+        if (frameReadyEvent_ == nullptr || slotConsumedEvent_ == nullptr) {
+            LogWin32("event_create_failed", GetLastError());
+            return false;
+        }
+
+        shared_->gameProcessId = GetCurrentProcessId();
+        InterlockedOr(AtomicFlags(*shared_), FEARVR_BF_GAME_READY);
+        logger_.Write("INFO", "ipc_created",
+                      "Named mapping and bounded ring ready.");
+        return true;
+    }
+
+    void EnsureDeviceMetadata(IDirect3DDevice9* device) noexcept {
+        if (deviceMetadataReady_ && device_ == device) {
+            return;
+        }
+        if (device_ != device) {
+            ReleaseResources();
+            device_ = device;
+        }
+
+        D3DDEVICE_CREATION_PARAMETERS creation{};
+        if (FAILED(device->GetCreationParameters(&creation))) {
+            return;
+        }
+        ComPtr<IDirect3D9> direct3D;
+        if (FAILED(device->GetDirect3D(
+                direct3D.ReleaseAndGetAddressOf()))) {
+            return;
+        }
+        bool found = false;
+        ComPtr<IDirect3D9Ex> direct3DEx;
+        if (SUCCEEDED(direct3D.As(&direct3DEx))) {
+            LUID adapterLuid{};
+            if (SUCCEEDED(direct3DEx->GetAdapterLUID(
+                    creation.AdapterOrdinal, &adapterLuid))) {
+                gameAdapterLuid_ = PackLuid(
+                    static_cast<std::uint32_t>(adapterLuid.HighPart),
+                    adapterLuid.LowPart);
+                found = true;
+            }
+        }
+
+        // Auf Hybrid-GPUs kann der D3D9-Renderadapter keine eigene Ausgabe
+        // besitzen. Geräte-IDs sind dort zuverlässiger als der Monitor.
+        if (!found) {
+            D3DADAPTER_IDENTIFIER9 d3d9Identifier{};
+            if (SUCCEEDED(direct3D->GetAdapterIdentifier(
+                    creation.AdapterOrdinal, 0, &d3d9Identifier))) {
+                ComPtr<IDXGIFactory1> factory;
+                if (SUCCEEDED(CreateDXGIFactory1(
+                        IID_PPV_ARGS(
+                            factory.ReleaseAndGetAddressOf())))) {
+                    for (UINT adapterIndex = 0;; ++adapterIndex) {
+                        ComPtr<IDXGIAdapter1> adapter;
+                        if (factory->EnumAdapters1(
+                                adapterIndex,
+                                adapter.ReleaseAndGetAddressOf()) ==
+                            DXGI_ERROR_NOT_FOUND) {
+                            break;
+                        }
+                        DXGI_ADAPTER_DESC1 description{};
+                        if (SUCCEEDED(adapter->GetDesc1(&description)) &&
+                            description.VendorId ==
+                                d3d9Identifier.VendorId &&
+                            description.DeviceId ==
+                                d3d9Identifier.DeviceId &&
+                            description.SubSysId ==
+                                d3d9Identifier.SubSysId &&
+                            description.Revision ==
+                                d3d9Identifier.Revision) {
+                            gameAdapterLuid_ = PackLuid(
+                                static_cast<std::uint32_t>(
+                                    description.AdapterLuid.HighPart),
+                                description.AdapterLuid.LowPart);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Klassische IDirect3D9-Objekte besitzen keine LUID-Abfrage.
+        // Dort bleibt die Monitor-zu-DXGI-Zuordnung der sichere Fallback.
+        if (!found) {
+            const HMONITOR monitor =
+                direct3D->GetAdapterMonitor(creation.AdapterOrdinal);
+            ComPtr<IDXGIFactory1> factory;
+            if (FAILED(CreateDXGIFactory1(
+                    IID_PPV_ARGS(factory.ReleaseAndGetAddressOf())))) {
+                logger_.Write("ERROR", "adapter_luid_failed",
+                              "CreateDXGIFactory1 failed.");
+                return;
+            }
+
+            for (UINT adapterIndex = 0; !found; ++adapterIndex) {
+                ComPtr<IDXGIAdapter1> adapter;
+                if (factory->EnumAdapters1(
+                        adapterIndex,
+                        adapter.ReleaseAndGetAddressOf()) ==
+                    DXGI_ERROR_NOT_FOUND) {
+                    break;
+                }
+                for (UINT outputIndex = 0;; ++outputIndex) {
+                    ComPtr<IDXGIOutput> output;
+                    const HRESULT enumResult = adapter->EnumOutputs(
+                        outputIndex, output.ReleaseAndGetAddressOf());
+                    if (enumResult == DXGI_ERROR_NOT_FOUND) {
+                        break;
+                    }
+                    if (FAILED(enumResult)) {
+                        continue;
+                    }
+                    DXGI_OUTPUT_DESC outputDescription{};
+                    if (SUCCEEDED(output->GetDesc(&outputDescription)) &&
+                        outputDescription.Monitor == monitor) {
+                        DXGI_ADAPTER_DESC1 adapterDescription{};
+                        if (SUCCEEDED(adapter->GetDesc1(
+                                &adapterDescription))) {
+                            gameAdapterLuid_ = PackLuid(
+                                static_cast<std::uint32_t>(
+                                    adapterDescription.AdapterLuid.HighPart),
+                                adapterDescription.AdapterLuid.LowPart);
+                            found = true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            logger_.Write("ERROR", "adapter_luid_failed",
+                          "No DXGI adapter matched the D3D9 monitor.");
+            return;
+        }
+
+        shared_->gameAdapterLuid = gameAdapterLuid_;
+        deviceMetadataReady_ = true;
+        std::ostringstream message;
+        message << "luid=0x" << std::hex << std::uppercase
+                << LuidHigh(gameAdapterLuid_) << ':'
+                << LuidLow(gameAdapterLuid_);
+        logger_.Write("INFO", "d3d9_adapter", message.str());
+    }
+
+    void UpdateAdapterMatch() noexcept {
+        if (!deviceMetadataReady_ || shared_->hostAdapterLuid == 0) {
+            return;
+        }
+        if (shared_->hostAdapterLuid == gameAdapterLuid_) {
+            InterlockedOr(AtomicFlags(*shared_), FEARVR_BF_ADAPTER_MATCH);
+            if (!adapterMatchLogged_) {
+                logger_.Write("INFO", "adapter_match",
+                              "D3D9 and OpenXR adapter LUIDs match.");
+                adapterMatchLogged_ = true;
+            }
+        } else {
+            InterlockedAnd(
+                AtomicFlags(*shared_),
+                static_cast<LONG>(~FEARVR_BF_ADAPTER_MATCH));
+            if (!adapterMismatchLogged_) {
+                std::ostringstream message;
+                message << "game=0x" << std::hex << std::uppercase
+                        << gameAdapterLuid_ << " host=0x"
+                        << shared_->hostAdapterLuid;
+                logger_.Write("ERROR", "adapter_mismatch", message.str());
+                adapterMismatchLogged_ = true;
+            }
+        }
+    }
+
+    void UpdateHostConnection() noexcept {
+        const std::uint64_t heartbeat =
+            ReadAtomic64(shared_->hostHeartbeat);
+        const ULONGLONG now = GetTickCount64();
+        if (heartbeat != lastHostHeartbeat_) {
+            lastHostHeartbeat_ = heartbeat;
+            lastHostHeartbeatTick_ = now;
+        }
+        const bool connected =
+            heartbeat != 0 &&
+            (shared_->bridgeFlags & FEARVR_BF_HOST_READY) != 0 &&
+            now - lastHostHeartbeatTick_ <= 2000;
+        if (connected != hostConnected_) {
+            hostConnected_ = connected;
+            logger_.Write(connected ? "INFO" : "WARN",
+                          connected ? "host_connected"
+                                    : "host_disconnected",
+                          connected
+                              ? "Host heartbeat active."
+                              : "Host heartbeat timed out; flat screen continues.");
+            if (!connected) {
+                RecoverSlotsAfterHostLoss();
+            }
+        }
+    }
+
+    void RecoverSlotsAfterHostLoss() noexcept {
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            for (std::uint32_t slotIndex = 0;
+                 slotIndex < FEARVR_SLOTS_PER_EYE; ++slotIndex) {
+                FearVrSlot& slot = shared_->slot[eye][slotIndex];
+                if (slot.state == FEARVR_SLOT_READY ||
+                    slot.state == FEARVR_SLOT_CONSUMING) {
+                    InterlockedExchange(AtomicState(slot),
+                                        FEARVR_SLOT_EMPTY);
+                }
+            }
+        }
+    }
+
+    bool CreateSharedSlots(IDirect3DDevice9* resourceDevice, UINT width,
+                           UINT height) noexcept {
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            for (std::uint32_t slotIndex = 0;
+                 slotIndex < FEARVR_SLOTS_PER_EYE; ++slotIndex) {
+                SlotResource& resource = resources_[eye][slotIndex];
+                HANDLE sharedHandle = nullptr;
+                HRESULT result = resourceDevice->CreateTexture(
+                    width, height, 1, D3DUSAGE_RENDERTARGET,
+                    D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                    resource.texture.ReleaseAndGetAddressOf(),
+                    &sharedHandle);
+                if (FAILED(result) || sharedHandle == nullptr) {
+                    LogHresult("shared_texture_create_failed", result);
+                    return false;
+                }
+                resource.sharedHandle = sharedHandle;
+                result = resource.texture->GetSurfaceLevel(
+                    0, resource.surface.ReleaseAndGetAddressOf());
+                if (FAILED(result)) {
+                    LogHresult("shared_surface_failed", result);
+                    return false;
+                }
+                result = resourceDevice->CreateQuery(
+                    D3DQUERYTYPE_EVENT,
+                    resource.completion.ReleaseAndGetAddressOf());
+                if (FAILED(result) || !resource.completion) {
+                    LogHresult("d3d9_query_create_failed", result);
+                    return false;
+                }
+
+                FearVrSlot& slot = shared_->slot[eye][slotIndex];
+                slot.sharedHandle = static_cast<std::uint64_t>(
+                    reinterpret_cast<std::uintptr_t>(sharedHandle));
+                slot.frameId = 0;
+                slot.width = width;
+                slot.height = height;
+                slot.format = FEARVR_FMT_B8G8R8A8;
+                slot.generation = 0;
+                InterlockedExchange(AtomicState(slot),
+                                    FEARVR_SLOT_EMPTY);
+            }
+        }
+        return true;
+    }
+
+    bool CreateCpuInteropResources(IDirect3DDevice9* gameDevice,
+                                   UINT width, UINT height) noexcept {
+        using Direct3DCreate9ExFunction =
+            HRESULT(WINAPI*)(UINT, IDirect3D9Ex**);
+        const auto createDirect3DEx =
+            ResolveSystemD3D9<Direct3DCreate9ExFunction>(
+                "Direct3DCreate9Ex");
+        if (createDirect3DEx == nullptr) {
+            logger_.Write("ERROR", "cpu_bridge_d3d9ex_missing",
+                          "System Direct3DCreate9Ex is unavailable.");
+            return false;
+        }
+
+        IDirect3D9Ex* direct3DEx = nullptr;
+        HRESULT result =
+            createDirect3DEx(D3D_SDK_VERSION, &direct3DEx);
+        bridgeDirect3DEx_.Attach(direct3DEx);
+        if (FAILED(result) || !bridgeDirect3DEx_) {
+            LogHresult("cpu_bridge_d3d9ex_failed", result);
+            return false;
+        }
+
+        UINT bridgeAdapter = D3DADAPTER_DEFAULT;
+        bool adapterFound = false;
+        for (UINT index = 0;
+             index < bridgeDirect3DEx_->GetAdapterCount(); ++index) {
+            LUID luid{};
+            if (SUCCEEDED(bridgeDirect3DEx_->GetAdapterLUID(
+                    index, &luid)) &&
+                PackLuid(
+                    static_cast<std::uint32_t>(luid.HighPart),
+                    luid.LowPart) == gameAdapterLuid_) {
+                bridgeAdapter = index;
+                adapterFound = true;
+                break;
+            }
+        }
+        if (!adapterFound) {
+            logger_.Write(
+                "ERROR", "cpu_bridge_adapter_failed",
+                "No D3D9Ex adapter matched the game adapter LUID.");
+            return false;
+        }
+
+        companionWindow_ = CreateWindowExW(
+            0, L"STATIC", L"FearVrD3D9CpuBridge", WS_OVERLAPPED,
+            0, 0, 32, 32, nullptr, nullptr, GetModuleHandleW(nullptr),
+            nullptr);
+        if (companionWindow_ == nullptr) {
+            LogWin32("cpu_bridge_window_failed", GetLastError());
+            return false;
+        }
+
+        D3DPRESENT_PARAMETERS parameters{};
+        parameters.Windowed = TRUE;
+        parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        parameters.hDeviceWindow = companionWindow_;
+        parameters.BackBufferWidth = 32;
+        parameters.BackBufferHeight = 32;
+        parameters.BackBufferFormat = D3DFMT_UNKNOWN;
+        result = bridgeDirect3DEx_->CreateDeviceEx(
+            bridgeAdapter, D3DDEVTYPE_HAL, companionWindow_,
+            D3DCREATE_HARDWARE_VERTEXPROCESSING |
+                D3DCREATE_FPU_PRESERVE,
+            &parameters, nullptr,
+            bridgeDeviceEx_.ReleaseAndGetAddressOf());
+        if (FAILED(result)) {
+            result = bridgeDirect3DEx_->CreateDeviceEx(
+                bridgeAdapter, D3DDEVTYPE_HAL, companionWindow_,
+                D3DCREATE_SOFTWARE_VERTEXPROCESSING |
+                    D3DCREATE_FPU_PRESERVE,
+                &parameters, nullptr,
+                bridgeDeviceEx_.ReleaseAndGetAddressOf());
+        }
+        if (FAILED(result) || !bridgeDeviceEx_) {
+            LogHresult("cpu_bridge_device_failed", result);
+            return false;
+        }
+
+        result = gameDevice->CreateRenderTarget(
+            width, height, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE,
+            0, FALSE, gameCapture_.ReleaseAndGetAddressOf(), nullptr);
+        if (FAILED(result)) {
+            LogHresult("cpu_bridge_capture_failed", result);
+            return false;
+        }
+        result = gameDevice->CreateOffscreenPlainSurface(
+            width, height, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM,
+            gameReadback_.ReleaseAndGetAddressOf(), nullptr);
+        if (FAILED(result)) {
+            LogHresult("cpu_bridge_readback_failed", result);
+            return false;
+        }
+        result = bridgeDeviceEx_->CreateOffscreenPlainSurface(
+            width, height, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM,
+            bridgeUpload_.ReleaseAndGetAddressOf(), nullptr);
+        if (FAILED(result)) {
+            LogHresult("cpu_bridge_upload_failed", result);
+            return false;
+        }
+        if (!CreateSharedSlots(bridgeDeviceEx_.Get(), width, height)) {
+            return false;
+        }
+        transferMode_ = TransferMode::CpuViaD3D9Ex;
+        InterlockedOr(AtomicFlags(*shared_), FEARVR_BF_CPU_FALLBACK);
+        return true;
+    }
+
+    bool EnsureResources(IDirect3DDevice9* device, UINT width,
+                         UINT height) noexcept {
+        if (resourcesReady_ && width_ == width && height_ == height &&
+            device_ == device) {
+            return true;
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (now < nextResourceRetryTick_) {
+            return false;
+        }
+
+        ReleaseResources();
+        device_ = device;
+        width_ = width;
+        height_ = height;
+
+        ComPtr<IDirect3DDevice9Ex> deviceEx;
+        bool created = false;
+        if (SUCCEEDED(device->QueryInterface(
+                IID_PPV_ARGS(deviceEx.ReleaseAndGetAddressOf())))) {
+            created = CreateSharedSlots(device, width, height);
+            if (created) {
+                transferMode_ = TransferMode::DirectShared;
+            }
+        } else {
+            created = CreateCpuInteropResources(device, width, height);
+        }
+        if (!created) {
+            ReleaseResources();
+            nextResourceRetryTick_ = now + 1000;
+            return false;
+        }
+
+        nextResourceRetryTick_ = 0;
+        resourcesReady_ = true;
+        InterlockedOr(AtomicFlags(*shared_),
+                      FEARVR_BF_SHARED_SUPPORTED);
+        std::ostringstream message;
+        message << "size=" << width << 'x' << height
+                << " format=B8G8R8A8 slots="
+                << FEARVR_SLOTS_PER_EYE << "x2 path="
+                << (transferMode_ == TransferMode::DirectShared
+                        ? "direct"
+                        : "cpu_d3d9ex");
+        logger_.Write(
+            transferMode_ == TransferMode::DirectShared
+                ? "INFO"
+                : "WARN",
+            "shared_resources", message.str());
+        return true;
+    }
+
+    bool CopyFrameDirect(IDirect3DDevice9* device,
+                         IDirect3DSurface9* backBuffer,
+                         std::uint32_t slotIndex) noexcept {
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            SlotResource& resource = resources_[eye][slotIndex];
+            HRESULT result = device->StretchRect(
+                backBuffer, nullptr, resource.surface.Get(), nullptr,
+                D3DTEXF_NONE);
+            if (FAILED(result)) {
+                LogHresult("stretch_rect_failed", result);
+                return false;
+            }
+            result = resource.completion->Issue(D3DISSUE_END);
+            if (FAILED(result)) {
+                LogHresult("d3d9_query_issue_failed", result);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool CopyFrameViaCpu(IDirect3DDevice9* device,
+                         IDirect3DSurface9* backBuffer,
+                         std::uint32_t slotIndex) noexcept {
+        HRESULT result = device->StretchRect(
+            backBuffer, nullptr, gameCapture_.Get(), nullptr,
+            D3DTEXF_NONE);
+        if (FAILED(result)) {
+            LogHresult("cpu_bridge_stretch_failed", result);
+            return false;
+        }
+        result = device->GetRenderTargetData(
+            gameCapture_.Get(), gameReadback_.Get());
+        if (FAILED(result)) {
+            LogHresult("cpu_bridge_readback_copy_failed", result);
+            return false;
+        }
+
+        D3DLOCKED_RECT source{};
+        D3DLOCKED_RECT destination{};
+        result = gameReadback_->LockRect(
+            &source, nullptr, D3DLOCK_READONLY);
+        if (FAILED(result)) {
+            LogHresult("cpu_bridge_readback_lock_failed", result);
+            return false;
+        }
+        result = bridgeUpload_->LockRect(&destination, nullptr, 0);
+        if (FAILED(result)) {
+            gameReadback_->UnlockRect();
+            LogHresult("cpu_bridge_upload_lock_failed", result);
+            return false;
+        }
+
+        const std::size_t rowBytes =
+            static_cast<std::size_t>(width_) * 4U;
+        auto* sourceBytes = static_cast<const std::uint8_t*>(source.pBits);
+        auto* destinationBytes =
+            static_cast<std::uint8_t*>(destination.pBits);
+        for (UINT row = 0; row < height_; ++row) {
+            std::memcpy(destinationBytes, sourceBytes, rowBytes);
+            sourceBytes += source.Pitch;
+            destinationBytes += destination.Pitch;
+        }
+        bridgeUpload_->UnlockRect();
+        gameReadback_->UnlockRect();
+
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            SlotResource& resource = resources_[eye][slotIndex];
+            result = bridgeDeviceEx_->UpdateSurface(
+                bridgeUpload_.Get(), nullptr, resource.surface.Get(),
+                nullptr);
+            if (FAILED(result)) {
+                LogHresult("cpu_bridge_update_failed", result);
+                return false;
+            }
+            result = resource.completion->Issue(D3DISSUE_END);
+            if (FAILED(result)) {
+                LogHresult("cpu_bridge_query_failed", result);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void ReleaseResources() noexcept {
+        pending_ = {};
+        resourcesReady_ = false;
+        transferMode_ = TransferMode::None;
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            for (std::uint32_t slotIndex = 0;
+                 slotIndex < FEARVR_SLOTS_PER_EYE; ++slotIndex) {
+                SlotResource& resource = resources_[eye][slotIndex];
+                resource.completion.Reset();
+                resource.surface.Reset();
+                resource.texture.Reset();
+                resource.sharedHandle = nullptr;
+                if (shared_ != nullptr) {
+                    FearVrSlot& slot = shared_->slot[eye][slotIndex];
+                    slot.sharedHandle = 0;
+                    slot.frameId = 0;
+                    slot.width = 0;
+                    slot.height = 0;
+                    slot.format = FEARVR_FMT_UNKNOWN;
+                    slot.generation = 0;
+                    InterlockedExchange(AtomicState(slot),
+                                        FEARVR_SLOT_EMPTY);
+                }
+            }
+        }
+        bridgeUpload_.Reset();
+        gameReadback_.Reset();
+        gameCapture_.Reset();
+        bridgeDeviceEx_.Reset();
+        bridgeDirect3DEx_.Reset();
+        if (companionWindow_ != nullptr) {
+            DestroyWindow(companionWindow_);
+            companionWindow_ = nullptr;
+        }
+        if (shared_ != nullptr) {
+            InterlockedAnd(
+                AtomicFlags(*shared_),
+                static_cast<LONG>(
+                    ~(FEARVR_BF_SHARED_SUPPORTED |
+                      FEARVR_BF_CPU_FALLBACK)));
+        }
+    }
+
+    bool ClaimWritablePair(std::uint32_t& slotIndex) noexcept {
+        for (std::uint32_t attempt = 0;
+             attempt < FEARVR_SLOTS_PER_EYE; ++attempt) {
+            const std::uint32_t candidate =
+                (nextSlot_ + attempt) % FEARVR_SLOTS_PER_EYE;
+            FearVrSlot& left =
+                shared_->slot[FEARVR_EYE_LEFT][candidate];
+            FearVrSlot& right =
+                shared_->slot[FEARVR_EYE_RIGHT][candidate];
+            if (InterlockedCompareExchange(
+                    AtomicState(left), FEARVR_SLOT_WRITING,
+                    FEARVR_SLOT_EMPTY) != FEARVR_SLOT_EMPTY) {
+                continue;
+            }
+            if (InterlockedCompareExchange(
+                    AtomicState(right), FEARVR_SLOT_WRITING,
+                    FEARVR_SLOT_EMPTY) != FEARVR_SLOT_EMPTY) {
+                InterlockedExchange(AtomicState(left),
+                                    FEARVR_SLOT_EMPTY);
+                continue;
+            }
+            nextSlot_ = (candidate + 1) % FEARVR_SLOTS_PER_EYE;
+            slotIndex = candidate;
+            return true;
+        }
+        return false;
+    }
+
+    void ReleaseClaimedPair(std::uint32_t slotIndex) noexcept {
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            InterlockedExchange(
+                AtomicState(shared_->slot[eye][slotIndex]),
+                FEARVR_SLOT_EMPTY);
+        }
+    }
+
+    bool PollPending() noexcept {
+        if (!pending_.active) {
+            return true;
+        }
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            SlotResource& resource =
+                resources_[eye][pending_.slotIndex];
+            if (!resource.completion ||
+                resource.completion->GetData(
+                    nullptr, 0, D3DGETDATA_FLUSH) != S_OK) {
+                return false;
+            }
+        }
+
+        MemoryBarrier();
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            InterlockedExchange(
+                AtomicState(shared_->slot[eye][pending_.slotIndex]),
+                FEARVR_SLOT_READY);
+        }
+        SetEvent(frameReadyEvent_);
+        if (pending_.frameId == 1 ||
+            pending_.frameId % 300 == 0) {
+            std::ostringstream message;
+            message << "frame=" << pending_.frameId
+                    << " generation=" << pending_.generation
+                    << " slot=" << pending_.slotIndex;
+            logger_.Write("INFO", "frame_ready", message.str());
+        }
+        pending_ = {};
+        return true;
+    }
+
+    void LogHresult(const char* event, HRESULT result) noexcept {
+        std::ostringstream message;
+        message << "HRESULT=0x" << std::hex << std::uppercase
+                << static_cast<std::uint32_t>(result);
+        logger_.Write("ERROR", event, message.str());
+    }
+
+    void LogWin32(const char* event, DWORD error) noexcept {
+        logger_.Write("ERROR", event,
+                      "Win32=" + std::to_string(error));
+    }
+
+    CommandLineConfig config_;
+    Logger logger_;
+    std::mutex mutex_;
+    HANDLE mapping_{nullptr};
+    HANDLE frameReadyEvent_{nullptr};
+    HANDLE slotConsumedEvent_{nullptr};
+    FearVrSharedHeader* shared_{nullptr};
+    IDirect3DDevice9* device_{nullptr};
+    ComPtr<IDirect3D9Ex> bridgeDirect3DEx_;
+    ComPtr<IDirect3DDevice9Ex> bridgeDeviceEx_;
+    ComPtr<IDirect3DSurface9> gameCapture_;
+    ComPtr<IDirect3DSurface9> gameReadback_;
+    ComPtr<IDirect3DSurface9> bridgeUpload_;
+    std::array<std::array<SlotResource, FEARVR_SLOTS_PER_EYE>,
+               FEARVR_EYE_COUNT>
+        resources_{};
+    PendingFrame pending_{};
+    UINT width_{0};
+    UINT height_{0};
+    std::uint32_t nextSlot_{0};
+    std::uint64_t frameId_{0};
+    std::uint64_t generation_{0};
+    std::uint64_t droppedFrames_{0};
+    std::uint64_t gameAdapterLuid_{0};
+    std::uint64_t lastHostHeartbeat_{0};
+    ULONGLONG lastHostHeartbeatTick_{0};
+    ULONGLONG nextResourceRetryTick_{0};
+    HWND companionWindow_{nullptr};
+    TransferMode transferMode_{TransferMode::None};
+    bool resourcesReady_{false};
+    bool deviceMetadataReady_{false};
+    bool hostConnected_{false};
+    bool adapterMatchLogged_{false};
+    bool adapterMismatchLogged_{false};
+};
+
+Bridge& GetBridge() {
+    // Absichtlich prozesslebenslang: CRT-Destruktoren laufen bei DLL_DETACH
+    // unter dem Loader-Lock. D3D/IPC-Cleanup darf dort nicht stattfinden;
+    // Windows gibt die Prozessressourcen beim Prozessende frei.
+    static Bridge* bridge = new Bridge;
+    return *bridge;
+}
+
+using CreateDeviceFunction = HRESULT(STDMETHODCALLTYPE*)(
+    IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD,
+    D3DPRESENT_PARAMETERS*, IDirect3DDevice9**);
+using CreateDeviceExFunction = HRESULT(STDMETHODCALLTYPE*)(
+    IDirect3D9Ex*, UINT, D3DDEVTYPE, HWND, DWORD,
+    D3DPRESENT_PARAMETERS*, D3DDISPLAYMODEEX*, IDirect3DDevice9Ex**);
+using ResetFunction =
+    HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*,
+                                D3DPRESENT_PARAMETERS*);
+using PresentFunction =
+    HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, const RECT*,
+                                const RECT*, HWND, const RGNDATA*);
+
+struct D3D9VtableRecord {
+    void** vtable{nullptr};
+    CreateDeviceFunction createDevice{nullptr};
+    CreateDeviceExFunction createDeviceEx{nullptr};
+};
+
+struct DeviceVtableRecord {
+    void** vtable{nullptr};
+    ResetFunction reset{nullptr};
+    PresentFunction present{nullptr};
+};
+
+SRWLOCK g_hookLock = SRWLOCK_INIT;
+std::array<D3D9VtableRecord, 8> g_d3d9Records{};
+std::array<DeviceVtableRecord, 8> g_deviceRecords{};
+INIT_ONCE g_lateHookOnce = INIT_ONCE_STATIC_INIT;
+volatile LONG g_lateHooksActive = FALSE;
+BOOL g_lateHookResult = FALSE;
+ResetFunction g_lateReset = nullptr;
+PresentFunction g_latePresent = nullptr;
+
+HRESULT STDMETHODCALLTYPE HookCreateDevice(
+    IDirect3D9* self, UINT adapter, D3DDEVTYPE deviceType,
+    HWND focusWindow, DWORD behaviorFlags,
+    D3DPRESENT_PARAMETERS* parameters,
+    IDirect3DDevice9** output);
+HRESULT STDMETHODCALLTYPE HookCreateDeviceEx(
+    IDirect3D9Ex* self, UINT adapter, D3DDEVTYPE deviceType,
+    HWND focusWindow, DWORD behaviorFlags,
+    D3DPRESENT_PARAMETERS* parameters,
+    D3DDISPLAYMODEEX* fullscreenMode,
+    IDirect3DDevice9Ex** output);
+HRESULT STDMETHODCALLTYPE HookReset(IDirect3DDevice9* self,
+                                     D3DPRESENT_PARAMETERS* parameters);
+HRESULT STDMETHODCALLTYPE HookPresent(IDirect3DDevice9* self,
+                                       const RECT* source,
+                                       const RECT* destination,
+                                       HWND overrideWindow,
+                                       const RGNDATA* dirtyRegion);
+HRESULT STDMETHODCALLTYPE HookLateReset(
+    IDirect3DDevice9* self, D3DPRESENT_PARAMETERS* parameters);
+HRESULT STDMETHODCALLTYPE HookLatePresent(
+    IDirect3DDevice9* self, const RECT* source,
+    const RECT* destination, HWND overrideWindow,
+    const RGNDATA* dirtyRegion);
+
+bool ReplaceVtableEntry(void** vtable, std::size_t index,
+                        void* replacement) noexcept {
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(&vtable[index], sizeof(void*),
+                        PAGE_EXECUTE_READWRITE, &oldProtection)) {
+        return false;
+    }
+    InterlockedExchangePointer(
+        reinterpret_cast<void* volatile*>(&vtable[index]), replacement);
+    DWORD ignored = 0;
+    VirtualProtect(&vtable[index], sizeof(void*), oldProtection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), &vtable[index],
+                          sizeof(void*));
+    return true;
+}
+
+void PatchDevice(IDirect3DDevice9* device) noexcept {
+    if (device == nullptr) {
+        return;
+    }
+    if (InterlockedCompareExchange(&g_lateHooksActive, FALSE, FALSE) !=
+        FALSE) {
+        return;
+    }
+    void** vtable = *reinterpret_cast<void***>(device);
+    AcquireSRWLockExclusive(&g_hookLock);
+    for (const DeviceVtableRecord& record : g_deviceRecords) {
+        if (record.vtable == vtable) {
+            ReleaseSRWLockExclusive(&g_hookLock);
+            return;
+        }
+    }
+    for (DeviceVtableRecord& record : g_deviceRecords) {
+        if (record.vtable == nullptr) {
+            record.vtable = vtable;
+            record.reset =
+                reinterpret_cast<ResetFunction>(vtable[16]);
+            record.present =
+                reinterpret_cast<PresentFunction>(vtable[17]);
+            ReplaceVtableEntry(vtable, 16,
+                               reinterpret_cast<void*>(&HookReset));
+            ReplaceVtableEntry(vtable, 17,
+                               reinterpret_cast<void*>(&HookPresent));
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_hookLock);
+}
+
+void PatchD3D9(IDirect3D9* direct3D, bool hasEx) noexcept {
+    if (direct3D == nullptr) {
+        return;
+    }
+    void** vtable = *reinterpret_cast<void***>(direct3D);
+    AcquireSRWLockExclusive(&g_hookLock);
+    for (const D3D9VtableRecord& record : g_d3d9Records) {
+        if (record.vtable == vtable) {
+            ReleaseSRWLockExclusive(&g_hookLock);
+            return;
+        }
+    }
+    for (D3D9VtableRecord& record : g_d3d9Records) {
+        if (record.vtable == nullptr) {
+            record.vtable = vtable;
+            record.createDevice = reinterpret_cast<CreateDeviceFunction>(
+                vtable[16]);
+            ReplaceVtableEntry(vtable, 16,
+                               reinterpret_cast<void*>(&HookCreateDevice));
+            if (hasEx) {
+                record.createDeviceEx =
+                    reinterpret_cast<CreateDeviceExFunction>(vtable[20]);
+                ReplaceVtableEntry(
+                    vtable, 20,
+                    reinterpret_cast<void*>(&HookCreateDeviceEx));
+            }
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_hookLock);
+}
+
+D3D9VtableRecord FindD3D9Record(void** vtable) noexcept {
+    D3D9VtableRecord result;
+    AcquireSRWLockShared(&g_hookLock);
+    for (const D3D9VtableRecord& record : g_d3d9Records) {
+        if (record.vtable == vtable) {
+            result = record;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_hookLock);
+    return result;
+}
+
+DeviceVtableRecord FindDeviceRecord(void** vtable) noexcept {
+    DeviceVtableRecord result;
+    AcquireSRWLockShared(&g_hookLock);
+    for (const DeviceVtableRecord& record : g_deviceRecords) {
+        if (record.vtable == vtable) {
+            result = record;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&g_hookLock);
+    return result;
+}
+
+HRESULT STDMETHODCALLTYPE HookCreateDevice(
+    IDirect3D9* self, UINT adapter, D3DDEVTYPE deviceType,
+    HWND focusWindow, DWORD behaviorFlags,
+    D3DPRESENT_PARAMETERS* parameters,
+    IDirect3DDevice9** output) {
+    const D3D9VtableRecord record =
+        FindD3D9Record(*reinterpret_cast<void***>(self));
+    if (record.createDevice == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    const HRESULT result = record.createDevice(
+        self, adapter, deviceType, focusWindow, behaviorFlags, parameters,
+        output);
+    if (SUCCEEDED(result) && output != nullptr) {
+        PatchDevice(*output);
+    }
+    return result;
+}
+
+HRESULT STDMETHODCALLTYPE HookCreateDeviceEx(
+    IDirect3D9Ex* self, UINT adapter, D3DDEVTYPE deviceType,
+    HWND focusWindow, DWORD behaviorFlags,
+    D3DPRESENT_PARAMETERS* parameters,
+    D3DDISPLAYMODEEX* fullscreenMode,
+    IDirect3DDevice9Ex** output) {
+    const D3D9VtableRecord record =
+        FindD3D9Record(*reinterpret_cast<void***>(self));
+    if (record.createDeviceEx == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    const HRESULT result = record.createDeviceEx(
+        self, adapter, deviceType, focusWindow, behaviorFlags, parameters,
+        fullscreenMode, output);
+    if (SUCCEEDED(result) && output != nullptr) {
+        PatchDevice(*output);
+    }
+    return result;
+}
+
+HRESULT STDMETHODCALLTYPE HookReset(IDirect3DDevice9* self,
+                                     D3DPRESENT_PARAMETERS* parameters) {
+    const DeviceVtableRecord record =
+        FindDeviceRecord(*reinterpret_cast<void***>(self));
+    if (record.reset == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    GetBridge().BeforeReset();
+    const HRESULT result = record.reset(self, parameters);
+    GetBridge().AfterReset(result);
+    return result;
+}
+
+HRESULT STDMETHODCALLTYPE HookPresent(IDirect3DDevice9* self,
+                                       const RECT* source,
+                                       const RECT* destination,
+                                       HWND overrideWindow,
+                                       const RGNDATA* dirtyRegion) {
+    const DeviceVtableRecord record =
+        FindDeviceRecord(*reinterpret_cast<void***>(self));
+    if (record.present == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    GetBridge().CapturePresent(self);
+    return record.present(self, source, destination, overrideWindow,
+                          dirtyRegion);
+}
+
+HRESULT STDMETHODCALLTYPE HookLateReset(
+    IDirect3DDevice9* self, D3DPRESENT_PARAMETERS* parameters) {
+    if (g_lateReset == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    GetBridge().BeforeReset();
+    const HRESULT result = g_lateReset(self, parameters);
+    GetBridge().AfterReset(result);
+    return result;
+}
+
+HRESULT STDMETHODCALLTYPE HookLatePresent(
+    IDirect3DDevice9* self, const RECT* source,
+    const RECT* destination, HWND overrideWindow,
+    const RGNDATA* dirtyRegion) {
+    if (g_latePresent == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    GetBridge().CapturePresent(self);
+    return g_latePresent(self, source, destination, overrideWindow,
+                         dirtyRegion);
+}
+
+BOOL CALLBACK InstallLateHooksOnce(PINIT_ONCE, PVOID, PVOID*) {
+    auto& bridge = GetBridge();
+    using Direct3DCreate9Function = IDirect3D9*(WINAPI*)(UINT);
+    const auto createDirect3D =
+        ResolveSystemD3D9<Direct3DCreate9Function>("Direct3DCreate9");
+    if (createDirect3D == nullptr) {
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_system_d3d9_failed",
+            "Direct3DCreate9 could not be resolved from System32.");
+        return TRUE;
+    }
+
+    const HWND window = CreateWindowExW(
+        0, L"STATIC", L"FearVrD3D9HookProbe", WS_OVERLAPPED,
+        0, 0, 32, 32, nullptr, nullptr, GetModuleHandleW(nullptr),
+        nullptr);
+    if (window == nullptr) {
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_window_failed",
+            "Win32=" + std::to_string(GetLastError()));
+        return TRUE;
+    }
+
+    ComPtr<IDirect3D9> direct3D;
+    direct3D.Attach(createDirect3D(D3D_SDK_VERSION));
+    if (!direct3D) {
+        DestroyWindow(window);
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_d3d9_failed",
+            "System Direct3DCreate9 returned null.");
+        return TRUE;
+    }
+
+    D3DPRESENT_PARAMETERS parameters{};
+    parameters.Windowed = TRUE;
+    parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    parameters.hDeviceWindow = window;
+    parameters.BackBufferWidth = 32;
+    parameters.BackBufferHeight = 32;
+    parameters.BackBufferFormat = D3DFMT_UNKNOWN;
+
+    ComPtr<IDirect3DDevice9> device;
+    const HRESULT createResult = direct3D->CreateDevice(
+        D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_FPU_PRESERVE,
+        &parameters, device.GetAddressOf());
+    if (FAILED(createResult) || !device) {
+        DestroyWindow(window);
+        std::ostringstream message;
+        message << "HRESULT=0x" << std::hex << std::uppercase
+                << static_cast<std::uint32_t>(createResult);
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_device_failed", message.str());
+        return TRUE;
+    }
+
+    void** vtable = *reinterpret_cast<void***>(device.Get());
+    void* const resetTarget = vtable[16];
+    void* const presentTarget = vtable[17];
+    if (resetTarget == reinterpret_cast<void*>(&HookReset) &&
+        presentTarget == reinterpret_cast<void*>(&HookPresent)) {
+        g_lateHookResult = TRUE;
+        bridge.LogHookStatus(
+            "INFO", "late_hooks_not_needed",
+            "The device vtable is already hooked by the proxy path.");
+        device.Reset();
+        direct3D.Reset();
+        DestroyWindow(window);
+        return TRUE;
+    }
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_initialize_failed",
+            MH_StatusToString(initialize));
+        device.Reset();
+        direct3D.Reset();
+        DestroyWindow(window);
+        return TRUE;
+    }
+
+    MH_STATUS status = MH_CreateHook(
+        resetTarget, reinterpret_cast<void*>(&HookLateReset),
+        reinterpret_cast<void**>(&g_lateReset));
+    if (status != MH_OK) {
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_reset_create_failed",
+            MH_StatusToString(status));
+        device.Reset();
+        direct3D.Reset();
+        DestroyWindow(window);
+        return TRUE;
+    }
+
+    status = MH_CreateHook(
+        presentTarget, reinterpret_cast<void*>(&HookLatePresent),
+        reinterpret_cast<void**>(&g_latePresent));
+    if (status != MH_OK) {
+        MH_RemoveHook(resetTarget);
+        g_lateReset = nullptr;
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_present_create_failed",
+            MH_StatusToString(status));
+        device.Reset();
+        direct3D.Reset();
+        DestroyWindow(window);
+        return TRUE;
+    }
+
+    status = MH_QueueEnableHook(resetTarget);
+    if (status == MH_OK) {
+        status = MH_QueueEnableHook(presentTarget);
+    }
+    if (status == MH_OK) {
+        status = MH_ApplyQueued();
+    }
+    if (status != MH_OK) {
+        MH_RemoveHook(presentTarget);
+        MH_RemoveHook(resetTarget);
+        g_latePresent = nullptr;
+        g_lateReset = nullptr;
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_enable_failed",
+            MH_StatusToString(status));
+        device.Reset();
+        direct3D.Reset();
+        DestroyWindow(window);
+        return TRUE;
+    }
+
+    InterlockedExchange(&g_lateHooksActive, TRUE);
+    g_lateHookResult = TRUE;
+    bridge.LogHookStatus(
+        "INFO", "late_hooks_installed",
+        "System D3D9 Reset and Present hooks are active.");
+    device.Reset();
+    direct3D.Reset();
+    DestroyWindow(window);
+    return TRUE;
+}
+
+} // namespace
+
+void OnDirect3D9Created(IDirect3D9* direct3D) noexcept {
+    PatchD3D9(direct3D, false);
+}
+
+void OnDirect3D9ExCreated(IDirect3D9Ex* direct3D) noexcept {
+    PatchD3D9(direct3D, true);
+}
+
+BOOL InstallLateD3D9Hooks() noexcept {
+    if (!InitOnceExecuteOnce(
+            &g_lateHookOnce, InstallLateHooksOnce, nullptr, nullptr)) {
+        return FALSE;
+    }
+    return g_lateHookResult;
+}
+
+BOOL IsHostConnected() noexcept {
+    return GetBridge().IsConnected();
+}
+
+BOOL GetRenderRequest(FearVrRenderRequest* request) noexcept {
+    return GetBridge().ReadRenderRequest(request);
+}
+
+void BeginEye(std::uint32_t eye) noexcept {
+    (void)eye;
+}
+
+void CaptureEye(std::uint32_t eye) noexcept {
+    (void)eye;
+}
+
+void EndStereoFrame(std::uint64_t frameId) noexcept {
+    (void)frameId;
+}
+
+} // namespace fearvr

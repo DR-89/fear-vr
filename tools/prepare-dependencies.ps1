@@ -22,6 +22,13 @@ $dependencies = @(
         Tag = "release-1.1.59"
         Commit = "04e92820192a6eec490e5eb8ffbd8211bafb0551"
         Directory = Join-Path $vendorRoot "openxr-sdk-source"
+    },
+    @{
+        Name = "MinHook"
+        Url = "https://github.com/TsudaKageyu/minhook.git"
+        Tag = "v1.3.4"
+        Commit = "c3fcafdc10146beb5919319d0683e44e3c30d537"
+        Directory = Join-Path $vendorRoot "minhook"
     }
 )
 
@@ -88,4 +95,4 @@ foreach ($dependency in $dependencies) {
     Write-Host "[OK] $($dependency.Name) $($dependency.Tag) ($actualCommit)"
 }
 
-Write-Host "All M1 dependencies are present and pinned."
+Write-Host "All pinned dependencies are present."

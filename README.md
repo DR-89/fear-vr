@@ -3,10 +3,12 @@
 Quelloffener, lokal baubarer VR-Mod für die **Singleplayer-Basisversion von
 F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
-> **Status:** M1 — eigenständiger x64-OpenXR-/D3D11-Host sendet getestete
-> Stereo-Testbilder an SteamVR. F.E.A.R. ist noch nicht angebunden und daher
-> noch kein spielbarer VR-Stand. Siehe `docs/` und `ANWEISUNG.md` für den
-> vollständigen Auftrag und die Meilensteine.
+> **Status:** M2 — die x86-D3D9/x64-D3D11-Monobrücke ist implementiert und
+> mit dem echten F.E.A.R. im Headset bestätigt. Der D3D9Ex-Test läuft
+> GPU-direkt; das klassische D3D9 des Spiels verwendet vorläufig einen
+> markierten CPU-Kompatibilitätspfad. Beide Augen zeigen noch dasselbe flache
+> Bild, ohne Kopfsteuerung. Dies ist ein Techniknachweis, kein angenehm
+> spielbarer VR-Stand. Details: `docs/M2-D3D9-BRIDGE.md`.
 
 ## Grundprinzipien
 
@@ -40,7 +42,8 @@ Details: `docs/ARCHITECTURE.md`.
 | `docs/` | Umgebung, Architektur, Koordinaten, Stereo-Research, Tests |
 | `src/common/` | geteilter IPC-Vertrag (`protocol.h`) + Mathe |
 | `src/host64/` | x64-OpenXR-Host (`fearvr-host.exe`) |
-| `src/proxy32/` | x86-`d3d9.dll`-Proxy/Bridge |
+| `src/proxy32/` | x86-D3D9-Proxy/Bridge |
+| `src/gameclient_loader/` | ABI-neutraler Loader für die echte `archcfg`-Stage |
 | `src/launcher/` | Launcher (startet Host, dann isolierte `FEAR.exe`) |
 | `game-source-overlay/` | nur **neu geschriebene** GameClient-Projektdateien |
 | `patches/` | minimale, lizenzgeprüfte Diffs / Transformationsskripte |
@@ -90,6 +93,20 @@ M1-Host gegen die aktive OpenXR-Runtime prüfen:
 build\x64\src\host64\RelWithDebInfo\fearvr-host.exe --validate-only
 build\x64\src\host64\RelWithDebInfo\fearvr-host.exe --max-frames 120
 ```
+
+M2-Brücke und echte Stage:
+
+```powershell
+pwsh -File tools\test-m2-bridge.ps1
+pwsh -File tools\test-m2-bridge.ps1 -ClassicD3D9
+pwsh -File tools\test-m2-bridge.ps1 -AbortHost
+pwsh -File tools\prepare-m2-stage.ps1
+pwsh -File tools\launch-m2-fear.ps1
+```
+
+Im echten Spiel muss das SteamVR-Desktop-Overlay gegebenenfalls mit der
+System-/Menütaste des linken Controllers geschlossen werden. Es ist nicht Teil
+des Mods.
 
 ## Lizenz
 

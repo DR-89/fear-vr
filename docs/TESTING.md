@@ -8,15 +8,15 @@ Als CMake/CTest-Ziele unter `tests/` (baubar ohne Headset):
 
 - [x] Protokollgrößen und -Offsets in **x86 und x64** (`static_assert` +
       Laufzeit-Roundtrip)
-- [ ] Ablehnung ungültiger Magic / Version / Größe
+- [x] Ablehnung ungültiger Magic / Version / Größe
 - [ ] Quaternion-Normalisierung und Achsenabbildung
 - [ ] Pose relativ zum Recenter-Ursprung
 - [ ] FOV-Winkel → Projektionsmatrizen
-- [ ] Ringpuffer-Generationen und Timeout-Pfade
+- [x] Ringpuffer-Paarung und Generationen
 - [x] OpenXR-State-Machine als testbare Logik **ohne** Headset
 - [ ] EXE-Hashprüfung
-- [ ] Stage-Pfad bleibt unter der Projektwurzel
-- [ ] Retail-Hash vor/nach Vorbereitung und Live-Test
+- [x] Stage-Pfad bleibt unter der Projektwurzel
+- [x] Retail-Hash vor/nach M2-Vorbereitung und Startversuch
 
 ## 2. Live-Testmatrix
 
@@ -106,3 +106,62 @@ Noch offen:
   bestätigen. Steam Link hielt beim Verbindungsabbruch dieselbe OpenXR-Session
   am Leben; der normale SteamVR-`-shutdown`-Befehl wurde bei aktiver Anwendung
   nicht ausgeführt.
+
+## 7. M2-Live-Tests vom 2026-07-24
+
+Automatisiert bestanden:
+
+- x86-D3D9-Producer und x64-D3D11/OpenXR-Host über benannte IPC-Objekte;
+- exakte NVIDIA-Adapter-LUID `0x0:C91C` auf beiden Seiten;
+- GPU-direkte D3D9Ex-Shared-Textures mit drei Slots je Auge, ohne
+  CPU-Readback;
+- klassischer D3D9-Kompatibilitätstest über den explizit markierten
+  CPU-D3D9Ex-Pfad;
+- frische Paare für Frame/Generation 1 und 300;
+- Minimieren/Wiederherstellen sowie D3D9-Reset von 960×540 auf 800×450;
+- normaler Producer-/Host-Abschluss;
+- erzwungener Host-Abbruch: Producer lief fail-open bis Frame 600 weiter;
+- separater Test für IAT-Hook und späte `Present`-/`Reset`-Detours an einem
+  bereits erzeugten realen D3D9-Gerät.
+
+Zusätzlich geprüft:
+
+- Auslaufen des Game-Heartbeats beendet den Host kontrolliert auch aus
+  `XR_SESSION_STATE_SYNCHRONIZED`;
+- der Host erkennt das echte Spielende anhand des Prozesshandles und beendet
+  sich nicht fälschlich während Pause, Ladezustand oder Fokusverlust;
+- x86/x64-`RelWithDebInfo`, Protokoll-, Session-State- und Hook-Tests
+  bestehen.
+
+Realer F.E.A.R.-Lauf bestanden:
+
+- `tools\launch-m2-fear.ps1` verifizierte `GameClient.dll`, `GameOrig.dll`
+  und `fearvr-d3d9.dll` im laufenden x86-Prozess;
+- späte Hooks und Adapter-LUID-Abgleich bestanden;
+- 1024×768-Spielbilder wurden laufend vom Host importiert;
+- Benutzerbestätigung: F.E.A.R.-Menü in beiden Augen sichtbar, Maus und
+  Tastatur reagieren normal;
+- nach Schließen des SteamVR-Desktop-Overlays blieb das Spielbild sichtbar.
+
+Relevante Logs:
+
+```text
+logs\m2-20260724-121708
+logs\m2-20260724-121736
+logs\m2-20260724-131526
+logs\m2-20260724-133323
+logs\m2-fear-20260724-133432
+```
+
+Bewertung des M2-Gates:
+
+- Ringpuffer, frische Frames, Reset und Ausfallverhalten sind nachgewiesen.
+- Der GPU-direkte D3D9Ex-Test erfüllt „kein per-Frame-CPU-Readback“.
+- Das echte klassische D3D9-Spiel benötigt derzeit den Diagnoseflag
+  `FEARVR_BF_CPU_FALLBACK` und erfüllt diese Produktionsinvariante noch
+  **nicht**.
+- Alt-Tab und ein echter Auflösungswechsel im realen Spiel bleiben als
+  längerer Regressionstest offen; die entsprechenden synthetischen Tests
+  bestehen.
+- M2 wird als funktionaler Monobrücken-Techniknachweis angenommen, nicht als
+  spielbarer oder komfortabler VR-Stand.

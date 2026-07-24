@@ -69,6 +69,7 @@ if(FEARVR_BUILD_HOST)
 endif()
 if(FEARVR_BUILD_PROXY)
   add_subdirectory(src/proxy32)
+  add_subdirectory(src/gameclient_loader)
   add_subdirectory(src/launcher)   # Launcher ist x86-nah, baut mit dem Proxy
 endif()
 if(FEARVR_BUILD_TESTS)

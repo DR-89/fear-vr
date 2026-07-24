@@ -15,7 +15,7 @@ extrahierten Assets mitgeliefert.
 |---|---|---|---|---|
 | Khronos OpenXR-SDK | x64-Host: Header/statischer Loader | https://github.com/KhronosGroup/OpenXR-SDK | Apache-2.0 | `release-1.1.59`, Commit `e5df31de6c15b4900aee3092273194e51282000d` |
 | Khronos OpenXR-SDK-Source (`hello_xr` als Referenz) | Host-Lebenszyklus-Vorlage, nicht mitgebaut | https://github.com/KhronosGroup/OpenXR-SDK-Source | Apache-2.0 | `release-1.1.59`, Commit `04e92820192a6eec490e5eb8ffbd8211bafb0551` |
-| MinHook | gezielte x86-Hooks | https://github.com/TsudaKageyu/minhook | BSD-2-Clause | _TBD_ |
+| MinHook | x86-Late-Hooks für ein bereits erzeugtes D3D9-Gerät | https://github.com/TsudaKageyu/minhook | BSD-2-Clause | `v1.3.4`, Commit `c3fcafdc10146beb5919319d0683e44e3c30d537` |
 | DirectXMath | Mathe (Posen, Projektion) | Teil des Windows 10/11 SDK | MIT | via Windows SDK |
 
 ## Offizielle F.E.A.R.-Bestandteile (NICHT in diesem Repo)

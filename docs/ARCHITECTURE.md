@@ -72,12 +72,70 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   gewechselt werden, sofern die Links-/Rechts-Zuordnung gleichwertig testbar
   bleibt.
 
+### AD-004 — Versionierter Drei-Slot-Ring über die Bitnessgrenze
+
+- **Problem:** Das x86-Spiel und der x64-Host dürfen keine rohen Pointer teilen
+  und sich im jeweiligen Renderthread nicht gegenseitig blockieren.
+- **Messung/Beleg:** Der D3D9Ex-Livetest importierte fortlaufend frische
+  Frame-/Generationspaare über dieselbe NVIDIA-Adapter-LUID; Reset,
+  Minimieren, Host-Abbruch und Prozessende hingen nicht.
+- **Getestete Optionen:** Einzeltextur mit implizitem Timing, CPU-Kopie und
+  expliziter Shared-Texture-Ring.
+- **Gewählte Lösung:** Drei Slots je Auge mit atomaren Zuständen,
+  Frame-ID/Generation, D3D9- und D3D11-Event-Queries sowie privater
+  D3D11-Zieltextur im Host. Der IPC-Header ist versioniert und hat in x86/x64
+  dieselbe geprüfte Größe.
+- **Bekannte Nachteile:** Mehr VRAM und Synchronisationslogik; bei vollem Ring
+  werden Frames verworfen.
+- **Rückfallpfad:** Ohne Host oder bei Protokoll-/Adapterfehler rendert das
+  normale Flat-`Present` weiter.
+
+### AD-005 — Offizielle archcfg-Stage plus spätes D3D9-Hooking
+
+- **Problem:** Eine kopierte Steam-EXE scheitert mit Application Load Error
+  `5:0000065434`; `FEARDevSP.exe` fordert ein CD/DVD-Laufwerk. Das offizielle
+  GameClient-Modul wird außerdem erst nach Erzeugung des D3D9-Geräts geladen.
+- **Messung/Beleg:** Der reale Lauf verifizierte Loader, Originalmodul und
+  Bridge aus `stage\m2-game`; ein isolierter Hook-Test fing `Present` und
+  `Reset` eines bereits existierenden Geräts ab.
+- **Getestete Optionen:** kopierte EXE, Dev-EXE, früher IAT-Hook und offizielle
+  `-archcfg`-Modulschicht mit spätem Detour.
+- **Gewählte Lösung:** Retail unverändert über Steam starten, eigene
+  `-archcfg`-Stage verwenden, originales VC7.1-GameClient über einen
+  ABI-neutralen Loader weiterreichen und die bereits vorhandenen
+  `Present`-/`Reset`-Ziele mit fest gepinntem MinHook 1.3.4 detouren.
+- **Bekannte Nachteile:** Ein später Hook sieht `Direct3DCreate9` und
+  `CreateDevice` nicht mehr; Reset-/Present-Ressourcen müssen ohne
+  Erzeugungshook sicher erkannt werden.
+- **Rückfallpfad:** Stage weglassen und F.E.A.R. unverändert über Steam
+  starten. Es gibt keine Remote-Thread-Injection und keinen Retail-Schreibzugriff.
+
+### AD-006 — Temporärer CPU-D3D9Ex-Pfad für klassisches D3D9
+
+- **Problem:** F.E.A.R. verwendet klassisches `IDirect3DDevice9`; eine darauf
+  angelegte Shared Texture wurde mit `D3DERR_INVALIDCALL` abgelehnt.
+- **Messung/Beleg:** Der D3D9Ex-Testproducer funktioniert GPU-direkt. Der
+  klassische D3D9-Test und das echte 1024×768-Spielbild funktionieren nur über
+  den protokollierten `path=cpu_d3d9ex`.
+- **Getestete Optionen:** direkter Shared-Handle auf D3D9, D3D9Ex-Hilfsgerät
+  und kontrollierte CPU-Übertragung zwischen den Geräten.
+- **Gewählte Lösung:** Für den M2-Integrationsnachweis
+  `GetRenderTargetData`, Zeilenkopie und `UpdateSurface` in eine
+  D3D9Ex-Shared-Texture. Das Protokoll setzt ausdrücklich
+  `FEARVR_BF_CPU_FALLBACK`.
+- **Bekannte Nachteile:** Per-Frame-CPU-Readback, zusätzliche Latenz und
+  Bandbreite; die finale Produktionsinvariante ist damit nicht erfüllt.
+- **Rückfallpfad:** Bridge deaktivieren oder bis zur GPU-direkten Lösung
+  Flat-Screen verwenden. Dieser Pfad darf nicht stillschweigend als
+  Release-/Performancepfad gelten.
+
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 
 - [ ] ob und wie `RenderCamera` zweimal **sicher** aufgerufen wird → `STEREO-RESEARCH.md`
 - [ ] HUD-Trennung (Welt-HUD vs. Menü-HUD, Quad-/Cylinder-Layer)
 - [ ] symmetrische vs. asymmetrische Projektion
-- [ ] D3D9/D3D11-Format und Synchronisation (Query-Event, Ringpuffer)
+- [x] D3D9/D3D11-Format und Synchronisation (Query-Event, Ringpuffer)
+      → `M2-D3D9-BRIDGE.md`, AD-004 bis AD-006
 - [ ] Koordinatenkonversion → `COORDINATE-SYSTEM.md`
 - [ ] Verhalten bei CameraFX / Zwischensequenzen (Komfortmodus)
 - [ ] Abgrenzung zu Motion-Controlled Aiming (erst ab M5, mit Nachweis)

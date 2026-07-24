@@ -1,0 +1,31 @@
+LIBRARY fearvr-d3d9
+EXPORTS
+    FearVr_IsHostConnected
+    FearVr_GetRenderRequest
+    FearVr_BeginEye
+    FearVr_CaptureEye
+    FearVr_EndStereoFrame
+    FearVr_InstallIatHook
+    FearVr_Ordinal16 @16 NONAME
+    FearVr_Ordinal17 @17 NONAME
+    FearVr_Ordinal18 @18 NONAME
+    FearVr_Ordinal19 @19 NONAME
+    Direct3DCreate9On12 @20
+    Direct3DCreate9On12Ex @21
+    FearVr_Ordinal22 @22 NONAME
+    FearVr_Ordinal23 @23 NONAME
+    Direct3DShaderValidatorCreate9=FearVr_Ordinal24 @24
+    PSGPError=FearVr_Ordinal25 @25
+    PSGPSampleTexture=FearVr_Ordinal26 @26
+    D3DPERF_BeginEvent @27
+    D3DPERF_EndEvent @28
+    D3DPERF_GetStatus @29
+    D3DPERF_QueryRepeatFrame @30
+    D3DPERF_SetMarker @31
+    D3DPERF_SetOptions @32
+    D3DPERF_SetRegion @33
+    DebugSetLevel=FearVr_Ordinal34 @34
+    DebugSetMute=FearVr_Ordinal35 @35
+    Direct3D9EnableMaximizedWindowedModeShim=FearVr_Ordinal36 @36
+    Direct3DCreate9 @37
+    Direct3DCreate9Ex @38

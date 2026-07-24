@@ -1,0 +1,5 @@
+LIBRARY GameClient
+EXPORTS
+    FearVrGameClientCompatData @1 NONAME DATA
+    GetBuildNumber @2
+    SetMasterDatabase @3

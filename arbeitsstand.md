@@ -24,10 +24,21 @@
   mit der VC7.1-F.E.A.R.-Runtime und dürfen nicht deployt werden.
 - Die ursprünglichen Public-Tools-Module sind wiederhergestellt. Die
   Steam-/Retail-Installation wurde nie verändert.
-- Der nächste unabhängige Implementierungsschritt ist M2: den D3D9-Proxy
-  vollständig weiterleitend und fail-open ausbauen und IPC/Shared-Texture-
-  Diagnose vorbereiten. Änderungen am GameClient warten auf eine echte
-  VC7.1-Toolchain.
+- M2 ist als x86-D3D9/x64-D3D11-Monobrücke implementiert. D3D9Ex läuft
+  GPU-direkt; klassisches D3D9 verwendet vorläufig einen markierten
+  CPU-D3D9Ex-Kompatibilitätspfad.
+- Der synthetische Cross-Bitness-Livetest bestand inklusive Adapter-LUID,
+  Ringpuffer, Minimieren/Wiederherstellen, Auflösungs-Reset, Spielende und
+  erzwungenem Host-Abbruch.
+- Eine Retail-schonende echte F.E.A.R.-Stage über die offizielle
+  `-archcfg`-Modulschicht ist vorhanden. Loader, Originalmodul und Bridge
+  wurden im laufenden Spiel verifiziert.
+- **M2-Live-Nachweis bestanden:** Der Benutzer sah das normale
+  F.E.A.R.-Menü in beiden Augen; Maus und Tastatur reagierten normal. Nach dem
+  Schließen des SteamVR-Desktop-Overlays blieb das Spielbild sichtbar.
+- Der Stand ist absichtlich noch nicht angenehm nutzbar: Beide Augen erhalten
+  dasselbe flache Monobild, Headtracking fehlt, und der klassische
+  D3D9-Kompatibilitätspfad führt einen CPU-Transfer pro Frame aus.
 
 ## 1. Verifizierte Umgebung
 
@@ -242,16 +253,19 @@ Details: `docs/M1-OPENXR-HOST.md`.
 
 ## 9. Empfohlene nächste Schritte
 
-1. Die zwei offenen manuellen M1-Lifecycle-Tests durchführen.
-2. **M2 vorbereiten:** bestehenden x86-`d3d9.dll`-Proxy erweitern,
-   Retail-D3D9 vollständig weiterleiten und zunächst nur Diagnose/IPC
-   ergänzen. Dafür wird kein neu gebauter GameClient benötigt.
-3. GPU-Adapter-LUID, IPC-Protokoll und Fail-open-Verhalten zwischen Proxy
-   und Host verifizieren.
-4. Vor GameClient-Änderungen eine rechtmäßig verfügbare VC7.1-Toolchain in
+1. M3 beginnen: den Welt-Renderdurchlauf sicher zweimal pro Frame ausführen
+   und pro Auge eine eigene Projektion einspeisen.
+2. Strikt nachweisen, dass Simulation, KI, Partikel, Sound, Eingabe und
+   Spielzeit nicht doppelt fortschreiten.
+3. Eine GPU-direkte Lösung für den klassischen D3D9-Retailpfad untersuchen.
+   Der aktuelle `FEARVR_BF_CPU_FALLBACK` bleibt bis dahin klar als
+   Kompatibilitäts-/Diagnosepfad markiert.
+4. Alt-Tab und einen echten F.E.A.R.-Auflösungswechsel als längeren
+   Regressionstest der M2-Brücke ausführen.
+5. Vor nativen GameClient-Änderungen eine rechtmäßig verfügbare VC7.1-Toolchain in
    einer isolierten historischen Buildumgebung einrichten. Keine
    inoffiziellen Compilerarchive ungeprüft herunterladen.
-5. Erst ein VC7.1-Stockmodul durch den vorhandenen ABI-Guard und M0-Lauftest
+6. Erst ein VC7.1-Stockmodul durch den vorhandenen ABI-Guard und M0-Lauftest
    bringen; danach VR-Änderungen in den Clientquellen beginnen.
 
 ## 10. Repository-Regeln
@@ -262,3 +276,64 @@ Details: `docs/M1-OPENXR-HOST.md`.
   Mod-/Archivmechanismen nutzen.
 - PowerShell-Dateien mit Umlauten als UTF-8 mit BOM speichern.
 - „VR spielbar“ erst ab M4, „Motion Controls“ erst ab M5 behaupten.
+
+## 11. M2 – D3D9-/OpenXR-Monobrücke
+
+Implementiert:
+
+- vollständige dokumentierte D3D9-Weiterleitung aus absolut geladenem
+  `%SystemRoot%\SysWOW64\d3d9.dll`;
+- Hooks für `Direct3DCreate9[Ex]`, `CreateDevice[Ex]`, `Reset` und `Present`;
+- früher Proxy-/VTable-Pfad sowie späte MinHook-Detours für ein bereits vor
+  dem GameClient-Loader erzeugtes D3D9-Gerät;
+- drei Shared-Texture-Slots pro Auge, GPU-`StretchRect` und
+  `D3DQUERYTYPE_EVENT`;
+- Protokollversion 2 mit 432-Byte-x86/x64-Header, Heartbeats, Prozess-IDs,
+  Adapter-LUID, Seqlock, Frame-ID und Generation;
+- D3D11-`OpenSharedResource`, private Textur je Auge, D3D11-Event-Query und
+  Fullscreen-Shader in die OpenXR-Swapchains;
+- GPU-direkter D3D9Ex-Pfad ohne CPU-Kopie;
+- explizit markierter CPU-D3D9Ex-Kompatibilitätspfad für das klassische
+  D3D9-Gerät des echten Spiels;
+- Adapter-Mismatch und Host-Ausfall bleiben fail-open;
+- isolierter Farbgenerator und reproduzierbare Normal-/Host-Abbruch-Tests;
+- sichere echte `-archcfg`-Stage ohne Retail-Schreibzugriff und ohne
+  Remote-Thread-Injection.
+
+Live-Nachweis des isolierten Bridgepfads am 24.07.2026:
+
+- NVIDIA GeForce RTX 3050 Laptop GPU, LUID `0x0:C91C` auf beiden Seiten;
+- 960×540 vor und 800×450 nach erfolgreichem Reset;
+- Frame/Generation 1 sowie 300 frisch importiert;
+- Producer lief nach erzwungenem Host-Abbruch bis Frame 600 weiter;
+- keine Hänger bei Minimieren, Reset, Host-Abbruch oder Prozessende.
+
+Live-Nachweis mit echtem F.E.A.R. am 24.07.2026:
+
+- Stage-Loader, originales VC7.1-GameClient-Modul und Bridge im laufenden
+  Prozess verifiziert;
+- späte `Present`-/`Reset`-Hooks aktiv;
+- 1024×768-Texturen beider Augen über dieselbe NVIDIA-LUID importiert;
+- Benutzer bestätigte sichtbares F.E.A.R.-Menü und normale
+  Maus-/Tastaturbedienung;
+- SteamVR-Desktop-Overlay erfolgreich geschlossen.
+
+Gate-Einschränkung:
+
+- Der echte klassische D3D9-Pfad enthält derzeit einen per-Frame-CPU-Readback
+  und erfüllt damit noch nicht die finale Produktionsinvariante.
+- Monobild, fehlendes Headtracking und flaches HUD erklären, warum der Stand
+  noch nicht angenehm nutzbar ist.
+- M2 gilt als funktionaler Techniknachweis; „VR spielbar“ wird weiterhin erst
+  ab M4 behauptet.
+
+Relevante Befehle:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\test-m2-bridge.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\test-m2-bridge.ps1 -AbortHost
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\prepare-m2-stage.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\launch-m2-fear.ps1
+```
+
+Details: `docs/M2-D3D9-BRIDGE.md`.

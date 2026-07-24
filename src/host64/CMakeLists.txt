@@ -25,9 +25,13 @@ add_subdirectory(
   EXCLUDE_FROM_ALL)
 
 add_executable(fearvr-host
+  ipc_bridge.cpp
+  ipc_bridge.h
   main.cpp
   openxr_host.cpp
   openxr_host.h
+  texture_renderer.cpp
+  texture_renderer.h
 )
 target_compile_definitions(fearvr-host PRIVATE
   XR_USE_PLATFORM_WIN32
@@ -41,6 +45,7 @@ target_link_libraries(fearvr-host PRIVATE
   fearvr-warnings
   OpenXR::openxr_loader
   d3d11
+  d3dcompiler
   dxgi
 )
 set_target_properties(fearvr-host PROPERTIES OUTPUT_NAME "fearvr-host")

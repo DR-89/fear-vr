@@ -33,7 +33,7 @@ extern "C" {
 /* ---- Protokoll-Identität ------------------------------------------------- */
 /* 'F','R','V','R' als Little-Endian-uint32 => 0x52565246 */
 #define FEARVR_PROTOCOL_MAGIC   0x52565246u
-#define FEARVR_PROTOCOL_VERSION 1u
+#define FEARVR_PROTOCOL_VERSION 2u
 
 /* ---- Augen & Ringpuffer -------------------------------------------------- */
 enum {
@@ -58,6 +58,17 @@ enum {
   FEARVR_RF_VALID          = 0x00000001u, /* Auftrag gültig                  */
   FEARVR_RF_TRANSLATION_ON = 0x00000002u, /* 6DoF-Translation aktiv          */
   FEARVR_RF_FLATSCREEN     = 0x00000004u  /* Game soll Flat rendern          */
+};
+
+/* Verbindungs-/Diagnoseflags in FearVrSharedHeader.bridgeFlags. */
+enum {
+  FEARVR_BF_HOST_READY       = 0x00000001u,
+  FEARVR_BF_GAME_READY       = 0x00000002u,
+  FEARVR_BF_ADAPTER_MATCH    = 0x00000004u,
+  FEARVR_BF_SHARED_SUPPORTED = 0x00000008u,
+  FEARVR_BF_DEVICE_LOST      = 0x00000010u,
+  FEARVR_BF_PROTOCOL_ERROR   = 0x00000020u,
+  FEARVR_BF_CPU_FALLBACK     = 0x00000040u
 };
 
 /* ---- Geometrie ----------------------------------------------------------- */
@@ -125,13 +136,21 @@ typedef struct FearVrSharedHeader {
   uint32_t reserved0;      /* Padding/zukünftig                             */
   uint64_t hostHeartbeat;  /* vom Host hochgezählt                          */
   uint64_t gameHeartbeat;  /* vom Game hochgezählt                          */
+  uint64_t requestSequence; /* Seqlock: ungerade=Schreibvorgang, gerade=stabil */
+  uint64_t hostAdapterLuid; /* HighPart: obere 32 Bit, LowPart: untere 32 Bit */
+  uint64_t gameAdapterLuid; /* HighPart: obere 32 Bit, LowPart: untere 32 Bit */
+  uint32_t hostProcessId;
+  uint32_t gameProcessId;
+  uint32_t bridgeFlags;     /* FEARVR_BF_*                                   */
+  uint32_t reserved1;
   FearVrRenderRequest request; /* neuester vollständig veröffentlichter Auftrag */
   /* Slots: [eye][slot] direkt nach dem Header im Mapping. */
   FearVrSlot slot[FEARVR_EYE_COUNT][FEARVR_SLOTS_PER_EYE];
 } FearVrSharedHeader;
 FEARVR_STATIC_ASSERT(
   sizeof(FearVrSharedHeader) ==
-    24 /* 6x uint32 */ + 16 /* 2x uint64 */ + sizeof(FearVrRenderRequest)
+    24 /* 6x uint32 */ + 40 /* 5x uint64 */ + 16 /* 4x uint32 */
+    + sizeof(FearVrRenderRequest)
     + (uint32_t)(FEARVR_EYE_COUNT * FEARVR_SLOTS_PER_EYE) * sizeof(FearVrSlot),
   "FearVrSharedHeader size");
 

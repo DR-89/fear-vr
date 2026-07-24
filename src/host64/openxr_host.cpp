@@ -29,6 +29,9 @@
 #include <openxr/openxr_platform.h>
 
 #include "fearvr-version.h"
+#include "ipc_bridge.h"
+#include "protocol_utils.h"
+#include "texture_renderer.h"
 #include "xr_session_state.h"
 
 namespace fearvr {
@@ -275,6 +278,7 @@ public:
 
     ~Host() {
         DestroySessionResources();
+        ipcBridge_.reset();
         deviceContext_.Reset();
         device_.Reset();
         adapter_.Reset();
@@ -503,6 +507,21 @@ private:
                        << " selectedFeatureLevel=0x"
                        << static_cast<unsigned>(selectedLevel);
         logger_.Write("INFO", "d3d11_adapter", adapterMessage.str());
+
+        textureRenderer_.Initialize(device_.Get());
+        if (options_.ipcSessionId != 0) {
+            const LUID& luid = adapterDescription_.AdapterLuid;
+            const std::uint64_t packedLuid =
+                PackLuid(static_cast<std::uint32_t>(luid.HighPart),
+                         luid.LowPart);
+            ipcBridge_ = std::make_unique<IpcBridge>(
+                options_.ipcSessionId, device_.Get(), deviceContext_.Get(),
+                packedLuid,
+                [this](const char* level, const char* event,
+                       const std::string& message) {
+                    logger_.Write(level, event, message);
+                });
+        }
     }
 
     void CreateSessionResources() {
@@ -799,6 +818,33 @@ private:
                 XR_VIEW_STATE_ORIENTATION_VALID_BIT;
             if (viewCount == 2 &&
                 (viewState.viewStateFlags & requiredFlags) == requiredFlags) {
+                if (ipcBridge_) {
+                    FearVrRenderRequest request{};
+                    request.frameId = ++requestFrameId_;
+                    request.predictedDisplayTimeNs =
+                        static_cast<std::uint64_t>(
+                            frameState.predictedDisplayTime);
+                    request.flags = FEARVR_RF_VALID;
+                    for (std::uint32_t eye = 0;
+                         eye < FEARVR_EYE_COUNT; ++eye) {
+                        const XrPosef& pose = locatedViews_[eye].pose;
+                        const XrFovf& fov = locatedViews_[eye].fov;
+                        FearVrEyeView& output = request.eye[eye];
+                        output.pose.px = pose.position.x;
+                        output.pose.py = pose.position.y;
+                        output.pose.pz = pose.position.z;
+                        output.pose.qx = pose.orientation.x;
+                        output.pose.qy = pose.orientation.y;
+                        output.pose.qz = pose.orientation.z;
+                        output.pose.qw = pose.orientation.w;
+                        output.fov.angleLeft = fov.angleLeft;
+                        output.fov.angleRight = fov.angleRight;
+                        output.fov.angleUp = fov.angleUp;
+                        output.fov.angleDown = fov.angleDown;
+                    }
+                    ipcBridge_->PublishRenderRequest(request);
+                    ipcBridge_->ConsumeLatestPair();
+                }
                 for (std::uint32_t eye = 0; eye < 2; ++eye) {
                     RenderEye(eye);
                     projectionViews_[eye].pose = locatedViews_[eye].pose;
@@ -866,10 +912,21 @@ private:
                     renderTarget.ReleaseAndGetAddressOf()),
                 "ID3D11Device::CreateRenderTargetView");
 
-        constexpr std::array<float, 4> leftColor{0.90F, 0.03F, 0.03F, 1.0F};
-        constexpr std::array<float, 4> rightColor{0.03F, 0.12F, 0.90F, 1.0F};
-        const auto& color = eye == 0 ? leftColor : rightColor;
-        deviceContext_->ClearRenderTargetView(renderTarget.Get(), color.data());
+        if (ipcBridge_ && ipcBridge_->HasImage(eye)) {
+            textureRenderer_.Draw(
+                deviceContext_.Get(), renderTarget.Get(),
+                ipcBridge_->ImageView(eye),
+                static_cast<float>(swapchain.width),
+                static_cast<float>(swapchain.height));
+        } else {
+            constexpr std::array<float, 4> leftColor{
+                0.90F, 0.03F, 0.03F, 1.0F};
+            constexpr std::array<float, 4> rightColor{
+                0.03F, 0.12F, 0.90F, 1.0F};
+            const auto& color = eye == 0 ? leftColor : rightColor;
+            deviceContext_->ClearRenderTargetView(renderTarget.Get(),
+                                                  color.data());
+        }
         deviceContext_->Flush();
 
         XrSwapchainImageReleaseInfo releaseInfo{
@@ -883,6 +940,27 @@ private:
         bool exitLoop = false;
         auto exitDeadline = std::chrono::steady_clock::time_point::max();
         while (!exitLoop && !g_stopRequested.load()) {
+            if (ipcBridge_) {
+                ipcBridge_->Tick();
+            }
+            if (options_.exitOnGameDisconnect && !exitRequested_ &&
+                ipcBridge_ &&
+                ipcBridge_->GameWasConnected() &&
+                !ipcBridge_->GameConnected()) {
+                logger_.Write(
+                    "INFO", "game_disconnect_exit",
+                    "Game-Heartbeat beendet; OpenXR-Host wird beendet.");
+                if (lifecycle_.IsSessionRunning()) {
+                    CheckXr(instance_, xrRequestExitSession(session_),
+                            "xrRequestExitSession(game disconnect)");
+                    exitRequested_ = true;
+                    exitDeadline =
+                        std::chrono::steady_clock::now() +
+                        std::chrono::seconds(5);
+                } else {
+                    return LoopResult::Exit;
+                }
+            }
             const LoopResult eventResult = PollEvents(exitLoop);
             if (exitLoop) {
                 return eventResult;
@@ -937,12 +1015,15 @@ private:
     DXGI_ADAPTER_DESC1 adapterDescription_{};
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> deviceContext_;
+    TextureRenderer textureRenderer_;
+    std::unique_ptr<IpcBridge> ipcBridge_;
     std::vector<XrViewConfigurationView> viewConfiguration_;
     std::vector<XrView> locatedViews_;
     std::vector<XrCompositionLayerProjectionView> projectionViews_;
     std::vector<Swapchain> swapchains_;
     XrSessionStateMachine lifecycle_;
     std::uint64_t submittedFrames_{0};
+    std::uint64_t requestFrameId_{0};
     bool exitRequested_{false};
 };
 

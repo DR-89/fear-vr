@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Read-only-Prüfer für die F.E.A.R.-VR-Arbeitsumgebung (ANWEISUNG.md §2, §12).
 

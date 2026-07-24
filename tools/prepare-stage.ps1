@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Bereitet die isolierte, Retail-schonende Stage vor (ANWEISUNG.md §12).
 

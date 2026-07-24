@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Startet die isolierte F.E.A.R.-Stage — flat (M0) oder mit VR-Host (ab M1).
 

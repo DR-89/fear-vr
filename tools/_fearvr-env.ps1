@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # Gemeinsame Konstanten & Helfer (ANWEISUNG.md §2). Per Dot-Sourcing genutzt:
 #   . "$PSScriptRoot\_fearvr-env.ps1"
 # Enthält KEINE ausführbare Logik außer Definitionen.

@@ -1820,18 +1820,9 @@ using PresentFunction =
                                 const RECT*, HWND, const RGNDATA*);
 
 void ForceHighQualitySource(D3DPRESENT_PARAMETERS* parameters) noexcept {
-    if (parameters == nullptr || parameters->BackBufferWidth < 640 ||
-        parameters->BackBufferHeight < 480) {
-        return;
-    }
-    // Render the mono source in a valid windowed target. Changing only a
-    // fullscreen mode made LithTech reject the renderer; windowed D3D9
-    // accepts this 16:9 target and the OpenXR host scales it to the headset
-    // swapchain afterwards.
-    parameters->Windowed = TRUE;
-    parameters->BackBufferWidth = 1920;
-    parameters->BackBufferHeight = 1080;
-    parameters->FullScreen_RefreshRateInHz = 0;
+    // Keep Retail's own display mode. The game menu relies on that mode's
+    // coordinate system; overriding it breaks the flat VR menu projection.
+    (void)parameters;
 }
 
 struct D3D9VtableRecord {

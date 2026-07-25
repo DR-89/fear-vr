@@ -10,6 +10,7 @@ EXPORTS
     FearVr_SetStereoHudEnabled
     FearVr_IsComfortModeEnabled
     FearVr_SetComfortModeEnabled
+    FearVr_SetMenuActive
     FearVr_RequestRecenter
     FearVr_IsFlatPanelActive
     FearVr_RegisterStereoToggleCallback

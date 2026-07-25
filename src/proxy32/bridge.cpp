@@ -499,6 +499,26 @@ public:
                 : "Comfort panel disabled from the VR menu; stereo resumes.");
     }
 
+    void SetMenuActive(BOOL active) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const bool requested = active != FALSE;
+        if (menuActive_ == requested) {
+            return;
+        }
+        menuActive_ = requested;
+        ClearStereoFrame();
+        if (shared_ != nullptr) {
+            InterlockedAnd(
+                AtomicFlags(*shared_),
+                static_cast<LONG>(~FEARVR_BF_STEREO_ACTIVE));
+        }
+        logger_.Write(
+            "INFO", "menu_render_mode",
+            menuActive_
+                ? "Pause/menu detected; native stereo disabled immediately."
+                : "Gameplay detected; native stereo may resume on the next frame.");
+    }
+
     void RequestRecenter() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         IncrementRecenterGeneration();
@@ -555,6 +575,9 @@ public:
                     snapshot.flags |= FEARVR_RF_TRANSLATION_ON;
                 }
                 if (comfortModeEnabled_) {
+                    snapshot.flags |= FEARVR_RF_FLATSCREEN;
+                }
+                if (menuActive_) {
                     snapshot.flags |= FEARVR_RF_FLATSCREEN;
                 }
                 *output = snapshot;
@@ -1489,10 +1512,13 @@ private:
         }
         const std::uint64_t totalPixels =
             static_cast<std::uint64_t>(width_) * height_;
+        // Menu state is supplied by the verified Retail menu/freshness hooks.
+        // Pixel coverage alone cannot distinguish a menu from a fullscreen
+        // gameplay effect such as Slow-Mo, so it must not select mono video
+        // mode anymore.
+        const bool flatPanel = menuActive_;
         const bool composite =
-            IsSafePostWorldCoverage(changedPixels, totalPixels);
-        const bool flatPanel =
-            IsFlatPanelCoverage(changedPixels, totalPixels);
+            !flatPanel && IsSafePostWorldCoverage(changedPixels, totalPixels);
         stereoHudFlatFrame_ = flatPanel;
 
         for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
@@ -1794,6 +1820,7 @@ private:
     bool recenterKeyWasDown_{false};
     bool comfortKeyWasDown_{false};
     bool comfortModeEnabled_{false};
+    bool menuActive_{false};
     std::uint32_t recenterGeneration_{0};
     StereoToggleCallback stereoToggleCallback_{nullptr};
 };
@@ -2271,6 +2298,10 @@ BOOL IsComfortModeEnabled() noexcept {
 
 void SetComfortModeEnabled(BOOL enabled) noexcept {
     GetBridge().SetComfortModeEnabled(enabled);
+}
+
+void SetMenuActive(BOOL active) noexcept {
+    GetBridge().SetMenuActive(active);
 }
 
 void RequestRecenter() noexcept {

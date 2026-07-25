@@ -34,6 +34,7 @@ using IsStereoEnabledFunction = BOOL(__cdecl*)();
 using SetStereoEnabledFunction = void(__cdecl*)(BOOL);
 using GetBooleanOptionFunction = BOOL(__cdecl*)();
 using SetBooleanOptionFunction = void(__cdecl*)(BOOL);
+using SetMenuActiveFunction = void(__cdecl*)(BOOL);
 using RequestRecenterFunction = void(__cdecl*)();
 using IsFlatPanelActiveFunction = BOOL(__cdecl*)();
 using StereoToggleCallback = void(__cdecl*)(BOOL);
@@ -102,6 +103,7 @@ GetBooleanOptionFunction g_isStereoHudEnabled = nullptr;
 SetBooleanOptionFunction g_setStereoHudEnabled = nullptr;
 GetBooleanOptionFunction g_isComfortModeEnabled = nullptr;
 SetBooleanOptionFunction g_setComfortModeEnabled = nullptr;
+SetMenuActiveFunction g_setMenuActive = nullptr;
 RequestRecenterFunction g_requestRecenter = nullptr;
 IsFlatPanelActiveFunction g_isFlatPanelActive = nullptr;
 RegisterStereoToggleFunction g_registerStereoToggle = nullptr;
@@ -223,6 +225,10 @@ bool g_lastMenuTriggerDown = false;
 bool g_menuAxisDown[4]{};
 ULONGLONG g_menuAxisRepeatTick[4]{};
 bool g_menuControllerActive = false;
+ULONGLONG g_menuActivationHoldUntil = 0;
+bool g_menuFocusKnown = false;
+bool g_menuFocusActive = false;
+bool g_escapeWasDown = false;
 bool g_seenForwardAxisBinding = false;
 bool g_seenStrafeAxisBinding = false;
 bool g_controllerCommandActive[128]{};
@@ -1402,6 +1408,30 @@ void __fastcall HookRetailMenuOnFocus(
     if (menu == g_vrMenuOwner && g_vrMenuControlsBuilt) {
         g_vrSettingsPageActive = false;
         RestoreRetailSystemMenuControls();
+        // Fokusgewinn ist eine sichere Aussage: Das Pausenmenü ist offen.
+        // Fokusverlust ist es ausdrücklich nicht. Optionen, Speichern und
+        // Laden sind eigene Menüobjekte, die dem Systemmenü den Fokus
+        // entziehen. Würde hier "kein Menü" angenommen, verlöre das
+        // Untermenü seine Controllersteuerung und der Bildpfad schaltete
+        // zurück auf die Welt. Deshalb übernimmt dann wieder die Heuristik
+        // über die Frische des Weapon-Manager-Updates.
+        if (focus) {
+            g_menuActivationHoldUntil = GetTickCount64() + 1000;
+            g_menuFocusKnown = true;
+            g_menuFocusActive = true;
+            if (g_setMenuActive != nullptr) {
+                __try {
+                    g_setMenuActive(TRUE);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    Report(
+                        "WARN", "menu_render_mode_failed",
+                        "The bridge rejected the Retail menu focus update.");
+                }
+            }
+        } else {
+            g_menuActivationHoldUntil = 0;
+            g_menuFocusKnown = false;
+        }
     }
     g_retailMenuOnFocus(menu, focus);
 }
@@ -4264,29 +4294,57 @@ void PollControllerMenuInput() noexcept {
         triggerDown && !g_lastMenuTriggerDown;
     const bool menuRequested =
         (pressed & FEARVR_IB_LEFT_STICK) != 0;
+    const bool escapeDown =
+        (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    const bool escapePressed = escapeDown && !g_escapeWasDown;
+    g_escapeWasDown = escapeDown;
 
     const ULONGLONG now = GetTickCount64();
-    bool flatPanelActive = false;
-    if (g_isFlatPanelActive != nullptr) {
-        __try {
-            flatPanelActive = g_isFlatPanelActive() != FALSE;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            flatPanelActive = false;
+    if (menuRequested || escapePressed) {
+        // Escape kommt synchron an, das Retail-Menü öffnet erst im nächsten
+        // Update. Ein blindes Umschalten wäre falsch: Escape öffnet das
+        // Pausenmenü nur aus dem Spiel heraus, innerhalb der Menüs geht es
+        // eine Ebene zurück und schließt sie erst auf der obersten.
+        if (!g_menuFocusKnown || !g_menuFocusActive) {
+            g_menuActivationHoldUntil = now + 1000;
+            g_menuFocusKnown = true;
+            g_menuFocusActive = true;
+        } else {
+            // Ob das Menü damit geschlossen wurde oder nur eine Ebene
+            // zurückging, ist hier nicht erkennbar. Die Heuristik entscheidet.
+            g_menuFocusKnown = false;
+        }
+        if (menuRequested) {
+            TapMenuKey(VK_ESCAPE);
+            Report(
+                "INFO", "controller_pause_requested",
+                "Left stick click sent one Escape key edge.");
         }
     }
     // Main screens are intentionally mono until F8, so render coverage alone
     // cannot identify them. The verified weapon-manager hook is called every
     // playing frame and stops for screens, pause menus and message boxes.
-    constexpr ULONGLONG kPlayingFrameFreshMs = 250;
+    // A single delayed weapon-manager callback must not switch the headset to
+    // the mono/video path for one frame. Retail pause/menu focus is handled
+    // immediately above; this is only the fallback for screens and message
+    // boxes without that focus edge.
+    constexpr ULONGLONG kPlayingFrameFreshMs = 500;
     const bool playingFrameFresh =
         g_lastWeaponManagerUpdateTick != 0 &&
         now - g_lastWeaponManagerUpdateTick <= kPlayingFrameFreshMs;
-    const bool menuActive = flatPanelActive || !playingFrameFresh;
-    if (menuRequested) {
-        TapMenuKey(VK_ESCAPE);
-        Report(
-            "INFO", "controller_pause_requested",
-            "Left stick click sent one Escape key edge.");
+    const bool menuActivationHeld =
+        now < g_menuActivationHoldUntil;
+    const bool menuActive = g_menuFocusKnown
+        ? g_menuFocusActive
+        : (menuActivationHeld || !playingFrameFresh);
+    if (g_setMenuActive != nullptr) {
+        __try {
+            g_setMenuActive(menuActive ? TRUE : FALSE);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Report(
+                "WARN", "menu_render_mode_failed",
+                "The bridge rejected the pause/menu render-mode update.");
+        }
     }
     if (!menuActive) {
         for (std::size_t index = 0; index < 4; ++index) {
@@ -4313,6 +4371,11 @@ void PollControllerMenuInput() noexcept {
         if (g_vrSettingsPageActive) {
             LeaveRetailVrSettingsPage();
         } else {
+            // B geht in Untermenüs eine Ebene zurück und schließt das Menü
+            // nur auf der obersten Ebene. Deshalb hier kein "Menü zu"
+            // behaupten, sondern der Heuristik überlassen.
+            g_menuFocusKnown = false;
+            g_menuActivationHoldUntil = 0;
             TapMenuKey(VK_ESCAPE);
         }
     }
@@ -4584,6 +4647,8 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     g_setComfortModeEnabled =
         Resolve<SetBooleanOptionFunction>(
             bridge, "FearVr_SetComfortModeEnabled");
+    g_setMenuActive =
+        Resolve<SetMenuActiveFunction>(bridge, "FearVr_SetMenuActive");
     g_requestRecenter =
         Resolve<RequestRecenterFunction>(
             bridge, "FearVr_RequestRecenter");

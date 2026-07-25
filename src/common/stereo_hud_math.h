@@ -21,9 +21,12 @@ inline bool IsPostWorldPixel(std::uint32_t presented,
 }
 
 inline bool IsSafePostWorldCoverage(std::uint64_t changedPixels,
-                                    std::uint64_t totalPixels) noexcept {
+                                     std::uint64_t totalPixels) noexcept {
+    // Sparse HUD elements can be lifted into stereo. Large deltas are usually
+    // fullscreen effects (for example Slow-Mo) and must stay out of the HUD
+    // compositor, otherwise their mono filter gets warped into both eyes.
     return totalPixels != 0 && changedPixels != 0 &&
-           changedPixels * 100u <= totalPixels * 65u;
+           changedPixels * 100u <= totalPixels * 20u;
 }
 
 inline bool IsFlatPanelCoverage(std::uint64_t changedPixels,

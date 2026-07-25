@@ -31,11 +31,11 @@ int main() {
         fearvr::IsSafePostWorldCoverage(1, 100),
         "sparse HUD coverage must be accepted");
     ok &= Expect(
-        fearvr::IsSafePostWorldCoverage(65, 100),
-        "the coverage boundary must be accepted");
+        fearvr::IsSafePostWorldCoverage(20, 100),
+        "the sparse HUD coverage boundary must be accepted");
     ok &= Expect(
-        !fearvr::IsSafePostWorldCoverage(66, 100),
-        "full-screen-like coverage must be rejected");
+        !fearvr::IsSafePostWorldCoverage(21, 100),
+        "fullscreen-effect coverage must be rejected");
     ok &= Expect(
         !fearvr::IsSafePostWorldCoverage(0, 100),
         "an empty delta must not enter the compositor");

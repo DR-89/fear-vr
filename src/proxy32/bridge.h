@@ -28,6 +28,7 @@ BOOL IsStereoHudEnabled() noexcept;
 void SetStereoHudEnabled(BOOL enabled) noexcept;
 BOOL IsComfortModeEnabled() noexcept;
 void SetComfortModeEnabled(BOOL enabled) noexcept;
+void SetMenuActive(BOOL active) noexcept;
 void RequestRecenter() noexcept;
 BOOL IsFlatPanelActive() noexcept;
 void RegisterStereoToggleCallback(

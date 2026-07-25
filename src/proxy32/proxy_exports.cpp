@@ -161,6 +161,10 @@ extern "C" void FearVr_SetComfortModeEnabled(BOOL enabled) {
     fearvr::SetComfortModeEnabled(enabled);
 }
 
+extern "C" void FearVr_SetMenuActive(BOOL active) {
+    fearvr::SetMenuActive(active);
+}
+
 extern "C" void FearVr_RequestRecenter() {
     fearvr::RequestRecenter();
 }

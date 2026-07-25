@@ -24,6 +24,8 @@ F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
 [![F.E.A.R. VR in action](https://img.youtube.com/vi/QTsNeLT8Pn8/maxresdefault.jpg)](https://youtu.be/QTsNeLT8Pn8)
 
+▶️ **Watch the demo on YouTube:** https://youtu.be/QTsNeLT8Pn8
+
 ## Features
 
 Everything listed here is implemented and has run in the actual game. Where

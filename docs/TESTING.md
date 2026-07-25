@@ -614,6 +614,35 @@ Umgeschaltet wird über `-Runtime`, das `XR_RUNTIME_JSON` nur für den
 Hostprozess setzt. Die systemweite Runtime-Einstellung wird nicht verändert
 (AD-018).
 
+## 17. Weitergebbares Paket, geprüft am 25.07.2026
+
+`tools\make-release.ps1` erzeugt unter `dist\` Ordner und ZIP (rund 1,7 MB,
+ZIP 0,52 MB). Enthalten sind nur eigene Binaries, Skripte und Doku.
+
+| Prüfung | Ergebnis |
+|---|---|
+| Lizenzgegenprobe im Paketskript | bricht bei proprietärem Dateinamen **und** bei dem bekannten Hash des Public-Tools-Moduls ab |
+| `install.ps1` ohne Parameter | findet Retail über die Steam-Bibliotheken, verifiziert Version und SHA-256 |
+| Public-Tools-Erkennung | über den Hash des unveränderten VC7.1-`GameClient.dll` |
+| Paketintegrität | `install.ps1` prüft jede Datei gegen `release-manifest.json` |
+| Installation | 7 Module gestaged, Desktop-Verknüpfung erzeugt, Retail unverändert |
+| Start aus der Installation | Bridge verbunden, `ipc_frame` importiert, VDXR aktiv |
+| Deinstallation | entfernt alles außer `userdata`; Retail unverändert |
+
+### Fehlschlag beim ersten Paketstand
+
+Standardziel war `%LOCALAPPDATA%\FearVR`. Dort brach das Spiel mit
+„Failed to initialize client - unable to load game resources" ab. Im Prozess
+waren nur 48 statt 152 Module geladen, es entstand kein Proxy-Log, und der
+Host zeigte mangels Bildern seinen roten Ersatzbildschirm.
+
+Eingegrenzt wurde es durch Kreuztests mit byteweise identischen Dateien: Nur
+der **Ort der Archivkonfiguration** entscheidet, das Modulverzeichnis darf
+unter `%LOCALAPPDATA%` liegen. Details und Messtabelle in AD-020.
+
+Behoben durch Standardziel `%USERPROFILE%\FearVR` und eine Sperre in
+`install.ps1` gegen Ziele unterhalb von `%LOCALAPPDATA%`.
+
 ### Offen
 
 - Ein Lauf über volle 15 Minuten **mit** Instrumentierung. Der Messlauf war

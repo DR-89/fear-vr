@@ -427,6 +427,53 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Rückfallpfad:** Ohne `-Runtime` gilt unverändert die systemweite
   Einstellung.
 
+### AD-019 — Weitergebbares Paket ohne proprietaere Inhalte
+
+- **Problem:** M6 verlangt einen lokalen Installer ohne Retail-Inhalte. Von den
+  sieben Dateien der Spielstage stammen fuenf aus den Public Tools
+  (`GameOrig.dll`, `GameServer.dll`, `ClientFx.fxd`, `FEAR.dep`,
+  `FEARMod.Arch00s`) und duerfen nicht weitergegeben werden.
+- **Messung/Beleg:** Eine Suche im Retail-Verzeichnis am 25.07.2026 fand keine
+  dieser Dateien lose; sie existieren dort ueberhaupt nicht. Nur `GameClient.dll`
+  (Loader) und `fearvr-d3d9.dll` sind eigener Code.
+- **Gewählte Lösung:** `tools\make-release.ps1` packt ausschliesslich eigene
+  Binaries, Skripte und Doku (rund 1,7 MB). `install.ps1` holt die fuenf
+  Public-Tools-Module auf dem Zielrechner aus dessen eigener Installation und
+  verifiziert sie ueber den Hash des unveraenderten VC7.1-`GameClient.dll`.
+  Das Paketskript prueft am Ende gegen Dateinamen **und** gegen diesen Hash,
+  dass nichts Proprietaeres mitgepackt wurde, und bricht sonst ab.
+- **Installationsziel:** ein eigener Ordner mit Desktop-Verknuepfung, nicht der
+  Retail-Ordner. Retail bleibt unbeschrieben, die Steam-Dateipruefung sauber,
+  und die Deinstallation ist ein Ordnerloeschen.
+- **Bekannter Nachteil:** Der Empfaenger muss die Public Tools selbst
+  installieren, inklusive des Registry-Tricks `Patch=8`.
+- **Details:** `tools\release\README-PACKAGE.md`, `docs/TESTING.md` §17.
+
+### AD-020 — Installationsziel nicht unterhalb von %LOCALAPPDATA%
+
+- **Problem:** Der erste Paketstand installierte nach `%LOCALAPPDATA%\FearVR`.
+  Das Spiel brach dort mit „Failed to initialize client - unable to load game
+  resources" ab; im Headset blieb der rote Ersatzbildschirm des Hosts stehen.
+- **Messung/Beleg:** Der Fehler haengt allein am Ort der Archivkonfiguration.
+  Byteweiser Vergleich: Die Dateien sind bis auf den Modulpfad identisch, beide
+  608 Bytes, gleiche Zeilenenden, gleiche ACLs, keine alternativen Datenstroeme.
+  Kreuztests am 25.07.2026:
+
+  | Ort der archcfg | Ergebnis |
+  |---|---|
+  | `%LOCALAPPDATA%\FearVR\` | Error |
+  | `%LOCALAPPDATA%\FearVrCfgTest\` (leerer Ordner) | Error |
+  | `%LOCALAPPDATA%\Temp\` | startet |
+  | `%USERPROFILE%\FearVR\` | startet |
+  | Projektordner | startet |
+
+  Dieselbe Datei startet aus `Temp` und scheitert aus `FearVR`; das
+  Modulverzeichnis darf dagegen unter `%LOCALAPPDATA%` liegen.
+- **Gewählte Lösung:** Standardziel `%USERPROFILE%\FearVR`. `install.ps1` lehnt
+  Ziele unterhalb von `%LOCALAPPDATA%` mit einer erklaerenden Meldung ab.
+- **Offen:** Die Ursache im Retail-Binary ist nicht geklaert. Dokumentiert ist
+  die gemessene Regel, keine Erklaerung.
+
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 
 - [x] ob und wie `RenderCamera` zweimal **sicher** aufgerufen wird → `STEREO-RESEARCH.md`

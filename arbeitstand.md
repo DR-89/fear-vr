@@ -252,7 +252,7 @@ Kurze Tracking-Lücken der Handpose werden bis 150 ms aus dem letzten gültigen
 Pose-Cache überbrückt. Das allein hat den Treppen-Sprung nicht gelöst, ist aber
 als Schutz gegen einzelne ungültige Frames weiterhin aktiv.
 
-## Offen: Absturz an einer geskripteten Zwischensequenz
+## Gelöst: Absturz an einer geskripteten Zwischensequenz
 
 Benutzermeldung am 25.07.2026: Das Spiel stürzt reproduzierbar an **einer
 bestimmten** Zwischensequenz ab. Andere Sequenzen laufen in 3D durch. Pures
@@ -312,60 +312,56 @@ Stack. Der Schaden entsteht also früher als der Absturz.
 8. **Kommando-Injektion** — Absturz mit `inject=0`.
 9. **Bindungs-Hook** — Absturz mit `binding_hook=0`.
 
-### Wo es steht
+### Ursache: der Detour auf `SetTrackedTarget`
 
-Einziger bekannter Unterschied zwischen „läuft durch" und „stürzt ab":
+Die Eingrenzung lief über `-NoInput` → `-NoAimHooks` → `-NoAimAt`. Wichtig für
+das Verständnis: `-NoInput` lässt nicht nur den `IClientShell::Update`-Hook
+weg, an diesem Pfad hängt auch `InstallWeaponAimHooks`. Im überlebenden Lauf
+fehlt `weapon_aim_hooks_installed` im Log, in jedem abgestürzten ist es
+vorhanden. Diese Verwechslung hat unterwegs zu einer falschen
+Zwischenschlussfolgerung geführt.
 
-- `-NoInput`: `InstallClientInputHook` kehrt sofort zurück → Szene läuft durch.
-- Jeder andere Lauf: Absturz.
+Entscheidend war dann `-fearvr-aimat-passthrough`:
 
-**Achtung, hier wurde zwischenzeitlich falsch geschlossen.** `-NoInput` lässt
-nicht nur den `IClientShell::Update`-Hook weg: An diesem Pfad hängt auch
-`InstallWeaponAimHooks`. Im überlebenden Lauf fehlt `weapon_aim_hooks_installed`
-im Log, in jedem abgestürzten ist es vorhanden.
+| Konfiguration | Ergebnis |
+|---|---|
+| AimAt-Hook aktiv, Ziel überschrieben | Absturz |
+| AimAt-Hook aktiv, **reicht nur durch** | **Absturz** |
+| AimAt-Hook nicht installiert | läuft durch |
 
-Damit ist die **Waffen-/AimAt-Hookgruppe** der verbleibende Verdächtige:
+Der Hook war installiert und tat nachweislich nichts — und es stürzte
+trotzdem ab. **Ursache ist das Patchen dieser Funktion selbst**, nicht unser
+Zielwert und nicht der Inhalt des Hooks.
 
-- `HookRetailWeaponManagerUpdate`
-- `HookRetailSetTrackedTarget` — überschreibt das AimAt-Ziel des Spielerkörpers
-- `HookRetailGetFireVectors`
-- `SetWeaponVisible`
+Erwähnenswert, weil es zwei naheliegende Erklärungen ausschließt:
 
-Diese Gruppe war auch im `-Safe`-Lauf aktiv, in dem Node-Controls,
-Waffentransform, Taschenlampe und Piece-Hiding abgeschaltet waren. Sie ist
-also unabhängig von jenen vier.
+- `EnsureHandNodeControls(nullptr)` kehrt sofort zurück. Für fremde Kontexte —
+  also den gespawnten NPC — tat der Hook ohnehin nichts.
+- `IsStaticPlayerBodyTrackerContext` prüft, ob der Kontext im statischen
+  Datenbereich von `GameOrig.dll` liegt (`0x002D0000`–`0x002E9900`). NPCs sind
+  Heap-Objekte und fallen korrekt durch; eine Verwechslung fand nicht statt.
 
-Dazu passt die Benutzerbeobachtung zur Szene: Es wird ein Audio abgespielt,
-**ein NPC spawnt und bewegt Objekte**. `SetTrackedTarget` ist genau der
-Charakter-Node-Tracker.
+### Lösung
 
-Zwei Details, die dabei auffielen und einer Prüfung wert sind:
+`HookRetailSetTrackedTarget` wird **nicht mehr installiert**. Mit
+`-fearvr-aimat` lässt es sich zu Vergleichszwecken wieder zuschalten.
 
-- `EnsureHandNodeControls(trackerPlayerBody)` wird in
-  `HookRetailSetTrackedTarget` **unbedingt** aufgerufen, auch für fremde
-  Kontexte mit `nullptr`.
-- `IsStaticPlayerBodyTrackerContext` erkennt den Spielerkörper daran, dass der
-  Kontext im statischen Datenbereich von `GameOrig.dll` liegt
-  (`0x002D0000`–`0x002E9900`). NPCs sind Heap-Objekte und fallen korrekt durch;
-  eine Verwechslung ist damit unwahrscheinlich, aber nicht gemessen.
+Kosten: Oberkörper und Kopf des Spielerkörpers drehen nicht mehr in die
+Zielrichtung nach. Waffenhaltung, roter Zielstrahl, Fire-Vectors und
+Trefferpunkt sind nicht betroffen. Vom Benutzer am 25.07.2026 im Spiel
+bestätigt: Die Szene läuft durch, der Rest fühlt sich normal an.
 
-Nächster Schritt: `-NoAimHooks` an derselben Stelle testen. Läuft es durch, ist
-die Gruppe bestätigt und es geht einzeln weiter, beginnend mit
-`SetTrackedTarget`.
+### Lehre für weitere Retail-Hooks
+
+Ein MinHook-Detour auf eine Retail-Funktion kann stabil aussehen und trotzdem
+in einer einzelnen Spielsituation tödlich sein — hier ohne jede
+Rücksprungadresse aus unserem Code im Stack. Wenn ein Absturz auf einen
+unserer Hooks zeigt, ist der aussagekräftigste Test **nicht**, den Hookinhalt
+zu entschärfen, sondern ihn als reines Durchreichen zu betreiben. Erst das
+trennt „unser Code" von „unser Patch".
 
 **Vom Benutzer am 25.07.2026 zurückgestellt.** An dem Hook hängt die gesamte
 VR-Controllerunterstützung; ihn zu entfernen hieße, das Feature zu entfernen.
-
-### Umweg für den Alltag
-
-Zwei Desktop-Verknüpfungen:
-
-- **F.E.A.R. VR** — normal, voller Mod
-- **F.E.A.R. VR (Problemszene, Maus+Tastatur)** — `-NoInput`
-
-Die zweite überlebt die Szene nachweislich. Ablauf: normal beenden, mit der
-zweiten starten, Szene mit Maus und Tastatur durchspielen, speichern, wieder
-normal weiter. Kopftracking und 3D laufen dabei durchgehend.
 
 ### Nicht erneut versuchen
 

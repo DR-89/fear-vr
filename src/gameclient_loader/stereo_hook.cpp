@@ -332,6 +332,12 @@ bool g_disableClientUpdateWork = false;
 // Laesst Weapon-Manager-, AimAt- und Fire-Vector-Hook ungesetzt. Diese Gruppe
 // war in jedem abgestuerzten Lauf aktiv und im einzigen ueberlebenden nicht.
 bool g_disableAimHooks = false;
+// Nur der AimAt-Node-Tracker. Er laeuft fuer jeden Charakter, nicht nur fuer
+// den Spieler, und ist damit der Kandidat fuer den NPC in der Problemszene.
+bool g_disableAimAtHook = false;
+// Hook bleibt gesetzt, ueberschreibt das Ziel aber nie. Trennt "der Detour
+// selbst stoert" von "unser Zielwert stoert".
+bool g_aimAtPassthrough = false;
 bool g_stableWeaponMotionConfigured = false;
 bool g_headBobOriginalKnown = false;
 float g_headBobOriginalScale = 1.0F;
@@ -801,17 +807,34 @@ void ConfigureComfortOptions() noexcept {
         CommandLineContains(L"-fearvr-no-client-update");
     g_disableAimHooks =
         CommandLineContains(L"-fearvr-no-aim-hooks");
+    // Der AimAt-Hook wird NICHT mehr installiert.
+    //
+    // Belegt am 25.07.2026: An einer geskripteten Szene, in der ein NPC
+    // spawnt, stuerzt das Spiel reproduzierbar mit einem Sprung auf Adresse 0
+    // ab, sobald dieser Detour gesetzt ist. Entscheidend war der Lauf mit
+    // -fearvr-aimat-passthrough: Der Hook war installiert, reichte aber jeden
+    // Aufruf unveraendert durch, und es stuerzte trotzdem ab. Es liegt also
+    // am Patchen dieser Funktion selbst, nicht an unserem Zielwert. Ohne den
+    // Hook laeuft dieselbe Szene durch.
+    //
+    // Kosten: Oberkoerper und Kopf des Spielerkoerpers drehen nicht mehr in
+    // die Zielrichtung nach. Waffenhaltung, roter Zielstrahl, Fire-Vectors und
+    // Trefferpunkt sind nicht betroffen.
+    g_disableAimAtHook =
+        !CommandLineContains(L"-fearvr-aimat");
+    g_aimAtPassthrough =
+        CommandLineContains(L"-fearvr-aimat-passthrough");
     if (g_disableFlashlight || g_disableHandNodes ||
         g_disableWeaponTransform || g_disableBodyPieceHiding ||
         g_disableStereoRender || g_disableCommandInjection ||
         g_disableBindingHook || g_disableClientUpdateWork ||
-        g_disableAimHooks) {
-        char message[288];
+        g_disableAimHooks || g_disableAimAtHook || g_aimAtPassthrough) {
+        char message[320];
         _snprintf_s(
             message, sizeof(message), _TRUNCATE,
             "flashlight=%d hand_nodes=%d weapon_transform=%d body_hide=%d "
             "stereo=%d inject=%d binding_hook=%d client_update=%d "
-            "aim_hooks=%d",
+            "aim_hooks=%d aimat=%d aimat_passthrough=%d",
             g_disableFlashlight ? 0 : 1, g_disableHandNodes ? 0 : 1,
             g_disableWeaponTransform ? 0 : 1,
             g_disableBodyPieceHiding ? 0 : 1,
@@ -819,7 +842,9 @@ void ConfigureComfortOptions() noexcept {
             g_disableCommandInjection ? 0 : 1,
             g_disableBindingHook ? 0 : 1,
             g_disableClientUpdateWork ? 0 : 1,
-            g_disableAimHooks ? 0 : 1);
+            g_disableAimHooks ? 0 : 1,
+            g_disableAimAtHook ? 0 : 1,
+            g_aimAtPassthrough ? 1 : 0);
         Report("WARN", "vr_features_disabled", message);
     }
     g_headBobEnabled = false;
@@ -4170,7 +4195,7 @@ void __fastcall HookRetailSetTrackedTarget(
         }
     }
     EnsureHandNodeControls(trackerPlayerBody);
-    if (group != kRetailTrackerGroupAimAt ||
+    if (g_aimAtPassthrough || group != kRetailTrackerGroupAimAt ||
         !g_weaponAim.valid ||
         !IsStaticPlayerBodyTrackerContext(context)) {
         g_retailSetTrackedTarget(context, group, originalTarget);
@@ -4321,7 +4346,9 @@ bool InstallWeaponAimHooks() noexcept {
             reinterpret_cast<void*>(&HookRetailGetFireVectors),
             reinterpret_cast<void**>(&g_retailGetFireVectors));
     }
-    if (status == MH_OK) {
+    // Der AimAt-Tracker laeuft fuer jeden Charakter-Node-Tracker, also auch
+    // fuer neu gespawnte NPCs. Er ist deshalb einzeln abschaltbar.
+    if (status == MH_OK && !g_disableAimAtHook) {
         status = MH_CreateHook(
             setTrackedTarget,
             reinterpret_cast<void*>(&HookRetailSetTrackedTarget),
@@ -4333,8 +4360,15 @@ bool InstallWeaponAimHooks() noexcept {
     if (status == MH_OK) {
         status = MH_EnableHook(fireVectors);
     }
-    if (status == MH_OK) {
+    if (status == MH_OK && !g_disableAimAtHook) {
         status = MH_EnableHook(setTrackedTarget);
+    }
+    if (g_disableAimAtHook) {
+        g_retailSetTrackedTargetTarget = nullptr;
+        Report(
+            "WARN", "aimat_hook_skipped",
+            "Diagnostic switch: the Retail AimAt node-tracker hook was not "
+            "installed.");
     }
     if (status != MH_OK) {
         Report(

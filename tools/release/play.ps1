@@ -55,6 +55,12 @@ param(
     # Laesst Weapon-Manager-, AimAt- und Fire-Vector-Hook ungesetzt.
     [switch]$NoAimHooks,
 
+    # Laesst nur den AimAt-Node-Tracker ungesetzt.
+    [switch]$NoAimAt,
+
+    # AimAt-Hook bleibt gesetzt, ueberschreibt das Ziel aber nie.
+    [switch]$AimAtPassthrough,
+
     [switch]$Wait
 )
 
@@ -217,6 +223,8 @@ if ($NoInject) { $steamArguments += '-fearvr-no-inject' }
 if ($NoBindingHook) { $steamArguments += '-fearvr-no-binding-hook' }
 if ($NoClientUpdate) { $steamArguments += '-fearvr-no-client-update' }
 if ($NoAimHooks) { $steamArguments += '-fearvr-no-aim-hooks' }
+if ($NoAimAt) { $steamArguments += '-fearvr-no-aimat' }
+if ($AimAtPassthrough) { $steamArguments += '-fearvr-aimat-passthrough' }
 
 Start-Process -FilePath $steamExe -ArgumentList ($steamArguments -join ' ') `
     -WorkingDirectory (Split-Path -Parent $steamExe) | Out-Null

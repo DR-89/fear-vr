@@ -133,6 +133,42 @@ extern "C" BOOL FearVr_IsStereoEnabled() {
     return fearvr::IsStereoEnabled();
 }
 
+extern "C" void FearVr_SetStereoEnabled(BOOL enabled) {
+    fearvr::SetStereoEnabled(enabled);
+}
+
+extern "C" BOOL FearVr_IsTranslationEnabled() {
+    return fearvr::IsTranslationEnabled();
+}
+
+extern "C" void FearVr_SetTranslationEnabled(BOOL enabled) {
+    fearvr::SetTranslationEnabled(enabled);
+}
+
+extern "C" BOOL FearVr_IsStereoHudEnabled() {
+    return fearvr::IsStereoHudEnabled();
+}
+
+extern "C" void FearVr_SetStereoHudEnabled(BOOL enabled) {
+    fearvr::SetStereoHudEnabled(enabled);
+}
+
+extern "C" BOOL FearVr_IsComfortModeEnabled() {
+    return fearvr::IsComfortModeEnabled();
+}
+
+extern "C" void FearVr_SetComfortModeEnabled(BOOL enabled) {
+    fearvr::SetComfortModeEnabled(enabled);
+}
+
+extern "C" void FearVr_RequestRecenter() {
+    fearvr::RequestRecenter();
+}
+
+extern "C" BOOL FearVr_IsFlatPanelActive() {
+    return fearvr::IsFlatPanelActive();
+}
+
 extern "C" void FearVr_RegisterStereoToggleCallback(
     fearvr::StereoToggleCallback callback) {
     fearvr::RegisterStereoToggleCallback(callback);
@@ -140,6 +176,15 @@ extern "C" void FearVr_RegisterStereoToggleCallback(
 
 extern "C" BOOL FearVr_GetRenderRequest(FearVrRenderRequest* request) {
     return fearvr::GetRenderRequest(request);
+}
+
+extern "C" BOOL FearVr_GetInputState(FearVrInputState* input) {
+    return fearvr::GetInputState(input);
+}
+
+extern "C" BOOL FearVr_SubmitHapticRequest(
+    const FearVrHapticRequest* request) {
+    return fearvr::SubmitHapticRequest(request);
 }
 
 extern "C" void FearVr_BeginEye(std::uint32_t eye) {

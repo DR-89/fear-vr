@@ -29,6 +29,7 @@ target_include_directories(fearvr-gameclient-loader SYSTEM PRIVATE
 target_link_libraries(fearvr-gameclient-loader PRIVATE
   fearvr-common
   fearvr-warnings
+  minhook
 )
 add_dependencies(fearvr-gameclient-loader fearvr-proxy)
 set_target_properties(fearvr-gameclient-loader PROPERTIES

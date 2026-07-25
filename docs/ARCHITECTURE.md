@@ -246,6 +246,105 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Rückfallpfad:** Beide Funktionen sind optional; ohne `-NoHeadBob` bleibt
   das Original-Bob aktiv, F10 kann jederzeit zurückgeschaltet werden.
 
+### AD-012 — OpenXR-Actions über bidirektionales IPC
+
+- **Problem:** Der OpenXR-Host ist x64, der Retail-Client x86. Betriebssystem-
+  Tastensynthese würde Benutzerbelegungen umgehen und könnte bei Fokusverlust
+  Tasten festhalten.
+- **Gewählte Lösung:** Protokoll v3 ergänzt einen separaten
+  `FearVrInputState`-Seqlock vom Host zum Spiel und einen
+  `FearVrHapticRequest`-Seqlock zurück. Der Host synchronisiert ein
+  profilübergreifendes OpenXR-Action-Set nur bei Fokus. Der Loader pollt den
+  Zustand direkt aus dem belegten `IClientShell::Update`-Slot 20.
+- **Sicherheit:** Fehlender Fokus, ungültige Daten oder eine länger als 250 ms
+  unveränderte Probe werden vollständig neutralisiert. Maus, Tastatur und
+  bestehende Gamepadpfade bleiben unangetastet.
+- **Einführungsstufe:** Zunächst waren nur rechter Stick-Klick für Recenter und
+  die rechte Primärtaste für einen Haptik-Probeimpuls aktiv. Nach bestätigter
+  Rohdatenabnahme wurde die vollständige semantische Spielbelegung ergänzt.
+- **Details:** `docs/OPENXR-INPUT.md`.
+
+### AD-013 — Motion-Controlled Aiming und Handdarstellung
+
+- **Problem:** §13 verbietet die Behauptung „6DoF-Waffe“, solange Schuss- und
+  Waffenrichtung nicht nachweislich übereinstimmen. Zusätzlich zeigte der
+  Ego-Blick Ober- und Unterarm, was die schwebende Waffenhaltung zerstörte.
+- **Gewählte Lösung:** Der `RightHand`-Socket des Retail-Player-Body folgt der
+  OpenXR-Grip-Pose, und die sichtbare Waffe erhält nach dem Retail-Update
+  denselben Transform. Beides nutzt dieselbe Aim-Rotation wie die Projektile.
+  Der rote Zielstrahl macht diese Übereinstimmung im Spiel sichtbar und
+  prüfbar.
+- **Nachweis:** Benutzerabnahme am 24.07.2026 — Zielstrahl und
+  Scope-Ausrichtung stimmen mit dem Trefferpunkt überein.
+- **Handdarstellung:** `chars\models\player.Model00p` liefert vier Pieces ohne
+  Namen. Sichtbarkeit läuft deshalb über den Piece-Index. Piece #1 trägt die
+  Arme und wird ausgeblendet; Hände und Waffe bleiben sichtbar.
+- **Bekannte Nachteile:** Knochen zu skalieren oder zu verschieben scheidet
+  aus. Node-Control liefert nur einen `LTRigidTransform`, und ein Kollabieren
+  der Armknochen erzeugt bei geskinnten Meshes einen sichtbaren Splitter vom
+  Oberkörper zur Hand.
+- **Rückfallpfad:** `HiddenBodyPieces` in `fearvr.ini` und die F11-Probe
+  erlauben eine Neukalibrierung, falls ein Build eine andere Piece-Reihenfolge
+  liefert.
+- **Details:** `docs/OPENXR-INPUT.md`, `docs/TESTING.md` §12.
+
+### AD-014 — VR-Einstellungen als kurze Seite in der nativen Menüliste
+
+- **Problem:** Die VR-Optionen brauchen eine im Headset bedienbare Oberfläche.
+  Ein eigenes Overlay hätte Fokus, Eingabe und Pausenzustand doppelt verwalten
+  müssen. In einer längeren Liste sprang die Auswahl zudem sichtbar.
+- **Messung/Beleg:** Byte-Signaturen von `CMenuSystem::Init`, `OnCommand`,
+  `OnFocus`, `CBaseMenu::AddControl` und `CLTGUIListCtrl` wurden gegen Retail
+  1.08 geprüft; `logs\m5-fear-20260724-222748` bestätigt Hooks und Menüaufbau.
+  Der Sprung ließ sich im Public-Tools-Quelltext festnageln:
+  `CLTGUIListCtrl::SetSelection` summiert beim Herunterscrollen rückwärts die
+  `GetBaseHeight()` **aller** Controls, ohne `IsVisible()` zu prüfen, während
+  `CalculatePositions()` unsichtbare Controls überspringt. Jeder Umschalter
+  besitzt ein verstecktes Geschwister-Control, also wird `m_nFirstShown` falsch
+  gesetzt.
+- **Getestete Optionen:** eigenes VR-Overlay, zweistufiges Menü mit
+  `MORE SETTINGS >`, kleinere Fonthöhe über `SetFontHeight`, zusätzliches
+  `Enable(false)` auf versteckten Controls.
+- **Gewählte Lösung:** ein englisch beschrifteter Eintrag `VR SETTINGS` direkt
+  hinter „Optionen“, als **eine** kurze Seite mit acht Einträgen, die
+  vollständig in den nativen Rahmen passt. Solange die Seite aktiv ist, wird
+  der Listenanfang in jedem Client-Update auf 0 festgehalten — nicht nur im
+  eigenen Hook, weil Tastatur, Maus und Controller alle direkt über
+  `NextSelection` navigieren. Geschrieben wird nur bei tatsächlicher Abweichung.
+- **Bekannte Nachteile:** Selten benutzte Optionen (HMD-Translation, Head-Bob,
+  Komfortbildschirm) sind nur über `fearvr.ini` erreichbar. Die Lösung hängt an
+  den geprüften Retail-Offsets und ist damit buildgebunden.
+- **Verworfen mit Begründung:** `SetFontHeight` verringert die Basishöhe der
+  Listeneinträge nicht. `Enable(false)` ist wirkungslos, weil
+  `CLTGUICtrl::IsEnabled()` bereits `m_bEnabled && IsVisible()` ist, und würde
+  beim Wiedereinblenden statische Controls auswählbar machen.
+- **Rückfallpfad:** Bei Signaturabweichung wird kein Menü-Hook installiert; das
+  ESC-Menü bleibt unverändert und alle Werte weiterhin über `fearvr.ini`
+  einstellbar.
+- **Details:** `docs/OPENXR-INPUT.md`, `docs/TESTING.md` §11 und §14.
+
+### AD-015 — Lehnen über die Rolllage der linken Hand
+
+- **Problem:** Für `CLeanMgr` fehlte nach der vollständigen Belegung eine freie
+  Taste. Die linke Menütaste scheidet aus, weil SteamVR sie für das eigene
+  Systemmenü abfängt.
+- **Messung/Beleg:** `logs\m5-fear-20260724-235013` zeigte zwei echte
+  Grenzfälle: Rolllagen von 177,3°, 136,3° und −169,3° lösten ein volles Lehnen
+  aus, jeweils bei steil nach unten zeigender Aim-Pose, deren Rolllage
+  numerisch bedeutungslos ist.
+- **Gewählte Lösung:** `PoseRollRadians` liest die Rolllage der linken
+  Aim-Pose um deren eigene Vorwärtsachse aus den Welt-Hoch-Anteilen der lokalen
+  X- und Y-Achse. `LeftHandLeanDirection` liefert −1, 0 oder +1 und bildet auf
+  die digitalen Retail-Kommandos `LEAN_LEFT` (20) und `LEAN_RIGHT` (21) ab;
+  `CLeanMgr` blendet selbst weich ein und aus. Untergrenze 0,42 rad (~24°),
+  Obergrenze 1,75 rad (~100°) gegen gedrehte Hände, zusätzlich `PoseLevelness`
+  ≥ 0,5 gegen hängende Hände.
+- **Bekannte Nachteile:** Beim Zielen in steilem Winkel ist bewusst kein Lehnen
+  möglich. Die Schwellen sind empirisch und nicht einstellbar.
+- **Rückfallpfad:** Ohne gültige linke Aim-Pose ist die Rolllage 0; das Lehnen
+  löst sich bei Trackingverlust, statt hängen zu bleiben.
+- **Details:** `docs/OPENXR-INPUT.md`, `docs/TESTING.md` §13.
+
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 
 - [x] ob und wie `RenderCamera` zweimal **sicher** aufgerufen wird → `STEREO-RESEARCH.md`
@@ -255,7 +354,8 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
       → `M2-D3D9-BRIDGE.md`, AD-004 bis AD-006
 - [x] Koordinatenkonversion → `COORDINATE-SYSTEM.md`
 - [x] Verhalten bei CameraFX / Zwischensequenzen (Komfortmodus) → AD-011
-- [ ] Abgrenzung zu Motion-Controlled Aiming (erst ab M5, mit Nachweis)
+- [x] Abgrenzung zu Motion-Controlled Aiming (erst ab M5, mit Nachweis)
+      → AD-013
 
 ## 4. Nicht verhandelbare Invarianten (§3)
 

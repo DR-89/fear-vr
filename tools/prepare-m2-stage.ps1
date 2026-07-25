@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Erstellt eine Retail-schonende M2-, M3- oder M4-archcfg-Stage.
+    Erstellt eine Retail-schonende M2- bis M5-archcfg-Stage.
 
 .DESCRIPTION
     Kopiert den ABI-neutralen GameClient-Loader, die VR-Bridge und das
@@ -9,7 +9,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('M2', 'M3', 'M4')]
+    [ValidateSet('M2', 'M3', 'M4', 'M5')]
     [string]$Milestone = 'M2'
 )
 

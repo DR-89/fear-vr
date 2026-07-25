@@ -114,6 +114,23 @@ int main() {
         return Fail("the recenter orientation must become neutral");
     }
 
+    const FearVrPose rightHandAim = Pose(
+        0.25F, -0.15F, -0.45F,
+        0.0F, kHalfSqrtTwo, 0.0F, kHalfSqrtTwo);
+    const fearvr::RelativeEyePose hand =
+        fearvr::TrackedPoseRelativeToRecenter(identity, rightHandAim);
+    const fearvr::TrackingVector handForward = fearvr::Rotate(
+        hand.rotation, {0.0F, 0.0F, 1.0F});
+    if (!hand.valid ||
+        !Near(hand.positionMeters.x, 0.25F) ||
+        !Near(hand.positionMeters.y, -0.15F) ||
+        !Near(hand.positionMeters.z, 0.45F) ||
+        !Near(handForward.x, -1.0F) ||
+        !Near(handForward.z, 0.0F)) {
+        return Fail(
+            "controller aim pose must preserve position and pointing axes");
+    }
+
     FearVrPose invalid = identity;
     invalid.qw = NAN;
     if (fearvr::EyePoseRelativeToRecenter(

@@ -34,6 +34,7 @@
 #include "protocol_utils.h"
 #include "stereo_math.h"
 #include "texture_renderer.h"
+#include "xr_input.h"
 #include "xr_session_state.h"
 
 namespace fearvr {
@@ -288,6 +289,7 @@ public:
 
     ~Host() {
         DestroySessionResources();
+        xrInput_.reset();
         ipcBridge_.reset();
         deviceContext_.Reset();
         device_.Reset();
@@ -301,6 +303,12 @@ public:
     int Run() {
         try {
             CreateInstance();
+            xrInput_ = std::make_unique<XrInput>(
+                [this](const char* level, const char* event,
+                       const std::string& message) {
+                    logger_.Write(level, event, message);
+                });
+            xrInput_->Initialize(instance_);
             CreateSystemAndDevice();
 
             bool restartSession = false;
@@ -548,6 +556,7 @@ private:
         sessionInfo.systemId = systemId_;
         CheckXr(instance_, xrCreateSession(instance_, &sessionInfo, &session_),
                 "xrCreateSession");
+        xrInput_->Attach(session_);
 
         XrReferenceSpaceCreateInfo spaceInfo{
             XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
@@ -707,6 +716,9 @@ private:
     }
 
     void DestroySessionResources() noexcept {
+        if (xrInput_) {
+            xrInput_->ResetSession();
+        }
         projectionViews_.clear();
         locatedViews_.clear();
         viewConfiguration_.clear();
@@ -759,6 +771,19 @@ private:
                     const XrLifecycleTransition transition =
                         lifecycle_.OnStateChanged(
                             ToLifecycleState(changed->state));
+                    if (transition.previous ==
+                            XrLifecycleState::Focused &&
+                        transition.current !=
+                            XrLifecycleState::Focused &&
+                        ipcBridge_ && xrInput_) {
+                        FearVrInputState neutral{};
+                        xrInput_->Sync(
+                            session_, XR_NULL_HANDLE, false, 0, neutral);
+                        ipcBridge_->PublishInputState(neutral);
+                        logger_.Write(
+                            "INFO", "input_focus_cleared",
+                            "Neutral controller state published.");
+                    }
                     switch (transition.action) {
                     case XrLifecycleAction::BeginSession: {
                         XrSessionBeginInfo beginInfo{
@@ -801,6 +826,33 @@ private:
 
         XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
         CheckXr(instance_, xrBeginFrame(session_, &beginInfo), "xrBeginFrame");
+
+        if (ipcBridge_ && xrInput_) {
+            FearVrInputState input{};
+            xrInput_->Sync(
+                session_, appSpace_,
+                lifecycle_.State() == XrLifecycleState::Focused,
+                frameState.predictedDisplayTime,
+                input);
+            ipcBridge_->PublishInputState(input);
+            const bool rightStickDown =
+                (input.buttons & FEARVR_IB_RIGHT_STICK) != 0;
+            if (rightStickDown && !rightStickWasDown_ &&
+                !ipcBridge_->StereoActive()) {
+                monoQuadAnchored_ = false;
+                logger_.Write(
+                    "INFO", "mono_quad_recenter_requested",
+                    "Right stick click will re-anchor the loading/menu "
+                    "panel at the current view direction.");
+            }
+            rightStickWasDown_ = rightStickDown;
+
+            FearVrHapticRequest haptic{};
+            if (lifecycle_.State() == XrLifecycleState::Focused &&
+                ipcBridge_->ConsumeHapticRequest(haptic)) {
+                xrInput_->ApplyHaptic(session_, haptic);
+            }
+        }
 
         const XrCompositionLayerBaseHeader* layers[1]{};
         std::uint32_t layerCount = 0;
@@ -1199,6 +1251,7 @@ private:
     ComPtr<ID3D11DeviceContext> deviceContext_;
     TextureRenderer textureRenderer_;
     std::unique_ptr<IpcBridge> ipcBridge_;
+    std::unique_ptr<XrInput> xrInput_;
     std::vector<XrViewConfigurationView> viewConfiguration_;
     std::vector<XrView> locatedViews_;
     std::vector<XrCompositionLayerProjectionView> projectionViews_;
@@ -1212,6 +1265,7 @@ private:
     bool imagePoseMatchLogged_{false};
     bool monoQuadLogged_{false};
     bool monoQuadAnchored_{false};
+    bool rightStickWasDown_{false};
     XrPosef monoQuadPose_{{0.0F, 0.0F, 0.0F, 1.0F},
                          {0.0F, 0.0F, -2.0F}};
     bool exitRequested_{false};

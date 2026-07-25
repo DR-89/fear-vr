@@ -3,8 +3,19 @@ EXPORTS
     FearVr_IsHostConnected
     FearVr_IsStereoAvailable
     FearVr_IsStereoEnabled
+    FearVr_SetStereoEnabled
+    FearVr_IsTranslationEnabled
+    FearVr_SetTranslationEnabled
+    FearVr_IsStereoHudEnabled
+    FearVr_SetStereoHudEnabled
+    FearVr_IsComfortModeEnabled
+    FearVr_SetComfortModeEnabled
+    FearVr_RequestRecenter
+    FearVr_IsFlatPanelActive
     FearVr_RegisterStereoToggleCallback
     FearVr_GetRenderRequest
+    FearVr_GetInputState
+    FearVr_SubmitHapticRequest
     FearVr_BeginEye
     FearVr_CaptureEye
     FearVr_EndStereoFrame

@@ -12,6 +12,8 @@ static_assert(sizeof(FearVrPose) == 28, "FearVrPose");
 static_assert(sizeof(FearVrFov) == 16, "FearVrFov");
 static_assert(sizeof(FearVrEyeView) == 44, "FearVrEyeView");
 static_assert(sizeof(FearVrRenderRequest) == 112, "FearVrRenderRequest");
+static_assert(sizeof(FearVrInputState) == 192, "FearVrInputState");
+static_assert(sizeof(FearVrHapticRequest) == 32, "FearVrHapticRequest");
 static_assert(sizeof(FearVrSlot) == 40, "FearVrSlot");
 static_assert(offsetof(FearVrSharedHeader, magic) == 0, "off magic");
 static_assert(offsetof(FearVrSharedHeader, version) == 4, "off version");
@@ -20,13 +22,19 @@ static_assert(offsetof(FearVrSharedHeader, hostHeartbeat) == 24, "off hostHb");
 static_assert(offsetof(FearVrSharedHeader, gameHeartbeat) == 32, "off gameHb");
 static_assert(offsetof(FearVrSharedHeader, requestSequence) == 40,
               "off requestSequence");
-static_assert(offsetof(FearVrSharedHeader, hostAdapterLuid) == 48,
+static_assert(offsetof(FearVrSharedHeader, inputSequence) == 48,
+              "off inputSequence");
+static_assert(offsetof(FearVrSharedHeader, hapticSequence) == 56,
+              "off hapticSequence");
+static_assert(offsetof(FearVrSharedHeader, hostAdapterLuid) == 64,
               "off hostAdapterLuid");
-static_assert(offsetof(FearVrSharedHeader, gameAdapterLuid) == 56,
+static_assert(offsetof(FearVrSharedHeader, gameAdapterLuid) == 72,
               "off gameAdapterLuid");
-static_assert(offsetof(FearVrSharedHeader, request) == 80, "off request");
-static_assert(offsetof(FearVrSharedHeader, slot) == 192, "off slot");
-static_assert(sizeof(FearVrSharedHeader) == 432, "shared header size");
+static_assert(offsetof(FearVrSharedHeader, request) == 96, "off request");
+static_assert(offsetof(FearVrSharedHeader, input) == 208, "off input");
+static_assert(offsetof(FearVrSharedHeader, haptic) == 400, "off haptic");
+static_assert(offsetof(FearVrSharedHeader, slot) == 432, "off slot");
+static_assert(sizeof(FearVrSharedHeader) == 672, "shared header size");
 
 static int g_failed = 0;
 

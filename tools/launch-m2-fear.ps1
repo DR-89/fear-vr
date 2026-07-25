@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Startet F.E.A.R. M2, M3 oder M4 über Steam und die isolierte archcfg-Stage.
+    Startet F.E.A.R. M2 bis M5 über Steam und die isolierte archcfg-Stage.
 
 .DESCRIPTION
     Startet den x64-OpenXR-Host, wartet auf XR-ready und ruft danach Steam mit
@@ -12,7 +12,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('M2', 'M3', 'M4')]
+    [ValidateSet('M2', 'M3', 'M4', 'M5')]
     [string]$Milestone = 'M2',
 
     [switch]$Translation,
@@ -140,14 +140,17 @@ $steamArguments = @(
 if ($Milestone -ne 'M2') {
     $steamArguments += '-fearvr-stereo-toggle'
 }
-if ($Milestone -eq 'M4' -and $Translation) {
+if ($Milestone -in @('M4', 'M5') -and $Translation) {
     $steamArguments += '-fearvr-translation'
 }
-if ($Milestone -eq 'M4' -and $StereoHud) {
+if ($Milestone -in @('M4', 'M5') -and $StereoHud) {
     $steamArguments += '-fearvr-stereo-hud'
 }
-if ($Milestone -eq 'M4' -and $NoHeadBob) {
+if ($Milestone -in @('M4', 'M5') -and $NoHeadBob) {
     $steamArguments += '-fearvr-no-headbob'
+}
+if ($Milestone -eq 'M5') {
+    $steamArguments += '-fearvr-input'
 }
 $steamArguments = $steamArguments -join ' '
 Write-Host "=== F.E.A.R. VR $milestoneLabel ===" -ForegroundColor Cyan
@@ -320,9 +323,9 @@ if ($Milestone -ne 'M2') {
             'Erst in der 3D-Welt mit F8 Stereo einschalten.'
         )
     }
-    if ($Milestone -eq 'M4') {
+    if ($Milestone -in @('M4', 'M5')) {
         Write-Host (
-            'M4: HMD-Rotation ist aktiv. F9 setzt die aktuelle Blickrichtung ' +
+            "$milestoneLabel`: HMD-Rotation ist aktiv. F9 setzt die aktuelle Blickrichtung " +
             'als Neutralpose; F8 schaltet jederzeit zurück auf mono.'
         )
         Write-Host (
@@ -343,6 +346,28 @@ if ($Milestone -ne 'M2') {
             'F10 schaltet den raumfesten Komfortbildschirm für ' +
             'Camera-Shakes und Zwischensequenzen.'
         )
+        if ($Milestone -eq 'M5') {
+            Write-Host (
+                'M5-Controller: linker Stick bewegt, rechter Stick dreht; ' +
+                'rechts hoch/runter wählt nächste/vorherige Waffe. ' +
+                'A springt, B lädt nach, X duckt, Y schaltet Zeitlupe.'
+            )
+            Write-Host (
+                'Linker Grip rennt, linker Stick-Klick öffnet Pause, ' +
+                'rechter Grip benutzt, Trigger zielen/feuern; ' +
+                'rechter Stick-Klick setzt Recenter.'
+            )
+            Write-Host (
+                'Die linke Hand seitlich neigen lehnt um die Ecke: ' +
+                'Oberseite nach links lehnt links, nach rechts lehnt rechts.'
+            )
+            Write-Host (
+                'F11 zeigt die Player-Body-Pieces einzeln, um das ' +
+                'Hand-Piece zu finden. Der Stand wird sofort in ' +
+                'fearvr.ini gespeichert und beim Start automatisch ' +
+                'angewandt; F11 ist danach nicht mehr nötig.'
+            )
+        }
     } else {
         Write-Host (
             'F8 schaltet jederzeit zurück auf mono. Headtracking folgt erst in M4.'

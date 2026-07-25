@@ -177,6 +177,31 @@ inline TrackingVector ClampMagnitude(
     return {value.x * scale, value.y * scale, value.z * scale};
 }
 
+inline RelativeEyePose TrackedPoseRelativeToRecenter(
+    const FearVrPose& recenter,
+    const FearVrPose& trackedPose) noexcept {
+    if (!IsValidPose(recenter) || !IsValidPose(trackedPose)) {
+        return {};
+    }
+
+    const TrackingQuaternion inverseRecenter =
+        Conjugate(PoseRotation(recenter));
+    const TrackingVector relativePosition = Rotate(
+        inverseRecenter,
+        {trackedPose.px - recenter.px,
+         trackedPose.py - recenter.py,
+         trackedPose.pz - recenter.pz});
+    const TrackingQuaternion relativeRotation = Multiply(
+        inverseRecenter, PoseRotation(trackedPose));
+    const TrackingVector lithTechPosition =
+        OpenXrToLithTech(relativePosition);
+    const TrackingQuaternion lithTechRotation =
+        OpenXrToLithTech(relativeRotation);
+    return {
+        lithTechPosition, lithTechRotation,
+        IsFinite(lithTechPosition) && IsFinite(lithTechRotation)};
+}
+
 inline RelativeEyePose EyePoseRelativeToRecenter(
     const FearVrPose& recenter, const FearVrPose& currentCenter,
     const FearVrPose& eye, bool translationEnabled,

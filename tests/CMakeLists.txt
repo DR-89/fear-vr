@@ -23,6 +23,23 @@ target_link_libraries(
 )
 add_test(NAME stereo_hud_math COMMAND test_stereo_hud_math)
 
+add_executable(test_input_state test_input_state.cpp)
+target_link_libraries(
+  test_input_state PRIVATE fearvr-common fearvr-warnings
+)
+add_test(NAME input_state COMMAND test_input_state)
+
+add_executable(test_controller_mapping test_controller_mapping.cpp)
+target_link_libraries(
+  test_controller_mapping PRIVATE fearvr-common fearvr-warnings
+)
+# Der Test prüft ausschließlich über assert; RelWithDebInfo definiert sonst
+# NDEBUG und der Test liefe wirkungslos durch.
+if(MSVC)
+  target_compile_options(test_controller_mapping PRIVATE /UNDEBUG)
+endif()
+add_test(NAME controller_mapping COMMAND test_controller_mapping)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND TARGET fearvr-proxy)
   # Isolierter M2-Producer: Der echte System-Import bleibt d3d9.lib; erst
   # nach dem Link wird ausschließlich neben diese Test-EXE der Proxy kopiert.

@@ -29,7 +29,7 @@ inline bool IsSafePostWorldCoverage(std::uint64_t changedPixels,
 inline bool IsFlatPanelCoverage(std::uint64_t changedPixels,
                                 std::uint64_t totalPixels) noexcept {
     return totalPixels != 0 &&
-           changedPixels * 100u > totalPixels * 65u;
+           changedPixels * 100u > totalPixels * 81u;
 }
 
 inline std::uint32_t StereoHudSourceRow(
@@ -52,6 +52,16 @@ inline std::uint32_t StereoHudSourceColumn(
     if (outputRow >= height * 3u / 5u &&
         outputColumn < width / 2u) {
         const std::uint32_t shift = width / 32u;
+        return outputColumn >= shift
+            ? outputColumn - shift
+            : width;
+    }
+
+    // Weapon-selection elements live at the upper/middle left edge and need
+    // a stronger inward shift to remain comfortable in the headset.
+    if (outputRow < height * 3u / 5u &&
+        outputColumn < width * 3u / 8u) {
+        const std::uint32_t shift = width / 8u;
         return outputColumn >= shift
             ? outputColumn - shift
             : width;

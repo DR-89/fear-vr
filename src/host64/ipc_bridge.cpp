@@ -150,6 +150,12 @@ bool IpcBridge::TryConnect() {
     if ((ReadAtomic64(shared_->requestSequence) & 1ULL) != 0) {
         InterlockedIncrement64(Atomic64(shared_->requestSequence));
     }
+    if ((ReadAtomic64(shared_->inputSequence) & 1ULL) != 0) {
+        InterlockedIncrement64(Atomic64(shared_->inputSequence));
+    }
+    if ((ReadAtomic64(shared_->hapticSequence) & 1ULL) != 0) {
+        InterlockedIncrement64(Atomic64(shared_->hapticSequence));
+    }
     InterlockedOr(AtomicFlags(*shared_), FEARVR_BF_HOST_READY);
     log_("INFO", "ipc_connected",
          "Proxy mapping opened and protocol accepted.");
@@ -267,6 +273,44 @@ void IpcBridge::PublishRenderRequest(
     shared_->request = request;
     MemoryBarrier();
     InterlockedIncrement64(Atomic64(shared_->requestSequence));
+}
+
+void IpcBridge::PublishInputState(const FearVrInputState& input) {
+    if (shared_ == nullptr) {
+        return;
+    }
+    InterlockedIncrement64(Atomic64(shared_->inputSequence));
+    MemoryBarrier();
+    shared_->input = input;
+    MemoryBarrier();
+    InterlockedIncrement64(Atomic64(shared_->inputSequence));
+}
+
+bool IpcBridge::ConsumeHapticRequest(FearVrHapticRequest& request) {
+    if (shared_ == nullptr) {
+        return false;
+    }
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const std::uint64_t before =
+            ReadAtomic64(shared_->hapticSequence);
+        if ((before & 1ULL) != 0 || before == 0) {
+            continue;
+        }
+        const FearVrHapticRequest snapshot = shared_->haptic;
+        MemoryBarrier();
+        const std::uint64_t after =
+            ReadAtomic64(shared_->hapticSequence);
+        if (before != after || (after & 1ULL) != 0 ||
+            (snapshot.flags & FEARVR_HF_VALID) == 0 ||
+            snapshot.requestId == 0 ||
+            snapshot.requestId == lastHapticRequestId_) {
+            continue;
+        }
+        lastHapticRequestId_ = snapshot.requestId;
+        request = snapshot;
+        return true;
+    }
+    return false;
 }
 
 bool IpcBridge::ConsumeLatestPair() {

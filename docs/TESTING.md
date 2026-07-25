@@ -9,14 +9,19 @@ Als CMake/CTest-Ziele unter `tests/` (baubar ohne Headset):
 - [x] Protokollgrößen und -Offsets in **x86 und x64** (`static_assert` +
       Laufzeit-Roundtrip)
 - [x] Ablehnung ungültiger Magic / Version / Größe
-- [ ] Quaternion-Normalisierung und Achsenabbildung
-- [ ] Pose relativ zum Recenter-Ursprung
-- [ ] FOV-Winkel → Projektionsmatrizen
+- [x] Quaternion-Normalisierung und Achsenabbildung
+      (`head_tracking_math`: OpenXR→LithTech für Yaw und Pitch;
+      `input_state`: unnormierte und degenerierte Quaternionen)
+- [x] Pose relativ zum Recenter-Ursprung (`head_tracking_math`)
+- [x] FOV-Winkel → gemeinsame symmetrische Projektion (`stereo_math`);
+      echte Projektionsmatrizen baut LithTech selbst aus dem gesetzten FOV
 - [x] Ringpuffer-Paarung und Generationen
 - [x] OpenXR-State-Machine als testbare Logik **ohne** Headset
-- [ ] EXE-Hashprüfung
+- [x] EXE-Hashprüfung — `tools/verify-install.ps1`, read-only, kein CTest-Ziel
 - [x] Stage-Pfad bleibt unter der Projektwurzel
 - [x] Retail-Hash vor/nach M2-Vorbereitung und Startversuch
+- [x] semantische Controllerabbildung inklusive Lehnen
+      (`input_state`, `controller_mapping`)
 
 ## 2. Live-Testmatrix
 
@@ -205,9 +210,9 @@ In M4 geschlossene M3-Grenze:
 
 Verbleibende Detailregressionen:
 
-- Lean und Slow-Mo getrennt protokollieren;
-- physisch vollständigen Trackingverlust in einem gezielten Hardwaretest
-  provozieren.
+- ~~Lean und Slow-Mo getrennt protokollieren~~ — in M5 geschlossen, siehe §13;
+- ~~physisch vollständigen Trackingverlust provozieren~~ — in M5 nachgeholt,
+  siehe §10.
 
 Das 15-Minuten-Stabilitätsgate wurde vom Benutzer am 24.07.2026 auf Basis des
 fehlerfreien 11½-Minuten-Laufs mit mindestens 24.900 Stereo-Frames als
@@ -278,3 +283,189 @@ Bekannte Grenzen nach M4:
 - der Stereo-HUD-Mischer benötigt im klassischen D3D9-Kompatibilitätspfad ein
   zusätzliches CPU-Readback und muss vor dem finalen M6-Pfad GPU-seitig oder
   als nativer UI-Layer ersetzt werden.
+
+## 10. M5-Diagnosestart vom 2026-07-24
+
+Automatisiert bestanden:
+
+- Protokoll v3 ist in x86 und x64 layoutidentisch;
+- `FearVrInputState` und `FearVrHapticRequest` besitzen feste POD-Größen;
+- Fokusverlust neutralisiert Sticks, Trigger, Grip und alle Tasten;
+- Deadzone, nicht-endliche Werte und Achsenbegrenzung sind getestet;
+- x86 und x64 bauen mit `/W4 /WX`, jeweils 6/6 CTest-Tests grün.
+
+Erster Lauf `logs\m5-fear-20260724-181253`:
+
+- alle fünf vorgeschlagenen Interaction Profiles wurden von SteamVR
+  akzeptiert;
+- Quest-Controllerzustände und rechte Primärtaste erreichten den Host;
+- ein erster Client-Hook verwendete irrtümlich Slot 14 und wurde vor jeder
+  Spielbelegung verworfen.
+
+Korrigierter Lauf `logs\m5-fear-20260724-181508`:
+
+- beide Quest-Controller aktiv (`active_hands=0x3`);
+- `IClientShell.Default` Version 5 gefunden;
+- der aus dem öffentlichen Header belegte `Update`-Slot 20 wird aufgerufen;
+- Controllerzustände erreichen damit den x86-Retail-Client;
+- Fokuswechsel veröffentlichte einen vollständigen neutralen Zustand.
+
+Benutzerabnahme am 24.07.2026:
+
+- Controller-Recenter über rechten Stick-Klick funktioniert;
+- der Haptik-Probeimpuls über die rechte Primärtaste funktioniert;
+- die übrigen ausgeführten Diagnosepunkte wurden als passend bestätigt;
+- ein zunächst ausgelassener vollständiger Trackingverlust wurde anschließend
+  im selben laufenden Test nachgeholt: um 20:32:15 meldete der Host
+  `active_hands=0x0`, 229 ms später wieder `active_hands=0x3`;
+- beide Controller wurden damit ohne Neustart wieder erkannt.
+
+Die semantische Spielbelegung wurde anschließend nachgereicht und vom Benutzer
+im Spiel bestätigt: Bewegen, Drehen, Waffenwahl, Springen, Nachladen, Ducken,
+Zeitlupe, Rennen, Benutzen, Zielen/Feuern, Recenter und Pausenmenü. Die linke
+System-/Menütaste ist nicht nutzbar, weil SteamVR sie für das eigene
+Systemmenü abfängt.
+
+## 11. Native VR-Einstellungen im ESC-Menü
+
+Automatisiert und im Retail-Lauf `logs\m5-fear-20260724-222748` bestätigt:
+
+- x86- und x64-Build erfolgreich; jeweils 7/7 CTest-Tests grün;
+- neue Bridge-Exporte für Translation, Stereo-HUD, Komfortmodus und Recenter
+  vorhanden;
+- Byte-Signaturen von `CMenuSystem::Init`, `OnCommand`, `OnFocus`,
+  `CBaseMenu::AddControl` und `CLTGUIListCtrl` gegen Retail 1.08 geprüft;
+- `vr_settings_menu_hooks_installed` bestätigt alle drei Menü-Hooks;
+- `vr_settings_menu_built` bestätigt den Eintrag `VR SETTINGS` direkt
+  hinter `Optionen`;
+- das Spiel blieb nach Aufbau der erweiterten Menüliste stabil und nahm
+  Controllerbefehle weiter an;
+- Änderungen werden sofort angewendet und in
+  `stage\userdata-m5\fearvr.ini` persistiert.
+
+Die Seite ist bewusst kurz und einseitig, damit kein Eintrag über den Rand des
+nativen Rahmens läuft: Stereo rendering, Stereo HUD, Turn speed, Red aim guide,
+Controller vibration, Recenter view, Reset VR defaults, BACK. HMD-Translation,
+Head-Bob und Komfortbildschirm bleiben ohne Menüeintrag in `fearvr.ini`
+einstellbar. Ein zweistufiges Menü wurde verworfen; die Beschriftungen sind
+durchgehend englisch. Bedienung: Stick navigiert, A oder Trigger bestätigt,
+B geht zurück. Details: `docs/OPENXR-INPUT.md`.
+
+## 12. Nur Hände und Waffe statt Arme
+
+Die Retail-Modellabfrage im Lauf `logs\m5-fear-20260724-231900` ergab:
+
+- Modell `chars\models\player.Model00p` mit **4 Pieces** und 61 Nodes;
+- nur zwei Materialien, `player_new.Mat00` und `player_head.Mat00`;
+- `GetNumPieces` und `GetPiece(index, …)` liefern `LT_OK`, aber
+  `GetPieceName` liefert für alle vier Pieces `LT_NOTFOUND` (61).
+
+Retail speichert also keine Piece-Namen. Sichtbarkeit wird deshalb über den
+Piece-Index gesteuert und mit **F11** einmalig kalibriert: Der Probelauf
+isoliert nacheinander je ein Piece, der gewählte Stand landet sofort als
+`HiddenBodyPieces` in `stage\userdata-m5\fearvr.ini`.
+
+Benutzerabnahme am 25.07.2026:
+
+- **Piece #1 trägt die Arme.** Mit `HiddenBodyPieces=2` sind Hände und Waffe
+  sichtbar, Ober- und Unterarm verschwinden;
+- der Wert ist als `kPlayerBodyArmPieceMask` zusätzlich Code-Default, greift
+  also auch ohne vorhandene `fearvr.ini` und ohne Tastendruck.
+
+Die Hände stammen vom Player-Body, nicht vom Waffenmodell: Die Waffe ist ein
+eigenes Objekt am `RightHand`-Socket. Den gesamten Body zu verstecken liefert
+deshalb eine schwebende Waffe ohne Hände und ist keine Alternative.
+
+## 13. Lehnen über die Neigung der linken Hand
+
+Automatisiert abgedeckt in `tests/test_input_state.cpp` und
+`tests/test_controller_mapping.cpp`:
+
+- Rolllage-Extraktion gegen Sollwinkel von -80° bis +80°;
+- unnormierte Quaternionen liefern denselben Winkel;
+- degenerierte Quaternion ergibt 0;
+- Schwelle: ~24° löst aus, ~17° nicht;
+- ohne gültige linke Aim-Pose löst sich das Lehnen, statt hängen zu bleiben.
+
+`test_controller_mapping` prüft ausschließlich über `assert` und wurde bis
+dahin unter RelWithDebInfo wegen `NDEBUG` wirkungslos übersetzt. Das Ziel baut
+jetzt mit `/UNDEBUG`; die Kommandozeilenwarnung `D9025` ist beabsichtigt.
+
+Benutzerabnahme am 25.07.2026: Das Lehnen im Spiel passt.
+
+Lean und Slow-Mo werden getrennt protokolliert. `vr_lean_left_engaged`,
+`vr_lean_right_engaged` und `vr_slowmo_engaged` melden die laufende Nummer,
+die Lean-Ereignisse zusätzlich die gemessene Rolllage; die zugehörigen
+`*_released`-Ereignisse melden die Haltedauer. Damit ist die letzte offene
+Detailregression aus der Live-Testmatrix geschlossen.
+
+Der Lauf `logs\m5-fear-20260724-235013` deckte dabei zwei echte Grenzfälle
+auf: Rolllagen von 177,3°, 136,3° und −169,3° lösten ein volles Lehnen aus.
+Ursache war eine steil nach unten zeigende Aim-Pose, deren Rolllage numerisch
+bedeutungslos ist. Obergrenze und Levelness-Prüfung fangen das jetzt ab.
+
+## 14. VR-Menü: Sprünge bei der Auswahl
+
+Benutzermeldung am 25.07.2026: Das Auswählen des nächsten Eintrags war nicht
+immer korrekt und sprang.
+
+Ursache im Public-Tools-Quelltext nachgewiesen:
+`CLTGUIListCtrl::SetSelection` summiert beim Herunterscrollen rückwärts die
+`GetBaseHeight()` aller Controls, ohne `IsVisible()` zu prüfen, während
+`CalculatePositions()` unsichtbare Controls überspringt. Da jeder Umschalter
+ein verstecktes Geschwister-Control besitzt, wird `m_nFirstShown` falsch
+gesetzt.
+
+Nicht die Ursache und deshalb verworfen: ein zusätzliches `Enable(false)` auf
+versteckten Controls. `CLTGUICtrl::IsEnabled()` ist bereits als
+`m_bEnabled && IsVisible()` definiert, die Navigation überspringt unsichtbare
+Einträge also ohnehin. Ein Enable/Disable-Paar hätte beim Wiedereinblenden
+zusätzlich statische Controls auswählbar gemacht.
+
+Behoben, indem der Listenanfang festgehalten wird, solange die VR-Seite aktiv
+ist — in jedem Client-Update, weil Tastatur, Maus und Controller alle direkt
+über `NextSelection` navigieren. Der Schreibzugriff erfolgt nur, wenn der Wert
+tatsächlich abweicht.
+
+Ebenfalls entfernt: die toten Controls `MORE SETTINGS >` und
+`< BASIC SETTINGS` samt Seitenzustand. Sie wurden noch erzeugt und nur
+versteckt, belegten aber weiterhin Listenindizes.
+
+Benutzerabnahme am 25.07.2026: Die Auswahl läuft sauber und springt nicht mehr.
+
+## 15. M5-Abnahme vom 2026-07-25
+
+Automatisiert bestanden:
+
+- x86 und x64 bauen mit `/W4 /WX`;
+- je 7/7 CTest-Tests grün: `protocol`, `xr_session_state`, `stereo_math`,
+  `head_tracking_math`, `stereo_hud_math`, `input_state`, `controller_mapping`.
+
+Im Spiel bestätigt:
+
+- vollständige semantische Controllerbelegung (§10);
+- natives VR-Menü im ESC-Menü, Auswahl sauber (§11, §14);
+- nur Hände und Waffe sichtbar, Ober- und Unterarm ausgeblendet (§12);
+- Lehnen über die Neigung der linken Hand, Richtung und Schwelle passend (§13).
+
+M5-Gate:
+
+- kein Stuck Input nach Fokusverlust — automatisiert getestet und im Lauf
+  bestätigt;
+- Controller trenn- und wieder verbindbar — vollständiger Trackingverlust in
+  §10 nachgewiesen;
+- die Behauptung „Motion-Controlled Aiming“ ist über den roten Zielstrahl und
+  die bestätigte Übereinstimmung von Waffen- und Projektilrichtung belegt
+  (AD-013). Eine allgemeine „6DoF-Waffe“ wird weiterhin nicht behauptet.
+
+Bewusst zurückgestellt:
+
+- Der gelegentliche Sprung der Waffe beim Treppensteigen ist nicht abschließend
+  geklärt. Der Benutzer hat den Punkt am 25.07.2026 ausdrücklich zurückgestellt;
+  er ist kein M5-Blocker.
+
+Unverändert aus M4 übernommene Grenzen:
+
+- Translation bleibt ohne Weltkollision opt-in;
+- der Stereo-HUD-Mischer benötigt im klassischen D3D9-Pfad weiterhin ein
+  CPU-Readback und muss vor M6 ersetzt werden.

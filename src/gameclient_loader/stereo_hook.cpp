@@ -1,16 +1,25 @@
 #include "stereo_hook.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <iterator>
+#include <limits>
 
 #include <iltclient.h>
+#include <iclientshell.h>
+#include <iltdrawprim.h>
+#include <iltmodel.h>
 #include <iltrenderer.h>
+#include <MinHook.h>
 
+#include "controller_mapping.h"
 #include "head_tracking_math.h"
+#include "input_state.h"
 #include "protocol.h"
 #include "stereo_math.h"
 
@@ -20,11 +29,20 @@ namespace {
 using IsHostConnectedFunction = BOOL(__cdecl*)();
 using IsStereoAvailableFunction = BOOL(__cdecl*)();
 using IsStereoEnabledFunction = BOOL(__cdecl*)();
+using SetStereoEnabledFunction = void(__cdecl*)(BOOL);
+using GetBooleanOptionFunction = BOOL(__cdecl*)();
+using SetBooleanOptionFunction = void(__cdecl*)(BOOL);
+using RequestRecenterFunction = void(__cdecl*)();
+using IsFlatPanelActiveFunction = BOOL(__cdecl*)();
 using StereoToggleCallback = void(__cdecl*)(BOOL);
 using RegisterStereoToggleFunction =
     void(__cdecl*)(StereoToggleCallback);
 using GetRenderRequestFunction =
     BOOL(__cdecl*)(FearVrRenderRequest*);
+using GetInputStateFunction =
+    BOOL(__cdecl*)(FearVrInputState*);
+using SubmitHapticRequestFunction =
+    BOOL(__cdecl*)(const FearVrHapticRequest*);
 using BeginEyeFunction = void(__cdecl*)(std::uint32_t);
 using CaptureEyeFunction = void(__cdecl*)(std::uint32_t);
 using EndStereoFrameFunction = void(__cdecl*)(std::uint64_t);
@@ -34,14 +52,60 @@ using RenderPlayerCameraFunction =
     LTRESULT(__thiscall*)(ILTRenderer*, HLOCALOBJ);
 using RenderCameraWithOverrideFunction =
     LTRESULT(__thiscall*)(ILTRenderer*, HLOCALOBJ, const char*);
+using ClientShellUpdateFunction =
+    void(__thiscall*)(IClientShell*);
+struct RetailBinding;
+using RetailGetBindingValueFunction =
+    float(__thiscall*)(
+        const void*, const RetailBinding*, bool);
+using RetailWeaponManagerUpdateFunction =
+    int(__thiscall*)(
+        void*, const LTRotation&, const LTVector&);
+using RetailSetWeaponTransformFunction =
+    void(__thiscall*)(void*, const LTTransform&);
+using RetailSetWeaponVisibleFunction =
+    void(__thiscall*)(void*, bool, bool);
+using RetailGetFireVectorsFunction =
+    bool(__thiscall*)(
+        const void*, LTVector&, LTVector&, LTVector&, LTVector&);
+using RetailSetTrackedTargetFunction =
+    void(__thiscall*)(void*, int, const LTVector&);
+using RetailAccuracyManagerFunction = void*(__cdecl*)();
+using RetailMenuInitFunction = bool(__thiscall*)(void*, void*);
+using RetailMenuOnCommandFunction =
+    std::uint32_t(__thiscall*)(
+        void*, std::uint32_t, std::uint32_t, std::uint32_t);
+using RetailMenuOnFocusFunction = void(__thiscall*)(void*, bool);
+using RetailMenuAddControlFunction =
+    std::uint16_t(__thiscall*)(
+        void*, const wchar_t*, std::uint32_t, bool);
+using RetailListGetControlFunction =
+    void*(__thiscall*)(void*, std::uint32_t);
+using RetailListSwapItemsFunction =
+    void(__thiscall*)(void*, std::uint32_t, std::uint32_t);
+using RetailListSetSelectionFunction =
+    std::uint32_t(__thiscall*)(void*, std::uint32_t);
+using RetailControlShowFunction = void(__thiscall*)(void*, bool);
+using RetailMenuNavigateFunction = bool(__thiscall*)(void*);
 
 ILTClient* g_client = nullptr;
 ILTRenderer* g_renderer = nullptr;
 IsHostConnectedFunction g_isHostConnected = nullptr;
 IsStereoAvailableFunction g_isStereoAvailable = nullptr;
 IsStereoEnabledFunction g_isStereoEnabled = nullptr;
+SetStereoEnabledFunction g_setStereoEnabled = nullptr;
+GetBooleanOptionFunction g_isTranslationEnabled = nullptr;
+SetBooleanOptionFunction g_setTranslationEnabled = nullptr;
+GetBooleanOptionFunction g_isStereoHudEnabled = nullptr;
+SetBooleanOptionFunction g_setStereoHudEnabled = nullptr;
+GetBooleanOptionFunction g_isComfortModeEnabled = nullptr;
+SetBooleanOptionFunction g_setComfortModeEnabled = nullptr;
+RequestRecenterFunction g_requestRecenter = nullptr;
+IsFlatPanelActiveFunction g_isFlatPanelActive = nullptr;
 RegisterStereoToggleFunction g_registerStereoToggle = nullptr;
 GetRenderRequestFunction g_getRenderRequest = nullptr;
+GetInputStateFunction g_getInputState = nullptr;
+SubmitHapticRequestFunction g_submitHapticRequest = nullptr;
 BeginEyeFunction g_beginEye = nullptr;
 CaptureEyeFunction g_captureEye = nullptr;
 EndStereoFrameFunction g_endStereoFrame = nullptr;
@@ -49,6 +113,48 @@ ReportHookStatusFunction g_reportHookStatus = nullptr;
 RenderPlayerCameraFunction g_renderPlayerCamera = nullptr;
 RenderCameraWithOverrideFunction g_renderCameraWithOverride = nullptr;
 void** g_renderCameraSlot = nullptr;
+IClientShell* g_clientShell = nullptr;
+ClientShellUpdateFunction g_clientShellUpdate = nullptr;
+RetailGetBindingValueFunction g_retailGetBindingValue = nullptr;
+void* g_retailGetBindingValueTarget = nullptr;
+RetailWeaponManagerUpdateFunction g_retailWeaponManagerUpdate = nullptr;
+RetailSetWeaponTransformFunction g_retailSetWeaponTransform = nullptr;
+RetailSetWeaponVisibleFunction g_retailSetWeaponVisible = nullptr;
+RetailGetFireVectorsFunction g_retailGetFireVectors = nullptr;
+RetailSetTrackedTargetFunction g_retailSetTrackedTarget = nullptr;
+RetailAccuracyManagerFunction g_retailAccuracyManager = nullptr;
+RetailMenuInitFunction g_retailMenuInit = nullptr;
+RetailMenuOnCommandFunction g_retailMenuOnCommand = nullptr;
+RetailMenuOnFocusFunction g_retailMenuOnFocus = nullptr;
+RetailMenuAddControlFunction g_retailMenuAddControl = nullptr;
+RetailListGetControlFunction g_retailListGetControl = nullptr;
+RetailListSwapItemsFunction g_retailListSwapItems = nullptr;
+RetailListSetSelectionFunction g_retailListSetSelection = nullptr;
+void* g_retailMenuInitTarget = nullptr;
+void* g_retailMenuOnCommandTarget = nullptr;
+void* g_retailMenuOnFocusTarget = nullptr;
+void* g_retailWeaponManagerUpdateTarget = nullptr;
+void* g_retailGetFireVectorsTarget = nullptr;
+void* g_retailSetTrackedTargetTarget = nullptr;
+HOBJECT g_playerBodyObject = nullptr;
+struct HandNodeControlState {
+    HMODELNODE node{INVALID_MODEL_NODE};
+    HMODELNODE upperArmNode{INVALID_MODEL_NODE};
+    HMODELNODE forearmNode{INVALID_MODEL_NODE};
+    LTTransform socketFromNode;
+    LTVector forearmOffsetFromUpperArm;
+    LTVector socketOffsetFromForearm;
+    LTVector desiredElbowWorld;
+    bool installed{false};
+    bool upperArmInstalled{false};
+    bool forearmInstalled{false};
+    bool socketFromNodeValid{false};
+    bool forearmOffsetFromUpperArmValid{false};
+    bool socketOffsetFromForearmValid{false};
+    bool desiredElbowValid{false};
+};
+HandNodeControlState g_rightHandControl;
+HandNodeControlState g_leftHandControl;
 SRWLOCK g_hookLock = SRWLOCK_INIT;
 bool g_hookInstalled = false;
 thread_local bool g_inStereoRender = false;
@@ -62,6 +168,7 @@ struct StereoRecoveryState {
 thread_local StereoRecoveryState g_stereoRecovery;
 struct HeadTrackingState {
     FearVrPose recenter{};
+    FearVrPose currentCenter{};
     std::uint64_t lastFrameId{0};
     ULONGLONG lastFreshFrameTick{0};
     std::uint32_t recenterGeneration{0};
@@ -76,6 +183,147 @@ volatile LONG g_firstStereoFrameLogged = 0;
 volatile LONG g_stereoFallbackLogged = 0;
 volatile LONG g_headTrackingActiveLogged = 0;
 volatile LONG g_trackingResetGeneration = 0;
+volatile LONG g_clientInputHookCallLogged = 0;
+volatile LONG g_weaponAimActiveLogged = 0;
+volatile LONG g_weaponBodyAimActiveLogged = 0;
+volatile LONG g_weaponHandTrackingActiveLogged = 0;
+volatile LONG g_leftHandTrackingActiveLogged = 0;
+volatile LONG g_rightForearmTrackingActiveLogged = 0;
+volatile LONG g_leftForearmTrackingActiveLogged = 0;
+volatile LONG g_bulletGuideAlignmentActiveLogged = 0;
+volatile LONG g_weaponHandTrackingFailureLogged = 0;
+volatile LONG g_weaponAimGuideActiveLogged = 0;
+volatile LONG g_handPoseGapBridgedLogged = 0;
+volatile LONG g_weaponSocketSyncActiveLogged = 0;
+volatile LONG g_armGeometryInspectedLogged = 0;
+volatile LONG g_armGeometryEmptyAttempts = 0;
+volatile LONG g_armGeometryNeverAvailableLogged = 0;
+// Retail player.Model00p exposes four unnamed pieces, so the piece carrying
+// the hands can only be identified by isolating them one at a time.
+constexpr std::uint32_t kPlayerBodyPieceMaskAll = 0xFU;
+// Benutzerbestätigt am 25.07.2026: Piece #1 trägt die Arme. Ohne dieses Piece
+// bleiben Hände und Waffe sichtbar, Ober- und Unterarm verschwinden.
+constexpr std::uint32_t kPlayerBodyArmPieceMask = 0x2U;
+std::uint32_t g_hiddenBodyPieceMask = kPlayerBodyArmPieceMask;
+std::uint32_t g_bodyPieceProbeStep = 0;
+bool g_bodyPieceProbeKeyWasDown = false;
+std::uint64_t g_hapticRequestId = 0;
+std::uint64_t g_lastInputSampleId = 0;
+ULONGLONG g_lastInputSampleTick = 0;
+std::uint32_t g_lastInputButtons = 0;
+std::uint32_t g_lastActiveHands = 0;
+bool g_controllerRecenterWasDown = false;
+bool g_fireTriggerWasDown = false;
+std::uint32_t g_lastMenuButtons = 0;
+bool g_lastMenuTriggerDown = false;
+bool g_menuAxisDown[4]{};
+ULONGLONG g_menuAxisRepeatTick[4]{};
+bool g_menuControllerActive = false;
+bool g_seenForwardAxisBinding = false;
+bool g_seenStrafeAxisBinding = false;
+bool g_controllerCommandActive[128]{};
+bool g_injectedCommandActive[128]{};
+thread_local bool g_semanticBitsInjected = false;
+FearVrInputState g_currentInput{};
+struct WeaponAimState {
+    LTRigidTransform fireTransform;
+    LTRigidTransform gripTransform;
+    LTRigidTransform leftAimTransform;
+    LTRigidTransform leftGripTransform;
+    LTRigidTransform muzzleTransform;
+    LTVector muzzleForwardInWeapon;
+    const void* muzzleWeapon{nullptr};
+    bool valid{false};
+    bool gripValid{false};
+    bool leftAimValid{false};
+    bool leftGripValid{false};
+    bool muzzleValid{false};
+    bool muzzleDirectionValid{false};
+    bool muzzleDiagnosticLogged{false};
+};
+thread_local WeaponAimState g_weaponAim;
+struct TrackedPoseCache {
+    FearVrPose pose{};
+    ULONGLONG lastValidTick{0};
+    LONG resetGeneration{-1};
+    bool valid{false};
+};
+thread_local TrackedPoseCache g_aimPoseCache[FEARVR_HAND_COUNT];
+thread_local TrackedPoseCache g_gripPoseCache[FEARVR_HAND_COUNT];
+struct HandOrientationCalibration {
+    LTRotation offset;
+    LONG resetGeneration{-1};
+    bool valid{false};
+};
+HandOrientationCalibration g_rightHandOrientation;
+HandOrientationCalibration g_leftHandOrientation;
+ULONGLONG g_lastWeaponManagerUpdateTick = 0;
+bool g_autoStereoActivationAttempted = false;
+bool g_crosshairOverrideApplied = false;
+bool g_crosshairOriginalKnown = false;
+float g_crosshairOriginalValue = 0.0F;
+bool g_recoilOverrideApplied = false;
+bool g_recoilOriginalKnown = false;
+float g_recoilOriginalValue = -1.0F;
+bool g_weaponAimGuideEnabled = true;
+bool g_controllerHapticsEnabled = true;
+bool g_headBobEnabled = true;
+bool g_headBobOriginalKnown = false;
+float g_headBobOriginalDebugMode = 0.0F;
+float g_headBobOriginalAmplitudes[12]{};
+int g_turnSpeedPreset = 1;
+wchar_t g_vrSettingsPath[MAX_PATH]{};
+bool g_vrSettingsFilePresent = false;
+
+struct VrMenuControl {
+    void* object{nullptr};
+    std::uint32_t index{0};
+};
+
+struct VrMenuToggle {
+    VrMenuControl enabled;
+    VrMenuControl disabled;
+};
+
+constexpr std::size_t kRetailSystemMenuOriginalControlCount = 16;
+void* g_vrMenuOwner = nullptr;
+void* g_vrNormalControls[
+    kRetailSystemMenuOriginalControlCount + 1]{};
+std::size_t g_vrNormalControlCount = 0;
+bool g_vrMenuControlsBuilt = false;
+bool g_vrSettingsPageActive = false;
+int g_vrOriginalItemSpacing = 0;
+bool g_vrOriginalItemSpacingKnown = false;
+VrMenuControl g_vrMenuEntry;
+VrMenuControl g_vrMenuTitle;
+VrMenuToggle g_vrMenuStereo;
+VrMenuToggle g_vrMenuTranslation;
+VrMenuToggle g_vrMenuStereoHud;
+VrMenuToggle g_vrMenuHeadBob;
+VrMenuToggle g_vrMenuComfort;
+VrMenuToggle g_vrMenuAimGuide;
+VrMenuToggle g_vrMenuHaptics;
+VrMenuControl g_vrMenuTurnSpeed[3];
+VrMenuControl g_vrMenuRecenter;
+VrMenuControl g_vrMenuDefaults;
+VrMenuControl g_vrMenuBack;
+
+struct RetailBinding {
+    std::uint32_t device;
+    std::uint32_t object;
+    std::uint32_t command;
+    float defaultValue;
+    float offset;
+    float scale;
+    float deadzoneMin;
+    float deadzoneMax;
+    float deadzoneValue;
+    float commandMin;
+    float commandMax;
+};
+static_assert(
+    sizeof(RetailBinding) == 44,
+    "Retail CBindMgr::SBinding layout changed.");
 
 // The retail VC7.1 VTable groups the RenderCamera overloads differently
 // from their declaration order in the public header. The one-argument
@@ -83,6 +331,52 @@ volatile LONG g_trackingResetGeneration = 0;
 // RenderCamera implementation in slot 19 (call [vtable + 0x4c]).
 constexpr std::size_t kRenderPlayerCameraSlot = 17;
 constexpr std::size_t kRenderCameraWithOverrideSlot = 19;
+// IBase::_InterfaceImplementation is slot 0. IClientShell version 5 places
+// OnConsolePrint, key/model and world callbacks before Update; the public
+// header therefore puts Update in slot 20.
+constexpr std::size_t kClientShellUpdateSlot = 20;
+constexpr std::uint32_t kRetailGameClientTimeDateStamp = 0x44EF6B56U;
+constexpr std::uint32_t kRetailGameClientSizeOfImage = 0x00315000U;
+constexpr std::uintptr_t kRetailMenuSystemInitRva = 0x0010CA90U;
+constexpr std::uintptr_t kRetailMenuSystemOnCommandRva = 0x0010D480U;
+constexpr std::uintptr_t kRetailMenuSystemOnFocusRva = 0x0010CE00U;
+constexpr std::uintptr_t kRetailBaseMenuAddWideControlThunkRva =
+    0x00008A58U;
+constexpr std::uintptr_t kRetailListGetControlRva = 0x00251440U;
+constexpr std::uintptr_t kRetailListSwapItemsRva = 0x00252CE0U;
+constexpr std::uintptr_t kRetailListSetSelectionRva = 0x002527E0U;
+constexpr std::size_t kRetailMenuListOffset = 0x6E8;
+// Retail CBaseMenu::Init writes FontSize / 4 here before marking the list
+// dirty. This is CLTGUIListCtrl::m_nItemSpacing in the verified 1.08 build.
+constexpr std::size_t kRetailListItemSpacingOffset = 0x54;
+constexpr std::size_t kRetailListFirstShownOffset = 0x5C;
+constexpr std::size_t kRetailListNeedsRecalculationOffset = 0x648;
+// CLTGUICtrl::IsEnabled() ist `m_bEnabled && IsVisible()`. Verstecken genügt
+// deshalb, damit CLTGUIListCtrl::NextSelection einen Eintrag überspringt; ein
+// zusätzliches Enable(false) wäre wirkungslos und würde beim Wiedereinblenden
+// statische Controls fälschlich auswählbar machen.
+constexpr std::size_t kRetailControlShowVtableSlot = 41;
+constexpr std::size_t kRetailMenuOnDownVtableSlot = 23;
+constexpr ULONGLONG kTrackedPoseGapGraceMilliseconds = 150;
+constexpr std::uintptr_t kRetailWeaponManagerUpdateRva = 0x00078140U;
+constexpr std::uintptr_t kRetailSetWeaponTransformRva = 0x00066F90U;
+constexpr std::uintptr_t kRetailSetWeaponVisibleRva = 0x00069320U;
+constexpr std::uintptr_t kRetailGetFireVectorsRva = 0x0006B4A0U;
+constexpr std::uintptr_t kRetailSetTrackedTargetRva = 0x0021EAA0U;
+// CAccuracyMgr::Instance jump thunk. The first member is m_fCurrentPerturb.
+constexpr std::uintptr_t kRetailAccuracyManagerRva = 0x00009007U;
+// Verified Retail CPlayerBodyMgr::Instance returns GameOrig+0x2D7380.
+// Its first four members are animation-context pointers, followed by
+// m_hPlayerBody at +0x10.
+constexpr std::uintptr_t kRetailPlayerBodyManagerRva = 0x002D7380U;
+constexpr std::size_t kRetailPlayerBodyObjectOffset = 0x10;
+constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
+// Retail CClientWeapon starts m_RightHandWeapon at +0x10. Its first LTObjRef
+// occupies 16 bytes on x86 (vptr, list links, HOBJECT), putting the model
+// HOBJECT at +0x1c and m_hMuzzleSocket at +0x50.
+constexpr std::size_t kRetailRightWeaponModelObjectOffset = 0x1C;
+constexpr std::size_t kRetailRightWeaponMuzzleSocketOffset = 0x50;
+constexpr int kRetailTrackerGroupAimAt = 1;
 constexpr unsigned char kRetailPlayerCameraForwarder[] = {
     0x8B, 0x54, 0x24, 0x04, // mov edx,[esp+4]
     0x8B, 0x01,             // mov eax,[ecx]
@@ -90,6 +384,38 @@ constexpr unsigned char kRetailPlayerCameraForwarder[] = {
     0x52,                   // push edx (camera)
     0xFF, 0x50, 0x4C,       // call [eax+0x4c] (slot 19)
     0xC2, 0x04, 0x00        // ret 4
+};
+constexpr unsigned char kRetailMenuInitPrefix[] = {
+    0x8B, 0x44, 0x24, 0x04, 0x56, 0x8B, 0xF1, 0x50,
+    0xC7, 0x86, 0xF0, 0x05, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x00};
+constexpr unsigned char kRetailMenuOnCommandPrefix[] = {
+    0x83, 0xEC, 0x2C, 0x53, 0x56, 0x8B, 0xF1, 0x8B,
+    0x4C, 0x24, 0x38, 0x8D, 0x41, 0xFB, 0x83, 0xF8,
+    0x0E};
+constexpr unsigned char kRetailMenuOnFocusPrefix[] = {
+    0x81, 0xEC, 0x1C, 0x02, 0x00, 0x00, 0x55, 0x56,
+    0x8B, 0xF1};
+constexpr unsigned char kRetailListGetControlPrefix[] = {
+    0x8B, 0x91, 0x50, 0x06, 0x00, 0x00, 0x85, 0xD2,
+    0x74, 0x13};
+constexpr unsigned char kRetailListSwapItemsPrefix[] = {
+    0x8B, 0x91, 0x50, 0x06, 0x00, 0x00, 0x85, 0xD2,
+    0x74, 0x71, 0x8B, 0x81, 0x54, 0x06, 0x00, 0x00};
+
+enum VrMenuCommand : std::uint32_t {
+    kVrMenuOpen = 0x56520001U,
+    kVrMenuToggleStereo,
+    kVrMenuToggleTranslation,
+    kVrMenuToggleStereoHud,
+    kVrMenuToggleHeadBob,
+    kVrMenuToggleComfort,
+    kVrMenuToggleAimGuide,
+    kVrMenuToggleHaptics,
+    kVrMenuCycleTurnSpeed,
+    kVrMenuRecenter,
+    kVrMenuDefaults,
+    kVrMenuBack,
 };
 static_assert(
     0x4C / sizeof(void*) == kRenderCameraWithOverrideSlot,
@@ -122,6 +448,101 @@ bool IsExecutableAddress(const void* address) noexcept {
            protection == PAGE_EXECUTE_WRITECOPY;
 }
 
+const unsigned char* ResolveRelativeBranch(
+    const unsigned char* instruction) noexcept {
+    if (!IsExecutableAddress(instruction) ||
+        (instruction[0] != 0xE8 &&
+         instruction[0] != 0xE9)) {
+        return nullptr;
+    }
+    std::int32_t displacement = 0;
+    std::memcpy(
+        &displacement, instruction + 1, sizeof(displacement));
+    const unsigned char* const resolved =
+        instruction + 5 + displacement;
+    return IsExecutableAddress(resolved) ? resolved : nullptr;
+}
+
+const unsigned char* ResolveCodeTarget(
+    const unsigned char* target) noexcept {
+    const unsigned char* current = target;
+    for (int depth = 0; depth < 4; ++depth) {
+        if (current == nullptr || current[0] != 0xE9) {
+            break;
+        }
+        const unsigned char* const resolved =
+            ResolveRelativeBranch(current);
+        if (resolved == nullptr || resolved == current) {
+            break;
+        }
+        current = resolved;
+    }
+    return current;
+}
+
+bool MatchesCode(
+    const unsigned char* target,
+    const unsigned char* expected,
+    std::size_t size) noexcept {
+    if (!IsExecutableAddress(target) || expected == nullptr) {
+        return false;
+    }
+    __try {
+        return std::memcmp(target, expected, size) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+const unsigned char* FindRetailGetBindingValue(
+    const void* target) noexcept {
+    const auto* updateThunk =
+        static_cast<const unsigned char*>(target);
+    const unsigned char* const update =
+        ResolveCodeTarget(updateThunk);
+
+    constexpr unsigned char kBindMgrCalls[] = {
+        0xE8, 0x00, 0x00, 0x00, 0x00,
+        0x8B, 0xC8, 0xE8
+    };
+    if (!IsExecutableAddress(update)) {
+        return nullptr;
+    }
+    __try {
+        if (update[0x7B] != kBindMgrCalls[0] ||
+            update[0x80] != kBindMgrCalls[5] ||
+            update[0x81] != kBindMgrCalls[6] ||
+            update[0x82] != kBindMgrCalls[7]) {
+            return nullptr;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+
+    const unsigned char* const bindUpdateBranch =
+        ResolveRelativeBranch(update + 0x82);
+    const unsigned char* const bindUpdate =
+        ResolveCodeTarget(bindUpdateBranch);
+    constexpr unsigned char kBindUpdatePrefix[] = {
+        0x83, 0xEC, 0x1C, 0x56, 0x8B, 0xF1,
+        0x8A, 0x46, 0x4C, 0x84, 0xC0, 0x0F, 0x84
+    };
+    constexpr unsigned char kGetBindingCallSite[] = {
+        0x6A, 0x00, 0x53, 0x8B, 0xCE, 0xE8
+    };
+    if (!MatchesCode(
+            bindUpdate, kBindUpdatePrefix,
+            sizeof(kBindUpdatePrefix)) ||
+        !MatchesCode(
+            bindUpdate + 0xD4, kGetBindingCallSite,
+            sizeof(kGetBindingCallSite))) {
+        return nullptr;
+    }
+
+    return ResolveCodeTarget(
+        ResolveRelativeBranch(bindUpdate + 0xD9));
+}
+
 bool MatchesRetailPlayerCameraForwarder(const void* target) noexcept {
     if (!IsExecutableAddress(target)) {
         return false;
@@ -141,48 +562,1055 @@ bool CommandLineContains(const wchar_t* option) noexcept {
            std::wcsstr(commandLine, option) != nullptr;
 }
 
-void ConfigureComfortOptions() noexcept {
-    if (g_client == nullptr ||
-        !CommandLineContains(L"-fearvr-no-headbob")) {
-        return;
+constexpr const char* kHeadBobAmplitudeVariables[] = {
+    "HeadBobCameraOffsetXAmp",
+    "HeadBobCameraOffsetYAmp",
+    "HeadBobCameraOffsetZAmp",
+    "HeadBobCameraRotationXAmp",
+    "HeadBobCameraRotationYAmp",
+    "HeadBobCameraRotationZAmp",
+    "HeadBobWeaponOffsetXAmp",
+    "HeadBobWeaponOffsetYAmp",
+    "HeadBobWeaponOffsetZAmp",
+    "HeadBobWeaponRotationXAmp",
+    "HeadBobWeaponRotationYAmp",
+    "HeadBobWeaponRotationZAmp",
+};
+
+bool CaptureHeadBobOriginals() noexcept {
+    if (g_headBobOriginalKnown) {
+        return true;
     }
+    if (g_client == nullptr) {
+        return false;
+    }
+    __try {
+        const HCONSOLEVAR debug =
+            g_client->GetConsoleVariable("HeadBobDebugMode");
+        if (debug == nullptr) {
+            return false;
+        }
+        g_headBobOriginalDebugMode =
+            g_client->GetConsoleVariableFloat(debug);
+        for (std::size_t index = 0;
+             index < std::size(kHeadBobAmplitudeVariables);
+             ++index) {
+            const HCONSOLEVAR variable = g_client->GetConsoleVariable(
+                kHeadBobAmplitudeVariables[index]);
+            if (variable == nullptr) {
+                return false;
+            }
+            g_headBobOriginalAmplitudes[index] =
+                g_client->GetConsoleVariableFloat(variable);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    g_headBobOriginalKnown = true;
+    return true;
+}
 
-    static const char* const amplitudeVariables[] = {
-        "HeadBobCameraOffsetXAmp",
-        "HeadBobCameraOffsetYAmp",
-        "HeadBobCameraOffsetZAmp",
-        "HeadBobCameraRotationXAmp",
-        "HeadBobCameraRotationYAmp",
-        "HeadBobCameraRotationZAmp",
-        "HeadBobWeaponOffsetXAmp",
-        "HeadBobWeaponOffsetYAmp",
-        "HeadBobWeaponOffsetZAmp",
-        "HeadBobWeaponRotationXAmp",
-        "HeadBobWeaponRotationYAmp",
-        "HeadBobWeaponRotationZAmp",
-    };
-
+bool ApplyHeadBobEnabled(bool enabled) noexcept {
+    if (!CaptureHeadBobOriginals()) {
+        return false;
+    }
     bool configured = true;
     __try {
         configured =
             g_client->SetConsoleVariableFloat(
-                "HeadBobDebugMode", 1.0F) == LT_OK;
-        for (const char* variable : amplitudeVariables) {
+                "HeadBobDebugMode",
+                enabled ? g_headBobOriginalDebugMode : 1.0F) == LT_OK;
+        for (std::size_t index = 0;
+             index < std::size(kHeadBobAmplitudeVariables);
+             ++index) {
             configured =
                 g_client->SetConsoleVariableFloat(
-                    variable, 0.0F) == LT_OK &&
+                    kHeadBobAmplitudeVariables[index],
+                    enabled
+                        ? g_headBobOriginalAmplitudes[index]
+                        : 0.0F) == LT_OK &&
                 configured;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         configured = false;
     }
+    if (configured) {
+        g_headBobEnabled = enabled;
+    }
     Report(
         configured ? "INFO" : "WARN",
-        configured ? "headbob_disabled"
-                   : "headbob_disable_failed",
         configured
-            ? "Camera and weapon head bob are disabled by opt-in."
-            : "The opt-in head-bob console variables could not be set.");
+            ? (enabled ? "headbob_enabled" : "headbob_disabled")
+            : "headbob_configuration_failed",
+        configured
+            ? (enabled
+                   ? "Retail camera and weapon head bob were restored."
+                   : "Camera and weapon head bob are disabled for VR.")
+            : "The Retail head-bob variables could not be changed.");
+    return configured;
+}
+
+void ConfigureComfortOptions() noexcept {
+    g_headBobEnabled =
+        !CommandLineContains(L"-fearvr-no-headbob");
+    CaptureHeadBobOriginals();
+    if (!g_headBobEnabled) {
+        ApplyHeadBobEnabled(false);
+    }
+}
+
+bool ReadCommandLineValue(
+    const wchar_t* option, wchar_t* output,
+    std::size_t outputCount) noexcept {
+    if (option == nullptr || output == nullptr || outputCount == 0) {
+        return false;
+    }
+    output[0] = L'\0';
+    const wchar_t* commandLine = GetCommandLineW();
+    const wchar_t* cursor =
+        commandLine == nullptr ? nullptr : std::wcsstr(commandLine, option);
+    if (cursor == nullptr) {
+        return false;
+    }
+    cursor += std::wcslen(option);
+    while (*cursor == L' ' || *cursor == L'\t') {
+        ++cursor;
+    }
+    const bool quoted = *cursor == L'"';
+    if (quoted) {
+        ++cursor;
+    }
+    std::size_t length = 0;
+    while (*cursor != L'\0' &&
+           ((quoted && *cursor != L'"') ||
+            (!quoted && *cursor != L' ' && *cursor != L'\t')) &&
+           length + 1 < outputCount) {
+        output[length++] = *cursor++;
+    }
+    output[length] = L'\0';
+    return length != 0;
+}
+
+void LocateVrSettingsFile() noexcept {
+    wchar_t directory[MAX_PATH]{};
+    if (!ReadCommandLineValue(
+            L"-userdirectory", directory, std::size(directory))) {
+        HMODULE self = nullptr;
+        if (GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&LocateVrSettingsFile),
+                &self)) {
+            const DWORD length =
+                GetModuleFileNameW(self, directory, MAX_PATH);
+            if (length != 0 && length < MAX_PATH) {
+                wchar_t* separator = std::wcsrchr(directory, L'\\');
+                if (separator != nullptr) {
+                    *separator = L'\0';
+                }
+            }
+        }
+    }
+    if (directory[0] == L'\0') {
+        return;
+    }
+    _snwprintf_s(
+        g_vrSettingsPath, std::size(g_vrSettingsPath),
+        _TRUNCATE, L"%s\\fearvr.ini", directory);
+    g_vrSettingsFilePresent =
+        GetFileAttributesW(g_vrSettingsPath) != INVALID_FILE_ATTRIBUTES;
+}
+
+int ReadVrSetting(const wchar_t* name, int fallback) noexcept {
+    if (!g_vrSettingsFilePresent ||
+        g_vrSettingsPath[0] == L'\0') {
+        return fallback;
+    }
+    return GetPrivateProfileIntW(
+        L"VR", name, fallback, g_vrSettingsPath);
+}
+
+bool QueryBooleanOption(
+    GetBooleanOptionFunction getter, bool fallback) noexcept {
+    if (getter == nullptr) {
+        return fallback;
+    }
+    __try {
+        return getter() != FALSE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return fallback;
+    }
+}
+
+void SetBooleanOption(
+    SetBooleanOptionFunction setter, bool enabled) noexcept {
+    if (setter == nullptr) {
+        return;
+    }
+    __try {
+        setter(enabled ? TRUE : FALSE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void InitializeVrSettings() noexcept {
+    LocateVrSettingsFile();
+    if (!g_vrSettingsFilePresent) {
+        return;
+    }
+
+    SetBooleanOption(
+        g_setStereoEnabled,
+        ReadVrSetting(
+            L"Stereo",
+            QueryBooleanOption(g_isStereoEnabled, true) ? 1 : 0) != 0);
+    SetBooleanOption(
+        g_setTranslationEnabled,
+        ReadVrSetting(
+            L"Translation",
+            QueryBooleanOption(g_isTranslationEnabled, false) ? 1 : 0) != 0);
+    SetBooleanOption(
+        g_setStereoHudEnabled,
+        ReadVrSetting(
+            L"StereoHUD",
+            QueryBooleanOption(g_isStereoHudEnabled, true) ? 1 : 0) != 0);
+    SetBooleanOption(
+        g_setComfortModeEnabled,
+        ReadVrSetting(
+            L"ComfortMode",
+            QueryBooleanOption(g_isComfortModeEnabled, false) ? 1 : 0) != 0);
+    ApplyHeadBobEnabled(
+        ReadVrSetting(L"HeadBob", g_headBobEnabled ? 1 : 0) != 0);
+    g_weaponAimGuideEnabled =
+        ReadVrSetting(L"AimGuide", 1) != 0;
+    g_controllerHapticsEnabled =
+        ReadVrSetting(L"Haptics", 1) != 0;
+    g_turnSpeedPreset =
+        std::clamp(ReadVrSetting(L"TurnSpeed", 1), 0, 2);
+    g_hiddenBodyPieceMask = static_cast<std::uint32_t>(
+        std::clamp(
+            ReadVrSetting(
+                L"HiddenBodyPieces",
+                static_cast<int>(kPlayerBodyArmPieceMask)),
+            0, 0xF));
+    // Keep the F11 probe in step with a persisted isolation mask so the next
+    // press continues the walk instead of jumping back to the start.
+    g_bodyPieceProbeStep =
+        g_hiddenBodyPieceMask == kPlayerBodyPieceMaskAll ? 5U : 0U;
+    for (std::uint32_t index = 0; index < 4U; ++index) {
+        if (g_hiddenBodyPieceMask ==
+            (kPlayerBodyPieceMaskAll & ~(1U << index))) {
+            g_bodyPieceProbeStep = index + 1U;
+            break;
+        }
+    }
+    // A persisted stereo choice must not be overwritten by the automatic
+    // first-playing-frame activation.
+    g_autoStereoActivationAttempted = true;
+    Report(
+        "INFO", "vr_settings_loaded",
+        "Persistent in-game VR settings were loaded from fearvr.ini.");
+}
+
+void WriteVrSetting(const wchar_t* name, int value) noexcept {
+    if (g_vrSettingsPath[0] == L'\0') {
+        return;
+    }
+    wchar_t text[16]{};
+    _snwprintf_s(
+        text, std::size(text), _TRUNCATE, L"%d", value);
+    WritePrivateProfileStringW(
+        L"VR", name, text, g_vrSettingsPath);
+}
+
+void SaveVrSettings() noexcept {
+    if (g_vrSettingsPath[0] == L'\0') {
+        LocateVrSettingsFile();
+    }
+    WriteVrSetting(
+        L"Stereo",
+        QueryBooleanOption(g_isStereoEnabled, true) ? 1 : 0);
+    WriteVrSetting(
+        L"Translation",
+        QueryBooleanOption(g_isTranslationEnabled, false) ? 1 : 0);
+    WriteVrSetting(
+        L"StereoHUD",
+        QueryBooleanOption(g_isStereoHudEnabled, true) ? 1 : 0);
+    WriteVrSetting(
+        L"ComfortMode",
+        QueryBooleanOption(g_isComfortModeEnabled, false) ? 1 : 0);
+    WriteVrSetting(L"HeadBob", g_headBobEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"AimGuide", g_weaponAimGuideEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"Haptics", g_controllerHapticsEnabled ? 1 : 0);
+    WriteVrSetting(L"TurnSpeed", g_turnSpeedPreset);
+    g_vrSettingsFilePresent = true;
+}
+
+void* RetailVrMenuList(void* menu) noexcept {
+    return menu == nullptr
+        ? nullptr
+        : static_cast<void*>(
+              static_cast<unsigned char*>(menu) +
+              kRetailMenuListOffset);
+}
+
+void SetRetailControlVisible(
+    const VrMenuControl& control, bool visible) noexcept {
+    if (control.object == nullptr) {
+        return;
+    }
+    __try {
+        void** const vtable =
+            *reinterpret_cast<void***>(control.object);
+        const auto show =
+            reinterpret_cast<RetailControlShowFunction>(
+                vtable[kRetailControlShowVtableSlot]);
+        if (IsExecutableAddress(
+                reinterpret_cast<const void*>(show))) {
+            show(control.object, visible);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void SetRetailControlVisible(
+    void* control, bool visible) noexcept {
+    SetRetailControlVisible(
+        VrMenuControl{control, 0}, visible);
+}
+
+void MarkRetailVrMenuForLayout() noexcept {
+    void* const list = RetailVrMenuList(g_vrMenuOwner);
+    if (list == nullptr) {
+        return;
+    }
+    __try {
+        *(static_cast<unsigned char*>(list) +
+          kRetailListNeedsRecalculationOffset) = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// CLTGUIListCtrl::SetSelection bestimmt beim Herunterscrollen den neuen
+// Listenanfang, indem es rückwärts die `GetBaseHeight()` aller Controls
+// aufsummiert — ohne `IsVisible()` zu prüfen. `CalculatePositions()`
+// überspringt unsichtbare Controls dagegen. Auf der VR-Seite liegen zu jedem
+// sichtbaren Umschalter versteckte Geschwister-Controls, weshalb
+// `m_nFirstShown` falsch gesetzt wird und die Liste springt.
+//
+// Die verkürzte VR-Seite passt vollständig in den nativen Rahmen. Der
+// Listenanfang wird deshalb bei 0 festgehalten, solange sie aktiv ist. Der
+// Schreibzugriff erfolgt nur bei Bedarf, damit nicht jedes Frame eine
+// Neuberechnung erzwungen wird.
+void ResetRetailVrMenuScroll() noexcept {
+    void* const list = RetailVrMenuList(g_vrMenuOwner);
+    if (list == nullptr) {
+        return;
+    }
+    __try {
+        auto* const firstShown = reinterpret_cast<std::uint32_t*>(
+            static_cast<unsigned char*>(list) +
+            kRetailListFirstShownOffset);
+        if (*firstShown != 0) {
+            *firstShown = 0;
+            *(static_cast<unsigned char*>(list) +
+              kRetailListNeedsRecalculationOffset) = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void SetRetailVrMenuCompactSpacing(bool compact) noexcept {
+    void* const list = RetailVrMenuList(g_vrMenuOwner);
+    if (list == nullptr) {
+        return;
+    }
+    __try {
+        auto* const spacing = reinterpret_cast<int*>(
+            static_cast<unsigned char*>(list) +
+            kRetailListItemSpacingOffset);
+        if (compact) {
+            const int current = *spacing;
+            if (!g_vrOriginalItemSpacingKnown) {
+                // Retail uses FontSize / 4. Reject an unexpected layout
+                // instead of writing through an unverified object.
+                if (current < 0 || current > 32) {
+                    return;
+                }
+                g_vrOriginalItemSpacing = current;
+                g_vrOriginalItemSpacingKnown = true;
+            }
+            *spacing = 0;
+        } else if (g_vrOriginalItemSpacingKnown) {
+            *spacing = g_vrOriginalItemSpacing;
+        }
+        *(static_cast<unsigned char*>(list) +
+          kRetailListNeedsRecalculationOffset) = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+VrMenuControl AddRetailVrMenuControl(
+    const wchar_t* text, std::uint32_t command,
+    bool isStatic = false) noexcept {
+    VrMenuControl result;
+    if (g_vrMenuOwner == nullptr ||
+        g_retailMenuAddControl == nullptr ||
+        g_retailListGetControl == nullptr) {
+        return result;
+    }
+    __try {
+        result.index = g_retailMenuAddControl(
+            g_vrMenuOwner, text, command, isStatic);
+        result.object = g_retailListGetControl(
+            RetailVrMenuList(g_vrMenuOwner), result.index);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        result = VrMenuControl{};
+    }
+    return result;
+}
+
+void HideRetailVrSettingsControls() noexcept {
+    SetRetailControlVisible(g_vrMenuTitle, false);
+    const VrMenuToggle toggles[] = {
+        g_vrMenuStereo,
+        g_vrMenuTranslation,
+        g_vrMenuStereoHud,
+        g_vrMenuHeadBob,
+        g_vrMenuComfort,
+        g_vrMenuAimGuide,
+        g_vrMenuHaptics,
+    };
+    for (const VrMenuToggle& toggle : toggles) {
+        SetRetailControlVisible(toggle.enabled, false);
+        SetRetailControlVisible(toggle.disabled, false);
+    }
+    for (const VrMenuControl& turnSpeed : g_vrMenuTurnSpeed) {
+        SetRetailControlVisible(turnSpeed, false);
+    }
+    SetRetailControlVisible(g_vrMenuRecenter, false);
+    SetRetailControlVisible(g_vrMenuDefaults, false);
+    SetRetailControlVisible(g_vrMenuBack, false);
+}
+
+VrMenuControl SetRetailVrToggleVisible(
+    const VrMenuToggle& toggle, bool enabled) noexcept {
+    SetRetailControlVisible(toggle.enabled, enabled);
+    SetRetailControlVisible(toggle.disabled, !enabled);
+    return enabled ? toggle.enabled : toggle.disabled;
+}
+
+VrMenuControl RefreshRetailVrSettingsControls() noexcept {
+    // Keep one short, non-scrolling page. Less frequently changed options
+    // remain persisted in fearvr.ini but do not crowd the native 320px frame.
+    HideRetailVrSettingsControls();
+    const VrMenuControl first = SetRetailVrToggleVisible(
+        g_vrMenuStereo,
+        QueryBooleanOption(g_isStereoEnabled, true));
+    SetRetailVrToggleVisible(
+        g_vrMenuStereoHud,
+        QueryBooleanOption(g_isStereoHudEnabled, true));
+    for (int index = 0; index < 3; ++index) {
+        SetRetailControlVisible(
+            g_vrMenuTurnSpeed[index],
+            index == g_turnSpeedPreset);
+    }
+    SetRetailVrToggleVisible(
+        g_vrMenuAimGuide, g_weaponAimGuideEnabled);
+    SetRetailVrToggleVisible(
+        g_vrMenuHaptics, g_controllerHapticsEnabled);
+    SetRetailControlVisible(g_vrMenuRecenter, true);
+    SetRetailControlVisible(g_vrMenuDefaults, true);
+    SetRetailControlVisible(g_vrMenuBack, true);
+    MarkRetailVrMenuForLayout();
+    return first;
+}
+
+void SelectRetailVrMenuControl(
+    const VrMenuControl& control) noexcept {
+    if (g_retailListSetSelection == nullptr ||
+        control.object == nullptr) {
+        return;
+    }
+    __try {
+        g_retailListSetSelection(
+            RetailVrMenuList(g_vrMenuOwner), control.index);
+        if (g_vrSettingsPageActive) {
+            ResetRetailVrMenuScroll();
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void RestoreRetailSystemMenuControls() noexcept {
+    SetRetailVrMenuCompactSpacing(false);
+    for (std::size_t index = 0;
+         index < g_vrNormalControlCount; ++index) {
+        SetRetailControlVisible(g_vrNormalControls[index], true);
+    }
+    HideRetailVrSettingsControls();
+    MarkRetailVrMenuForLayout();
+}
+
+void EnterRetailVrSettingsPage() noexcept {
+    if (!g_vrMenuControlsBuilt) {
+        return;
+    }
+    for (std::size_t index = 0;
+         index < g_vrNormalControlCount; ++index) {
+        SetRetailControlVisible(g_vrNormalControls[index], false);
+    }
+    g_vrSettingsPageActive = true;
+    SetRetailVrMenuCompactSpacing(true);
+    const VrMenuControl first =
+        RefreshRetailVrSettingsControls();
+    SelectRetailVrMenuControl(first);
+    Report(
+        "INFO", "vr_settings_menu_opened",
+        "The native Retail pause menu is showing VR settings.");
+}
+
+void LeaveRetailVrSettingsPage() noexcept {
+    if (!g_vrSettingsPageActive) {
+        return;
+    }
+    g_vrSettingsPageActive = false;
+    RestoreRetailSystemMenuControls();
+    SaveVrSettings();
+    if (g_retailMenuOnFocus != nullptr &&
+        g_vrMenuOwner != nullptr) {
+        __try {
+            g_retailMenuOnFocus(g_vrMenuOwner, true);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    Report(
+        "INFO", "vr_settings_menu_closed",
+        "The native Retail system-menu controls were restored.");
+}
+
+void RequestVrRecenter() noexcept {
+    InterlockedIncrement(&g_trackingResetGeneration);
+    if (g_requestRecenter != nullptr) {
+        __try {
+            g_requestRecenter();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+}
+
+void ApplyVrDefaults() noexcept {
+    SetBooleanOption(g_setStereoEnabled, true);
+    SetBooleanOption(g_setTranslationEnabled, false);
+    SetBooleanOption(g_setStereoHudEnabled, true);
+    SetBooleanOption(g_setComfortModeEnabled, false);
+    ApplyHeadBobEnabled(false);
+    g_weaponAimGuideEnabled = true;
+    g_controllerHapticsEnabled = true;
+    g_turnSpeedPreset = 1;
+    RequestVrRecenter();
+}
+
+bool BuildRetailVrMenuControls(void* menu) noexcept {
+    g_vrMenuOwner = menu;
+    g_vrNormalControlCount = 0;
+    g_vrOriginalItemSpacingKnown = false;
+    void* const list = RetailVrMenuList(menu);
+    if (list == nullptr) {
+        return false;
+    }
+
+    __try {
+        for (std::uint32_t index = 0;
+             index < kRetailSystemMenuOriginalControlCount;
+             ++index) {
+            void* const control =
+                g_retailListGetControl(list, index);
+            if (control == nullptr) {
+                return false;
+            }
+            g_vrNormalControls[g_vrNormalControlCount++] =
+                control;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    g_vrMenuEntry = AddRetailVrMenuControl(
+        L"VR SETTINGS", kVrMenuOpen);
+    if (g_vrMenuEntry.object == nullptr ||
+        g_vrMenuEntry.index !=
+            kRetailSystemMenuOriginalControlCount) {
+        return false;
+    }
+    g_vrNormalControls[g_vrNormalControlCount++] =
+        g_vrMenuEntry.object;
+
+    // Preserve every original item's relative order while moving the new
+    // entry directly behind "Optionen" (original index 2).
+    __try {
+        for (std::uint32_t index = g_vrMenuEntry.index;
+             index > 3; --index) {
+            g_retailListSwapItems(list, index, index - 1);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    g_vrMenuEntry.index = 3;
+
+    g_vrMenuTitle = AddRetailVrMenuControl(
+        L"VR SETTINGS", 0, true);
+    g_vrMenuStereo.enabled = AddRetailVrMenuControl(
+        L"Stereo rendering: ON", kVrMenuToggleStereo);
+    g_vrMenuStereo.disabled = AddRetailVrMenuControl(
+        L"Stereo rendering: OFF", kVrMenuToggleStereo);
+    g_vrMenuTranslation.enabled = AddRetailVrMenuControl(
+        L"HMD translation: ON", kVrMenuToggleTranslation);
+    g_vrMenuTranslation.disabled = AddRetailVrMenuControl(
+        L"HMD translation: OFF", kVrMenuToggleTranslation);
+    g_vrMenuStereoHud.enabled = AddRetailVrMenuControl(
+        L"Stereo HUD: ON", kVrMenuToggleStereoHud);
+    g_vrMenuStereoHud.disabled = AddRetailVrMenuControl(
+        L"Stereo HUD: OFF", kVrMenuToggleStereoHud);
+    g_vrMenuHeadBob.enabled = AddRetailVrMenuControl(
+        L"Head bob: ON", kVrMenuToggleHeadBob);
+    g_vrMenuHeadBob.disabled = AddRetailVrMenuControl(
+        L"Head bob: OFF", kVrMenuToggleHeadBob);
+    g_vrMenuComfort.enabled = AddRetailVrMenuControl(
+        L"Comfort screen: ON", kVrMenuToggleComfort);
+    g_vrMenuComfort.disabled = AddRetailVrMenuControl(
+        L"Comfort screen: OFF", kVrMenuToggleComfort);
+    g_vrMenuAimGuide.enabled = AddRetailVrMenuControl(
+        L"Red aim guide: ON", kVrMenuToggleAimGuide);
+    g_vrMenuAimGuide.disabled = AddRetailVrMenuControl(
+        L"Red aim guide: OFF", kVrMenuToggleAimGuide);
+    g_vrMenuHaptics.enabled = AddRetailVrMenuControl(
+        L"Controller vibration: ON", kVrMenuToggleHaptics);
+    g_vrMenuHaptics.disabled = AddRetailVrMenuControl(
+        L"Controller vibration: OFF", kVrMenuToggleHaptics);
+    g_vrMenuTurnSpeed[0] = AddRetailVrMenuControl(
+        L"Turn speed: SLOW",
+        kVrMenuCycleTurnSpeed);
+    g_vrMenuTurnSpeed[1] = AddRetailVrMenuControl(
+        L"Turn speed: NORMAL",
+        kVrMenuCycleTurnSpeed);
+    g_vrMenuTurnSpeed[2] = AddRetailVrMenuControl(
+        L"Turn speed: FAST",
+        kVrMenuCycleTurnSpeed);
+    g_vrMenuRecenter = AddRetailVrMenuControl(
+        L"Recenter view", kVrMenuRecenter);
+    g_vrMenuDefaults = AddRetailVrMenuControl(
+        L"Reset VR defaults", kVrMenuDefaults);
+    g_vrMenuBack = AddRetailVrMenuControl(
+        L"BACK", kVrMenuBack);
+
+    if (g_vrMenuBack.object == nullptr) {
+        return false;
+    }
+    HideRetailVrSettingsControls();
+    MarkRetailVrMenuForLayout();
+    g_vrMenuControlsBuilt = true;
+    Report(
+        "INFO", "vr_settings_menu_built",
+        "VR SETTINGS was inserted after Options in the "
+        "Retail pause menu.");
+    return true;
+}
+
+bool __fastcall HookRetailMenuInit(
+    void* menu, void* ignoredEdx, void* menuManager) {
+    (void)ignoredEdx;
+    const bool initialized =
+        g_retailMenuInit(menu, menuManager);
+    if (!initialized) {
+        return false;
+    }
+    if (!BuildRetailVrMenuControls(menu)) {
+        Report(
+            "WARN", "vr_settings_menu_build_failed",
+            "The verified Retail menu initialized, but its control "
+            "list rejected the VR settings entries.");
+    }
+    return true;
+}
+
+std::uint32_t __fastcall HookRetailMenuOnCommand(
+    void* menu, void* ignoredEdx, std::uint32_t command,
+    std::uint32_t parameter1, std::uint32_t parameter2) {
+    (void)ignoredEdx;
+    if (menu != g_vrMenuOwner || !g_vrMenuControlsBuilt) {
+        return g_retailMenuOnCommand(
+            menu, command, parameter1, parameter2);
+    }
+
+    VrMenuControl selection;
+    switch (command) {
+    case kVrMenuOpen:
+        EnterRetailVrSettingsPage();
+        return 1;
+    case kVrMenuToggleStereo:
+        SetBooleanOption(
+            g_setStereoEnabled,
+            !QueryBooleanOption(g_isStereoEnabled, true));
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuStereo,
+            QueryBooleanOption(g_isStereoEnabled, true));
+        break;
+    case kVrMenuToggleTranslation:
+        SetBooleanOption(
+            g_setTranslationEnabled,
+            !QueryBooleanOption(g_isTranslationEnabled, false));
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuTranslation,
+            QueryBooleanOption(g_isTranslationEnabled, false));
+        break;
+    case kVrMenuToggleStereoHud:
+        SetBooleanOption(
+            g_setStereoHudEnabled,
+            !QueryBooleanOption(g_isStereoHudEnabled, true));
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuStereoHud,
+            QueryBooleanOption(g_isStereoHudEnabled, true));
+        break;
+    case kVrMenuToggleHeadBob:
+        ApplyHeadBobEnabled(!g_headBobEnabled);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuHeadBob, g_headBobEnabled);
+        break;
+    case kVrMenuToggleComfort:
+        SetBooleanOption(
+            g_setComfortModeEnabled,
+            !QueryBooleanOption(g_isComfortModeEnabled, false));
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuComfort,
+            QueryBooleanOption(g_isComfortModeEnabled, false));
+        break;
+    case kVrMenuToggleAimGuide:
+        g_weaponAimGuideEnabled = !g_weaponAimGuideEnabled;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuAimGuide, g_weaponAimGuideEnabled);
+        break;
+    case kVrMenuToggleHaptics:
+        g_controllerHapticsEnabled =
+            !g_controllerHapticsEnabled;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuHaptics, g_controllerHapticsEnabled);
+        break;
+    case kVrMenuCycleTurnSpeed:
+        g_turnSpeedPreset = (g_turnSpeedPreset + 1) % 3;
+        for (int index = 0; index < 3; ++index) {
+            SetRetailControlVisible(
+                g_vrMenuTurnSpeed[index],
+                index == g_turnSpeedPreset);
+        }
+        selection = g_vrMenuTurnSpeed[g_turnSpeedPreset];
+        break;
+    case kVrMenuRecenter:
+        RequestVrRecenter();
+        selection = g_vrMenuRecenter;
+        break;
+    case kVrMenuDefaults:
+        ApplyVrDefaults();
+        RefreshRetailVrSettingsControls();
+        selection = g_vrMenuDefaults;
+        break;
+    case kVrMenuBack:
+        LeaveRetailVrSettingsPage();
+        return 1;
+    default:
+        return g_retailMenuOnCommand(
+            menu, command, parameter1, parameter2);
+    }
+
+    MarkRetailVrMenuForLayout();
+    SelectRetailVrMenuControl(selection);
+    SaveVrSettings();
+    return 1;
+}
+
+void __fastcall HookRetailMenuOnFocus(
+    void* menu, void* ignoredEdx, bool focus) {
+    (void)ignoredEdx;
+    if (menu == g_vrMenuOwner && g_vrMenuControlsBuilt) {
+        g_vrSettingsPageActive = false;
+        RestoreRetailSystemMenuControls();
+    }
+    g_retailMenuOnFocus(menu, focus);
+}
+
+void RemoveRetailVrMenuHooks() noexcept {
+    const void* targets[] = {
+        g_retailMenuInitTarget,
+        g_retailMenuOnCommandTarget,
+        g_retailMenuOnFocusTarget,
+    };
+    for (const void* target : targets) {
+        if (target != nullptr) {
+            MH_DisableHook(const_cast<void*>(target));
+            MH_RemoveHook(const_cast<void*>(target));
+        }
+    }
+    g_retailMenuInitTarget = nullptr;
+    g_retailMenuOnCommandTarget = nullptr;
+    g_retailMenuOnFocusTarget = nullptr;
+    g_retailMenuInit = nullptr;
+    g_retailMenuOnCommand = nullptr;
+    g_retailMenuOnFocus = nullptr;
+}
+
+bool InstallRetailVrMenuHooks() noexcept {
+    HMODULE retail = GetModuleHandleW(L"GameOrig.dll");
+    if (retail == nullptr) {
+        return false;
+    }
+    auto* const base =
+        reinterpret_cast<unsigned char*>(retail);
+    auto* const init = base + kRetailMenuSystemInitRva;
+    auto* const onCommand =
+        base + kRetailMenuSystemOnCommandRva;
+    auto* const onFocus = base + kRetailMenuSystemOnFocusRva;
+    auto* const getControl =
+        base + kRetailListGetControlRva;
+    auto* const swapItems =
+        base + kRetailListSwapItemsRva;
+    if (!MatchesCode(
+            init, kRetailMenuInitPrefix,
+            sizeof(kRetailMenuInitPrefix)) ||
+        !MatchesCode(
+            onCommand, kRetailMenuOnCommandPrefix,
+            sizeof(kRetailMenuOnCommandPrefix)) ||
+        !MatchesCode(
+            onFocus, kRetailMenuOnFocusPrefix,
+            sizeof(kRetailMenuOnFocusPrefix)) ||
+        !MatchesCode(
+            getControl, kRetailListGetControlPrefix,
+            sizeof(kRetailListGetControlPrefix)) ||
+        !MatchesCode(
+            swapItems, kRetailListSwapItemsPrefix,
+            sizeof(kRetailListSwapItemsPrefix))) {
+        Report(
+            "ERROR", "vr_settings_menu_layout_mismatch",
+            "Retail 1.08 menu signatures did not match; the pause "
+            "menu remains untouched.");
+        return false;
+    }
+
+    g_retailMenuAddControl =
+        reinterpret_cast<RetailMenuAddControlFunction>(
+            base + kRetailBaseMenuAddWideControlThunkRva);
+    g_retailListGetControl =
+        reinterpret_cast<RetailListGetControlFunction>(getControl);
+    g_retailListSwapItems =
+        reinterpret_cast<RetailListSwapItemsFunction>(swapItems);
+    g_retailListSetSelection =
+        reinterpret_cast<RetailListSetSelectionFunction>(
+            base + kRetailListSetSelectionRva);
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        Report(
+            "ERROR", "vr_settings_menu_hook_initialize_failed",
+            MH_StatusToString(initialize));
+        return false;
+    }
+    g_retailMenuInitTarget = init;
+    g_retailMenuOnCommandTarget = onCommand;
+    g_retailMenuOnFocusTarget = onFocus;
+    MH_STATUS status = MH_CreateHook(
+        init, reinterpret_cast<void*>(&HookRetailMenuInit),
+        reinterpret_cast<void**>(&g_retailMenuInit));
+    if (status == MH_OK) {
+        status = MH_CreateHook(
+            onCommand,
+            reinterpret_cast<void*>(&HookRetailMenuOnCommand),
+            reinterpret_cast<void**>(&g_retailMenuOnCommand));
+    }
+    if (status == MH_OK) {
+        status = MH_CreateHook(
+            onFocus,
+            reinterpret_cast<void*>(&HookRetailMenuOnFocus),
+            reinterpret_cast<void**>(&g_retailMenuOnFocus));
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(init);
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(onCommand);
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(onFocus);
+    }
+    if (status != MH_OK) {
+        Report(
+            "ERROR", "vr_settings_menu_hook_install_failed",
+            MH_StatusToString(status));
+        RemoveRetailVrMenuHooks();
+        return false;
+    }
+    Report(
+        "INFO", "vr_settings_menu_hooks_installed",
+        "Verified Retail CMenuSystem Init, OnCommand and OnFocus "
+        "hooks are active.");
+    return true;
+}
+
+void UpdateCrosshairOverride() noexcept {
+    if (g_client == nullptr) {
+        return;
+    }
+
+    bool stereoAimGuideEnabled = false;
+    __try {
+        stereoAimGuideEnabled =
+            g_isStereoEnabled != nullptr && g_isStereoEnabled();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        stereoAimGuideEnabled = false;
+    }
+
+    if (!g_crosshairOriginalKnown) {
+        __try {
+            const HCONSOLEVAR crosshair =
+                g_client->GetConsoleVariable("DisableCrosshair");
+            g_crosshairOriginalValue =
+                crosshair == nullptr
+                    ? 0.0F
+                    : g_client->GetConsoleVariableFloat(crosshair);
+            g_crosshairOriginalKnown = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return;
+        }
+    }
+    if (!g_recoilOriginalKnown) {
+        __try {
+            const HCONSOLEVAR recoil =
+                g_client->GetConsoleVariable("CamRecoilKick");
+            g_recoilOriginalValue =
+                recoil == nullptr
+                    ? -1.0F
+                    : g_client->GetConsoleVariableFloat(recoil);
+            g_recoilOriginalKnown = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return;
+        }
+    }
+
+    __try {
+        if (stereoAimGuideEnabled != g_crosshairOverrideApplied &&
+            g_client->SetConsoleVariableFloat(
+                "DisableCrosshair",
+                stereoAimGuideEnabled
+                    ? 1.0F
+                    : g_crosshairOriginalValue) == LT_OK) {
+            g_crosshairOverrideApplied = stereoAimGuideEnabled;
+        }
+        if (stereoAimGuideEnabled != g_recoilOverrideApplied &&
+            g_client->SetConsoleVariableFloat(
+                "CamRecoilKick",
+                stereoAimGuideEnabled
+                    ? 0.0F
+                    : g_recoilOriginalValue) == LT_OK) {
+            g_recoilOverrideApplied = stereoAimGuideEnabled;
+            Report(
+                "INFO",
+                stereoAimGuideEnabled
+                    ? "vr_camera_recoil_disabled"
+                    : "vr_camera_recoil_restored",
+                stereoAimGuideEnabled
+                    ? "Persistent Retail camera pitch/yaw recoil is "
+                      "disabled while stereo VR is active."
+                    : "Retail camera recoil setting was restored.");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+bool TraceWeaponAim(
+    LTVector& rayStart, LTVector& rayEnd) noexcept {
+    if (g_client == nullptr || !g_weaponAim.valid) {
+        return false;
+    }
+
+    LTVector right;
+    LTVector up;
+    LTVector forward;
+    const LTRigidTransform& rayTransform = g_weaponAim.muzzleValid
+        ? g_weaponAim.muzzleTransform
+        : g_weaponAim.fireTransform;
+    rayTransform.m_rRot.GetVectors(right, up, forward);
+    rayStart = g_weaponAim.muzzleValid
+        ? g_weaponAim.muzzleTransform.m_vPos
+        : g_weaponAim.fireTransform.m_vPos;
+    rayEnd = rayStart + forward * 10000.0F;
+
+    IntersectQuery query;
+    // The small forward offset avoids selecting the local weapon/body when
+    // the controller aim origin happens to be inside its collision volume.
+    query.m_From = rayStart + forward * 8.0F;
+    query.m_To = rayEnd;
+    query.m_Flags = INTERSECT_OBJECTS | IGNORE_NONSOLID;
+    IntersectInfo hit;
+    __try {
+        if (g_client->IntersectSegment(query, &hit)) {
+            rayEnd = hit.m_Point;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+void RenderWeaponAimGuide(HLOCALOBJ camera) noexcept {
+    if (g_client == nullptr || camera == nullptr ||
+        !g_weaponAim.valid || !g_weaponAimGuideEnabled) {
+        return;
+    }
+
+    LTVector rayStart;
+    LTVector rayEnd;
+    if (!TraceWeaponAim(rayStart, rayEnd)) {
+        return;
+    }
+
+    ILTDrawPrim* const drawPrim = g_client->GetDrawPrim();
+    if (drawPrim == nullptr) {
+        return;
+    }
+
+    const HOBJECT oldCamera = drawPrim->GetCamera();
+    const ELTDrawPrimTransformMode oldTransformMode =
+        drawPrim->GetTransformMode();
+    const ELTDrawPrimZMode oldZMode = drawPrim->GetZMode();
+    const ELTDrawPrimRenderMode oldRenderMode =
+        drawPrim->GetRenderMode();
+
+    drawPrim->SetCamera(camera);
+    drawPrim->SetTransformMode(eLTDrawPrimTransformMode_World);
+    drawPrim->SetZMode(eLTDrawPrimZMode_NoWrite);
+    drawPrim->SetRenderMode(
+        eLTDrawPrimRenderMode_Modulate_Additive);
+
+    LT_LINEG laser;
+    laser.verts[0].pos = rayStart;
+    laser.verts[1].pos = rayEnd;
+    laser.verts[0].rgba.Init(255, 8, 8, 235);
+    laser.verts[1].rgba.Init(255, 0, 0, 190);
+    drawPrim->DrawPrim(&laser);
+
+    drawPrim->SetRenderMode(oldRenderMode);
+    drawPrim->SetZMode(oldZMode);
+    drawPrim->SetTransformMode(oldTransformMode);
+    drawPrim->SetCamera(oldCamera);
+
+    if (InterlockedCompareExchange(
+            &g_weaponAimGuideActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "weapon_aim_guide_active",
+            "The red collision ray follows the right OpenXR weapon "
+            "aim pose; the stereo crosshair is disabled.");
+    }
 }
 
 static_assert(sizeof(void*) == 4,
@@ -265,6 +1693,7 @@ bool PrepareTrackedEyePoses(
     if (!IsValidPose(currentCenter)) {
         return false;
     }
+    g_headTracking.currentCenter = currentCenter;
 
     const ULONGLONG now = GetTickCount64();
     const LONG resetGeneration = InterlockedCompareExchange(
@@ -473,6 +1902,11 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         if (eyeResult[eye] == LT_OK) {
             g_stereoStep =
                 eye == FEARVR_EYE_LEFT
+                    ? "render_left_aim_guide"
+                    : "render_right_aim_guide";
+            RenderWeaponAimGuide(camera);
+            g_stereoStep =
+                eye == FEARVR_EYE_LEFT
                     ? "capture_left_eye"
                     : "capture_right_eye";
             g_captureEye(eye);
@@ -610,6 +2044,2059 @@ bool ExchangeVtableSlot(void** slot, void* expected,
     return true;
 }
 
+float ActiveBindingValue(
+    const RetailBinding& binding) noexcept {
+    if (!std::isfinite(binding.commandMin) ||
+        !std::isfinite(binding.commandMax) ||
+        binding.commandMin > binding.commandMax) {
+        return 1.0F;
+    }
+    float value = 1.0F;
+    if (value < binding.commandMin) {
+        value = binding.commandMin;
+    }
+    if (value > binding.commandMax) {
+        value = binding.commandMax;
+    }
+    return value;
+}
+
+// Die Live-Testmatrix aus anweisung.md §14 verlangt, Lean und Slow-Mo
+// getrennt zu protokollieren. Beide bekommen deshalb eigene Ereignisse mit
+// Haltedauer und laufender Zählung, statt nur im gemeinsamen
+// controller_command_injected aufzutauchen.
+struct RegressionCommandLog {
+    std::uint32_t command;
+    const char* engagedEvent;
+    const char* releasedEvent;
+    const char* label;
+    bool reportLeanRoll;
+    ULONGLONG engagedTick;
+    std::uint32_t count;
+};
+
+RegressionCommandLog g_regressionCommands[] = {
+    {FEARVR_CMD_LEAN_LEFT, "vr_lean_left_engaged",
+     "vr_lean_left_released", "Lean left", true, 0, 0},
+    {FEARVR_CMD_LEAN_RIGHT, "vr_lean_right_engaged",
+     "vr_lean_right_released", "Lean right", true, 0, 0},
+    {FEARVR_CMD_SLOWMO, "vr_slowmo_engaged",
+     "vr_slowmo_released", "Slow-mo", false, 0, 0},
+};
+
+void LogRegressionCommandTransition(
+    std::uint32_t command, bool active) noexcept {
+    for (RegressionCommandLog& entry : g_regressionCommands) {
+        if (entry.command != command) {
+            continue;
+        }
+        char message[192]{};
+        if (active) {
+            entry.engagedTick = GetTickCount64();
+            ++entry.count;
+            if (entry.reportLeanRoll) {
+                const double degrees =
+                    static_cast<double>(
+                        LeftHandLeanRollRadians(g_currentInput)) *
+                    (180.0 / 3.14159265358979323846);
+                std::snprintf(
+                    message, sizeof(message),
+                    "%s engaged; occurrence %u, left-hand roll %.1f deg.",
+                    entry.label, entry.count, degrees);
+            } else {
+                std::snprintf(
+                    message, sizeof(message),
+                    "%s engaged; occurrence %u.",
+                    entry.label, entry.count);
+            }
+            Report("INFO", entry.engagedEvent, message);
+        } else {
+            const ULONGLONG heldMs =
+                entry.engagedTick == 0
+                    ? 0
+                    : GetTickCount64() - entry.engagedTick;
+            std::snprintf(
+                message, sizeof(message),
+                "%s released after %llu ms; occurrence %u.",
+                entry.label,
+                static_cast<unsigned long long>(heldMs), entry.count);
+            Report("INFO", entry.releasedEvent, message);
+        }
+        return;
+    }
+}
+
+void InjectSemanticCommandBits(
+    const void* bindManager) noexcept {
+    if (g_semanticBitsInjected || bindManager == nullptr) {
+        return;
+    }
+    g_semanticBitsInjected = true;
+
+    // Retail 1.08's verified VC7.1 vector<bool> layout stores the bit count
+    // at CBindMgr+0x10 and its uint32 word array at CBindMgr+0x18.
+    constexpr std::uint32_t kDigitalCommands[] = {
+        FEARVR_CMD_YAW_POS,
+        FEARVR_CMD_YAW_NEG,
+        FEARVR_CMD_DUCK,
+        FEARVR_CMD_JUMP,
+        FEARVR_CMD_RUN,
+        FEARVR_CMD_FIRING,
+        FEARVR_CMD_FOCUS,
+        FEARVR_CMD_PREV_WEAPON,
+        FEARVR_CMD_NEXT_WEAPON,
+        FEARVR_CMD_ACTIVATE,
+        FEARVR_CMD_RELOAD,
+        FEARVR_CMD_SLOWMO,
+        FEARVR_CMD_LEAN_LEFT,
+        FEARVR_CMD_LEAN_RIGHT
+    };
+    __try {
+        const auto* const bytes =
+            static_cast<const unsigned char*>(bindManager);
+        const std::uint32_t bitCount =
+            *reinterpret_cast<const std::uint32_t*>(
+                bytes + 0x10);
+        auto* const words =
+            *reinterpret_cast<std::uint32_t* const*>(
+                bytes + 0x18);
+        if (words == nullptr) {
+            return;
+        }
+
+        for (const std::uint32_t command : kDigitalCommands) {
+            const FearVrCommandValue controller =
+                MapControllerCommand(g_currentInput, command);
+            if (command < sizeof(g_injectedCommandActive) /
+                              sizeof(g_injectedCommandActive[0])) {
+                bool& wasActive =
+                    g_injectedCommandActive[command];
+                if (controller.active && !wasActive) {
+                    char message[80]{};
+                    std::snprintf(
+                        message, sizeof(message),
+                        "command=%u bit_count=%u",
+                        command, bitCount);
+                    Report(
+                        "INFO", "controller_command_injected",
+                        message);
+                }
+                if (controller.active != wasActive) {
+                    LogRegressionCommandTransition(
+                        command, controller.active);
+                }
+                wasActive = controller.active;
+            }
+            if (controller.active && command < bitCount) {
+                words[command >> 5] |=
+                    1U << (command & 31U);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Report(
+            "ERROR", "controller_command_injection_failed",
+            "Retail CBindMgr command-state storage was not readable.");
+    }
+}
+
+float __fastcall HookRetailGetBindingValue(
+    const void* bindManager, void* ignoredEdx,
+    const RetailBinding* binding,
+    bool returnDefaultOnDisabled) {
+    (void)ignoredEdx;
+    const float original = g_retailGetBindingValue(
+        bindManager, binding, returnDefaultOnDisabled);
+    InjectSemanticCommandBits(bindManager);
+    if (binding == nullptr) {
+        return original;
+    }
+    // Menu is handled once on the left menu-button edge through
+    // IClientShell::OnKeyDown(VK_ESCAPE). Injecting COMMAND_ID_MENU too
+    // would open and close the pause menu within the same update.
+    if (binding->command == FEARVR_CMD_MENU) {
+        return original;
+    }
+
+    if (binding->command == FEARVR_CMD_FORWARD_AXIS) {
+        g_seenForwardAxisBinding = true;
+    } else if (binding->command == FEARVR_CMD_STRAFE_AXIS) {
+        g_seenStrafeAxisBinding = true;
+    }
+
+    const FearVrCommandValue controller =
+        MapControllerCommand(g_currentInput, binding->command);
+    if (binding->command <
+        sizeof(g_controllerCommandActive) /
+            sizeof(g_controllerCommandActive[0])) {
+        bool& wasActive =
+            g_controllerCommandActive[binding->command];
+        if (controller.active && !wasActive) {
+            char message[160]{};
+            std::snprintf(
+                message, sizeof(message),
+                "command=%u value=%.3f range=[%.3f,%.3f]",
+                binding->command, controller.value,
+                binding->commandMin, binding->commandMax);
+            Report(
+                "INFO", "controller_command_activated", message);
+        }
+        wasActive = controller.active;
+    }
+    if (!controller.active) {
+        return original;
+    }
+
+    // Prefer analog motion when that command exists. Digital movement
+    // remains a fallback for profiles without Pad0 axis bindings.
+    if ((binding->command == FEARVR_CMD_FORWARD ||
+         binding->command == FEARVR_CMD_REVERSE) &&
+        g_seenForwardAxisBinding) {
+        return original;
+    }
+    if ((binding->command == FEARVR_CMD_STRAFE_LEFT ||
+         binding->command == FEARVR_CMD_STRAFE_RIGHT) &&
+        g_seenStrafeAxisBinding) {
+        return original;
+    }
+    if (binding->command == FEARVR_CMD_FORWARD_AXIS ||
+        binding->command == FEARVR_CMD_STRAFE_AXIS ||
+        binding->command == FEARVR_CMD_YAW_ACCEL) {
+        return std::fabs(controller.value) > std::fabs(original)
+            ? controller.value
+            : original;
+    }
+    return ActiveBindingValue(*binding);
+}
+
+bool ResolveRetailWeaponTargets(
+    void*& weaponManagerUpdate, void*& setWeaponTransform,
+    void*& setWeaponVisible, void*& getFireVectors,
+    void*& setTrackedTarget) noexcept {
+    weaponManagerUpdate = nullptr;
+    setWeaponTransform = nullptr;
+    setWeaponVisible = nullptr;
+    getFireVectors = nullptr;
+    setTrackedTarget = nullptr;
+
+    HMODULE module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(module);
+    __try {
+        const auto* const dos =
+            reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew <= 0) {
+            return false;
+        }
+        const auto* const nt =
+            reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->FileHeader.TimeDateStamp !=
+                kRetailGameClientTimeDateStamp ||
+            nt->OptionalHeader.SizeOfImage !=
+                kRetailGameClientSizeOfImage) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    auto* const update = base + kRetailWeaponManagerUpdateRva;
+    auto* const setTransform = base + kRetailSetWeaponTransformRva;
+    auto* const setVisible = base + kRetailSetWeaponVisibleRva;
+    auto* const fireVectors = base + kRetailGetFireVectorsRva;
+    auto* const trackedTarget = base + kRetailSetTrackedTargetRva;
+    constexpr unsigned char kUpdatePrefix[] = {
+        0x56, 0x8B, 0xF1, 0x83, 0x7E, 0x08, 0xFF, 0x75,
+        0x50, 0x8B, 0x46, 0x0C, 0x85, 0xC0, 0x74, 0x49};
+    constexpr unsigned char kSetTransformPrefix[] = {
+        0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x1C, 0x85, 0xC0,
+        0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x74, 0x0D};
+    constexpr unsigned char kSetVisiblePrefix[] = {
+        0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x1C, 0x85, 0xC0,
+        0x75, 0x0E, 0x8B, 0x86, 0xD4, 0x00, 0x00, 0x00};
+    constexpr unsigned char kFireVectorsPrefix[] = {
+        0x83, 0xEC, 0x58, 0xA1};
+    constexpr unsigned char kFireVectorsBody[] = {
+        0x57, 0xC7, 0x44, 0x24, 0x2C, 0x00, 0x00, 0x00, 0x00};
+    constexpr unsigned char kTrackedTargetPrefix[] = {
+        0x8B, 0x44, 0x24, 0x04, 0x83, 0xF8, 0xFF, 0x74,
+        0x71, 0x8B, 0x54, 0x24, 0x08, 0x3B, 0x51, 0x10};
+    if (!MatchesCode(
+            update, kUpdatePrefix, sizeof(kUpdatePrefix)) ||
+        !MatchesCode(
+            setTransform, kSetTransformPrefix,
+            sizeof(kSetTransformPrefix)) ||
+        !MatchesCode(
+            setVisible, kSetVisiblePrefix,
+            sizeof(kSetVisiblePrefix)) ||
+        !MatchesCode(
+            fireVectors, kFireVectorsPrefix,
+            sizeof(kFireVectorsPrefix)) ||
+        !MatchesCode(
+            fireVectors + 8, kFireVectorsBody,
+            sizeof(kFireVectorsBody)) ||
+        !MatchesCode(
+            trackedTarget, kTrackedTargetPrefix,
+            sizeof(kTrackedTargetPrefix))) {
+        return false;
+    }
+
+    weaponManagerUpdate = update;
+    setWeaponTransform = setTransform;
+    setWeaponVisible = setVisible;
+    getFireVectors = fireVectors;
+    setTrackedTarget = trackedTarget;
+    return true;
+}
+
+bool BuildTrackedHandTransform(
+    const LTRotation& baseRotation, const LTVector& basePosition,
+    std::uint32_t validHands, std::uint32_t requiredHand,
+    const FearVrPose& pose,
+    LTRigidTransform& transform) noexcept {
+    if (!g_headTracking.centered || g_headTracking.trackingLost ||
+         (g_currentInput.flags & FEARVR_IF_FOCUSED) == 0 ||
+        (validHands & requiredHand) == 0) {
+        return false;
+    }
+    // Positions must remain relative to the current HMD, since the Retail
+    // camera/body does not follow physical head translation. Keep the
+    // recenter orientation as the stable room-to-game basis.
+    FearVrPose positionReference = g_headTracking.recenter;
+    positionReference.px = g_headTracking.currentCenter.px;
+    positionReference.py = g_headTracking.currentCenter.py;
+    positionReference.pz = g_headTracking.currentCenter.pz;
+    const RelativeEyePose relative =
+        TrackedPoseRelativeToRecenter(positionReference, pose);
+    if (!relative.valid) {
+        return false;
+    }
+
+    const LTVector localPosition(
+        relative.positionMeters.x * kGameUnitsPerMeter,
+        relative.positionMeters.y * kGameUnitsPerMeter,
+        relative.positionMeters.z * kGameUnitsPerMeter);
+    const LTRotation localRotation(
+        relative.rotation.x, relative.rotation.y,
+        relative.rotation.z, relative.rotation.w);
+    transform.m_vPos =
+        basePosition + baseRotation.RotateVector(localPosition);
+    transform.m_rRot = baseRotation * localRotation;
+    return true;
+}
+
+bool BuildStableTrackedHandTransform(
+    const LTRotation& baseRotation, const LTVector& basePosition,
+    std::uint32_t validHands, std::uint32_t requiredHand,
+    const FearVrPose& pose, TrackedPoseCache& cache,
+    LTRigidTransform& transform) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    const LONG resetGeneration = InterlockedCompareExchange(
+        &g_trackingResetGeneration, 0, 0);
+    if ((validHands & requiredHand) != 0 &&
+        BuildTrackedHandTransform(
+            baseRotation, basePosition, validHands, requiredHand,
+            pose, transform)) {
+        cache.pose = pose;
+        cache.lastValidTick = now;
+        cache.resetGeneration = resetGeneration;
+        cache.valid = true;
+        return true;
+    }
+
+    if (!cache.valid ||
+        cache.resetGeneration != resetGeneration ||
+        now - cache.lastValidTick >
+            kTrackedPoseGapGraceMilliseconds) {
+        cache.valid = false;
+        return false;
+    }
+    if (!BuildTrackedHandTransform(
+            baseRotation, basePosition, requiredHand, requiredHand,
+            cache.pose, transform)) {
+        return false;
+    }
+    if (InterlockedCompareExchange(
+            &g_handPoseGapBridgedLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "hand_pose_gap_bridged",
+            "A transient OpenXR hand-pose gap used the last valid pose; "
+            "the Retail weapon socket remained controller-driven.");
+    }
+    return true;
+}
+
+void* CurrentRetailWeapon(void* weaponManager) noexcept {
+    void* weapon = nullptr;
+    __try {
+        weapon = *reinterpret_cast<void**>(
+            static_cast<unsigned char*>(weaponManager) +
+            kRetailCurrentWeaponOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        weapon = nullptr;
+    }
+    return weapon;
+}
+
+bool UpdateRetailMuzzlePosition(const void* weapon) noexcept {
+    if (weapon != g_weaponAim.muzzleWeapon) {
+        g_weaponAim.muzzleWeapon = weapon;
+        g_weaponAim.muzzleValid = false;
+        g_weaponAim.muzzleDirectionValid = false;
+        g_weaponAim.muzzleDiagnosticLogged = false;
+    }
+    if (weapon == nullptr) {
+        return false;
+    }
+
+    HOBJECT weaponModel = nullptr;
+    HMODELSOCKET muzzleSocket = INVALID_MODEL_SOCKET;
+    __try {
+        weaponModel = *reinterpret_cast<HOBJECT const*>(
+            static_cast<const unsigned char*>(weapon) +
+            kRetailRightWeaponModelObjectOffset);
+        muzzleSocket = *reinterpret_cast<HMODELSOCKET const*>(
+            static_cast<const unsigned char*>(weapon) +
+            kRetailRightWeaponMuzzleSocketOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (g_client == nullptr || weaponModel == nullptr ||
+        muzzleSocket == INVALID_MODEL_SOCKET) {
+        return false;
+    }
+
+    LTTransform muzzleTransform;
+    LTRigidTransform weaponTransform;
+    __try {
+        ILTModel* const model = g_client->GetModelLT();
+        if (model == nullptr ||
+            model->GetSocketTransform(
+                weaponModel, muzzleSocket, muzzleTransform, true) != LT_OK) {
+            return false;
+        }
+        if (g_client->GetObjectTransform(
+                weaponModel, &weaponTransform) != LT_OK) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!std::isfinite(muzzleTransform.m_vPos.x) ||
+        !std::isfinite(muzzleTransform.m_vPos.y) ||
+        !std::isfinite(muzzleTransform.m_vPos.z)) {
+        return false;
+    }
+
+    // Reject unrelated/corrupt data. A first-person muzzle remains close to
+    // its tracked controller.
+    const LTVector referencePosition = g_weaponAim.gripValid
+        ? g_weaponAim.gripTransform.m_vPos
+        : g_weaponAim.fireTransform.m_vPos;
+    const LTVector separation =
+        muzzleTransform.m_vPos - referencePosition;
+    if (muzzleTransform.m_vPos.MagSqr() < 0.0001F ||
+        separation.MagSqr() > 40000.0F) {
+        return false;
+    }
+
+    g_weaponAim.muzzleTransform.m_vPos = muzzleTransform.m_vPos;
+    g_weaponAim.muzzleTransform.m_rRot = muzzleTransform.m_rRot;
+    g_weaponAim.muzzleForwardInWeapon =
+        weaponTransform.m_rRot.Conjugate().RotateVector(
+            muzzleTransform.m_rRot.Forward());
+    if (g_weaponAim.muzzleForwardInWeapon.MagSqr() > 0.0001F) {
+        g_weaponAim.muzzleForwardInWeapon.Normalize();
+        g_weaponAim.muzzleDirectionValid = true;
+    }
+    g_weaponAim.muzzleValid = true;
+    if (!g_weaponAim.muzzleDiagnosticLogged) {
+        LTVector aimForward =
+            g_weaponAim.fireTransform.m_rRot.Forward();
+        LTVector muzzleForward =
+            muzzleTransform.m_rRot.Forward();
+        aimForward.y = 0.0F;
+        muzzleForward.y = 0.0F;
+        if (aimForward.MagSqr() > 0.0001F &&
+            muzzleForward.MagSqr() > 0.0001F) {
+            aimForward.Normalize();
+            muzzleForward.Normalize();
+            const float dot = (std::max)(
+                -1.0F, (std::min)(
+                    1.0F, aimForward.Dot(muzzleForward)));
+            const float crossY =
+                aimForward.z * muzzleForward.x -
+                aimForward.x * muzzleForward.z;
+            const float yawDegrees =
+                std::atan2(crossY, dot) * 57.29577951308232F;
+            const LTVector muzzleOffset =
+                muzzleTransform.m_vPos -
+                g_weaponAim.gripTransform.m_vPos;
+            char message[192]{};
+            std::snprintf(
+                message, sizeof(message),
+                "Measured muzzle yaw from controller: %.2f deg; "
+                "grip-to-muzzle offset: (%.2f, %.2f, %.2f).",
+                yawDegrees, muzzleOffset.x, muzzleOffset.y,
+                muzzleOffset.z);
+            Report(
+                "INFO", "weapon_pose_diagnostic", message);
+            g_weaponAim.muzzleDiagnosticLogged = true;
+        }
+    }
+    return true;
+}
+
+HOBJECT CurrentRetailPlayerBody() noexcept {
+    const HMODULE module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr) {
+        return nullptr;
+    }
+    HOBJECT playerBody = nullptr;
+    __try {
+        playerBody = *reinterpret_cast<HOBJECT*>(
+            reinterpret_cast<unsigned char*>(module) +
+            kRetailPlayerBodyManagerRva +
+            kRetailPlayerBodyObjectOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        playerBody = nullptr;
+    }
+    return playerBody;
+}
+
+void EnsureHandNodeControls(HOBJECT playerBody) noexcept;
+
+void ApplyHandOrientationCalibration(
+    const LTRotation& viewRotation,
+    LTRigidTransform& handTransform,
+    bool poseValid,
+    HandOrientationCalibration& calibration,
+    const char* handName) noexcept {
+    if (!poseValid) {
+        return;
+    }
+    const LONG resetGeneration = InterlockedCompareExchange(
+        &g_trackingResetGeneration, 0, 0);
+    if (!calibration.valid ||
+        calibration.resetGeneration != resetGeneration) {
+        // At each recenter, the current controller orientation becomes the
+        // hand's forward-looking neutral orientation. Subsequent controller
+        // rotations remain fully relative and independent for both hands.
+        calibration.offset =
+            handTransform.m_rRot.Conjugate() * viewRotation;
+        calibration.resetGeneration = resetGeneration;
+        calibration.valid = true;
+        char message[144]{};
+        std::snprintf(
+            message, sizeof(message),
+            "%s hand orientation calibrated to view forward at "
+            "recenter generation %ld.",
+            handName, static_cast<long>(resetGeneration));
+        Report(
+            "INFO", "hand_orientation_recentered", message);
+    }
+    handTransform.m_rRot =
+        handTransform.m_rRot * calibration.offset;
+}
+
+bool RotationBetweenDirections(
+    LTVector from, LTVector to, LTRotation& rotation) noexcept {
+    if (from.MagSqr() < 0.0001F || to.MagSqr() < 0.0001F) {
+        return false;
+    }
+    from.Normalize();
+    to.Normalize();
+    float dot = from.Dot(to);
+    dot = (std::max)(-1.0F, (std::min)(1.0F, dot));
+    rotation = LTRotation::GetIdentity();
+    if (dot > 0.9999F) {
+        return true;
+    }
+
+    LTVector axis(
+        from.y * to.z - from.z * to.y,
+        from.z * to.x - from.x * to.z,
+        from.x * to.y - from.y * to.x);
+    if (axis.MagSqr() < 0.0001F) {
+        const LTVector reference =
+            std::fabs(from.y) < 0.9F
+                ? LTVector(0.0F, 1.0F, 0.0F)
+                : LTVector(1.0F, 0.0F, 0.0F);
+        axis.Init(
+            from.y * reference.z - from.z * reference.y,
+            from.z * reference.x - from.x * reference.z,
+            from.x * reference.y - from.y * reference.x);
+    }
+    axis.Normalize();
+    rotation.Init(axis, std::acos(dot));
+    return true;
+}
+
+int __fastcall HookRetailWeaponManagerUpdate(
+    void* weaponManager, void* ignoredEdx,
+    const LTRotation& baseRotation,
+    const LTVector& basePosition) {
+    (void)ignoredEdx;
+    g_lastWeaponManagerUpdateTick = GetTickCount64();
+    if (!g_autoStereoActivationAttempted &&
+        g_isStereoAvailable != nullptr &&
+        g_isStereoEnabled != nullptr &&
+        g_setStereoEnabled != nullptr) {
+        g_autoStereoActivationAttempted = true;
+        __try {
+            if (g_isStereoAvailable() && !g_isStereoEnabled()) {
+                g_setStereoEnabled(TRUE);
+                InterlockedIncrement(&g_trackingResetGeneration);
+                Report(
+                    "INFO", "stereo_auto_enabled_after_load",
+                    "The first verified playing-frame weapon update "
+                    "automatically enabled native stereo.");
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Report(
+                "WARN", "stereo_auto_enable_failed",
+                "Automatic stereo activation after loading failed; "
+                "F8 remains available.");
+        }
+    }
+    g_weaponAim.valid = BuildStableTrackedHandTransform(
+        baseRotation, basePosition, g_currentInput.aimPoseValidHands,
+        FEARVR_HAND_MASK_RIGHT,
+        g_currentInput.handAimPose[FEARVR_HAND_RIGHT],
+        g_aimPoseCache[FEARVR_HAND_RIGHT],
+        g_weaponAim.fireTransform);
+    g_weaponAim.gripValid = BuildStableTrackedHandTransform(
+        baseRotation, basePosition, g_currentInput.gripPoseValidHands,
+        FEARVR_HAND_MASK_RIGHT,
+        g_currentInput.handGripPose[FEARVR_HAND_RIGHT],
+        g_gripPoseCache[FEARVR_HAND_RIGHT],
+        g_weaponAim.gripTransform);
+    g_weaponAim.leftAimValid = BuildStableTrackedHandTransform(
+        baseRotation, basePosition, g_currentInput.aimPoseValidHands,
+        FEARVR_HAND_MASK_LEFT,
+        g_currentInput.handAimPose[FEARVR_HAND_LEFT],
+        g_aimPoseCache[FEARVR_HAND_LEFT],
+        g_weaponAim.leftAimTransform);
+    g_weaponAim.leftGripValid = BuildStableTrackedHandTransform(
+        baseRotation, basePosition, g_currentInput.gripPoseValidHands,
+        FEARVR_HAND_MASK_LEFT,
+        g_currentInput.handGripPose[FEARVR_HAND_LEFT],
+        g_gripPoseCache[FEARVR_HAND_LEFT],
+        g_weaponAim.leftGripTransform);
+    // OpenXR's right-hand aim pose already defines the canonical firing
+    // axis. Do not turn the controller's arbitrary pose at recenter/load
+    // into a permanent pitch/roll offset; the HMD recenter basis was
+    // already applied in BuildTrackedHandTransform.
+    ApplyHandOrientationCalibration(
+        baseRotation, g_weaponAim.leftAimTransform,
+        g_weaponAim.leftAimValid, g_leftHandOrientation, "Left");
+
+    if (g_weaponAim.valid && g_weaponAim.muzzleDirectionValid) {
+        const LTVector predictedMuzzleForward =
+            g_weaponAim.fireTransform.m_rRot.RotateVector(
+                g_weaponAim.muzzleForwardInWeapon);
+        const LTVector controllerForward =
+            g_weaponAim.fireTransform.m_rRot.Forward();
+        LTRotation directionCorrection;
+        if (RotationBetweenDirections(
+                predictedMuzzleForward, controllerForward,
+                directionCorrection)) {
+            g_weaponAim.fireTransform.m_rRot =
+                directionCorrection *
+                g_weaponAim.fireTransform.m_rRot;
+        }
+    }
+
+    // Install before Retail updates the weapon from the RightHand socket.
+    // This path is verified to run every playing frame, unlike the optional
+    // SetTrackedTarget call site which is dormant in the shipped game path.
+    EnsureHandNodeControls(CurrentRetailPlayerBody());
+
+    // F.E.A.R. applies CAccuracyMgr perturbation after GetFireVectors.
+    // Suppress it only during the actual weapon update while VR aiming is
+    // active, then restore the game's state immediately. This keeps the
+    // client vector and server fire message on the visible guide ray.
+    float* currentPerturb = nullptr;
+    float savedPerturb = 0.0F;
+    if (g_weaponAim.valid &&
+        g_retailAccuracyManager != nullptr) {
+        __try {
+            currentPerturb = static_cast<float*>(
+                g_retailAccuracyManager());
+            if (currentPerturb != nullptr) {
+                savedPerturb = *currentPerturb;
+                *currentPerturb = 0.0F;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            currentPerturb = nullptr;
+        }
+    }
+    const int state = g_retailWeaponManagerUpdate(
+        weaponManager, baseRotation, basePosition);
+    if (currentPerturb != nullptr) {
+        __try {
+            *currentPerturb = savedPerturb;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        if (InterlockedCompareExchange(
+                &g_bulletGuideAlignmentActiveLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "bullet_guide_alignment_active",
+                "Retail bullet perturbation is zero only during VR fire; "
+                "bullets and server messages follow the visible guide ray.");
+        }
+    }
+
+    // Retail samples the animated RightHand socket during its update, before
+    // the final node-control result is rendered. On stair-step animation that
+    // sampled socket can be one frame old. The hand node is already solved to
+    // this exact grip/aim transform, so apply the same transform to the weapon
+    // after Retail updates it and keep both visually locked together.
+    void* const weapon = CurrentRetailWeapon(weaponManager);
+    if (weapon != nullptr && g_weaponAim.valid &&
+        g_weaponAim.gripValid &&
+        g_retailSetWeaponTransform != nullptr) {
+        const LTTransform synchronizedTransform(
+            g_weaponAim.gripTransform.m_vPos,
+            g_weaponAim.fireTransform.m_rRot, 1.0F);
+        __try {
+            g_retailSetWeaponTransform(
+                weapon, synchronizedTransform);
+            if (InterlockedCompareExchange(
+                    &g_weaponSocketSyncActiveLogged, 1, 0) == 0) {
+                Report(
+                    "INFO", "weapon_socket_sync_active",
+                    "The visible weapon and corrected RightHand socket use "
+                    "the same post-update OpenXR transform.");
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (g_weaponAim.valid) {
+        UpdateRetailMuzzlePosition(weapon);
+    }
+    if (weapon != nullptr && g_retailSetWeaponVisible != nullptr) {
+        g_retailSetWeaponVisible(weapon, true, true);
+    }
+    if (weapon != nullptr && g_weaponAim.valid) {
+        if (InterlockedCompareExchange(
+                &g_weaponAimActiveLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "weapon_aim_active",
+                "The Retail AimAt tracker keeps hands and visible weapon "
+                "together while OpenXR aim drives the fire vector.");
+        }
+    }
+    return state;
+}
+
+bool IsStaticPlayerBodyTrackerContext(const void* context) noexcept {
+    const HMODULE module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr || context == nullptr) {
+        return false;
+    }
+    const std::uintptr_t offset =
+        reinterpret_cast<std::uintptr_t>(context) -
+        reinterpret_cast<std::uintptr_t>(module);
+    // The PlayerBody singleton, including its embedded client node tracker,
+    // has static storage in the verified Retail .data section. Character
+    // trackers are heap objects and must retain their original targets.
+    return offset >= 0x002D0000U && offset < 0x002E9900U;
+}
+
+bool ApplyHandSocketPose(
+    const NodeControlData& data,
+    const HandNodeControlState& control,
+    const LTRigidTransform& desiredSocketPose) noexcept {
+    if (!control.installed || !control.socketFromNodeValid ||
+        data.m_hModel != g_playerBodyObject ||
+        data.m_hNode != control.node ||
+        data.m_pModelTransform == nullptr ||
+        data.m_pNodeTransform == nullptr) {
+        return false;
+    }
+
+    // The socket offset contains the Retail model's hand-axis correction.
+    // Solve the node transform from the desired socket transform so the
+    // weapon socket itself, rather than merely the hand bone, matches OpenXR.
+    const LTTransform desiredSocketWorld(desiredSocketPose);
+    const LTTransform desiredNodeWorld =
+        desiredSocketWorld * control.socketFromNode.GetInverse();
+    const LTTransform desiredObject =
+        data.m_pModelTransform->GetInverse() * desiredNodeWorld;
+    data.m_pNodeTransform->m_vPos = desiredObject.m_vPos;
+    data.m_pNodeTransform->m_rRot = desiredObject.m_rRot;
+    return true;
+}
+
+bool ApplyUpperArmTarget(
+    const NodeControlData& data,
+    HandNodeControlState& control,
+    const LTVector& targetPosition) noexcept {
+    control.desiredElbowValid = false;
+    if (!control.upperArmInstalled ||
+        !control.forearmOffsetFromUpperArmValid ||
+        !control.socketOffsetFromForearmValid ||
+        data.m_hModel != g_playerBodyObject ||
+        data.m_hNode != control.upperArmNode ||
+        data.m_pModelTransform == nullptr ||
+        data.m_pNodeTransform == nullptr) {
+        return false;
+    }
+
+    const LTTransform currentWorld =
+        *data.m_pModelTransform *
+        LTTransform(*data.m_pNodeTransform);
+    const float upperLength =
+        control.forearmOffsetFromUpperArm.Mag();
+    const float lowerLength =
+        control.socketOffsetFromForearm.Mag();
+    LTVector targetDirection =
+        targetPosition - currentWorld.m_vPos;
+    const float targetDistance = targetDirection.Mag();
+    if (upperLength < 0.01F || lowerLength < 0.01F ||
+        targetDistance < 0.01F) {
+        return false;
+    }
+    targetDirection /= targetDistance;
+
+    const float minimumReach =
+        std::fabs(upperLength - lowerLength) + 0.01F;
+    const float maximumReach =
+        upperLength + lowerLength - 0.01F;
+    const float solvedDistance = (std::max)(
+        minimumReach, (std::min)(maximumReach, targetDistance));
+    const float along =
+        (upperLength * upperLength -
+         lowerLength * lowerLength +
+         solvedDistance * solvedDistance) /
+        (2.0F * solvedDistance);
+    const float bendHeight = std::sqrt((std::max)(
+        0.0F, upperLength * upperLength - along * along));
+
+    LTVector currentUpperDirection =
+        currentWorld.m_rRot.RotateVector(
+            control.forearmOffsetFromUpperArm);
+    LTVector bendDirection =
+        currentUpperDirection -
+        targetDirection *
+            currentUpperDirection.Dot(targetDirection);
+    if (bendDirection.MagSqr() < 0.0001F) {
+        bendDirection = LTVector(0.0F, -1.0F, 0.0F) -
+            targetDirection * -targetDirection.y;
+    }
+    if (bendDirection.MagSqr() < 0.0001F) {
+        bendDirection = LTVector(1.0F, 0.0F, 0.0F);
+    }
+    bendDirection.Normalize();
+
+    const LTVector desiredElbow =
+        currentWorld.m_vPos +
+        targetDirection * along +
+        bendDirection * bendHeight;
+    LTRotation upperCorrection;
+    if (!RotationBetweenDirections(
+            currentUpperDirection,
+            desiredElbow - currentWorld.m_vPos,
+            upperCorrection)) {
+        return false;
+    }
+
+    const LTTransform desiredWorld(
+        currentWorld.m_vPos,
+        upperCorrection * currentWorld.m_rRot,
+        1.0F);
+    const LTTransform desiredObject =
+        data.m_pModelTransform->GetInverse() * desiredWorld;
+    data.m_pNodeTransform->m_rRot = desiredObject.m_rRot;
+    control.desiredElbowWorld = desiredElbow;
+    control.desiredElbowValid = true;
+    return true;
+}
+
+bool ApplyForearmTarget(
+    const NodeControlData& data,
+    const HandNodeControlState& control,
+    const LTVector& targetPosition) noexcept {
+    if (!control.forearmInstalled ||
+        !control.socketOffsetFromForearmValid ||
+        data.m_hModel != g_playerBodyObject ||
+        data.m_hNode != control.forearmNode ||
+        data.m_pModelTransform == nullptr ||
+        data.m_pNodeTransform == nullptr) {
+        return false;
+    }
+
+    const LTTransform currentWorld =
+        *data.m_pModelTransform *
+        LTTransform(*data.m_pNodeTransform);
+    LTVector currentDirection =
+        currentWorld.m_rRot.RotateVector(
+            control.socketOffsetFromForearm);
+    LTVector targetDirection =
+        targetPosition - currentWorld.m_vPos;
+    if (currentDirection.MagSqr() < 0.0001F ||
+        targetDirection.MagSqr() < 0.0001F) {
+        return false;
+    }
+    currentDirection.Normalize();
+    targetDirection.Normalize();
+
+    float dot = currentDirection.Dot(targetDirection);
+    dot = (std::max)(-1.0F, (std::min)(1.0F, dot));
+    LTRotation delta = LTRotation::GetIdentity();
+    if (dot < 0.9999F) {
+        LTVector axis(
+            currentDirection.y * targetDirection.z -
+                currentDirection.z * targetDirection.y,
+            currentDirection.z * targetDirection.x -
+                currentDirection.x * targetDirection.z,
+            currentDirection.x * targetDirection.y -
+                currentDirection.y * targetDirection.x);
+        if (axis.MagSqr() < 0.0001F) {
+            const LTVector reference =
+                std::fabs(currentDirection.y) < 0.9F
+                    ? LTVector(0.0F, 1.0F, 0.0F)
+                    : LTVector(1.0F, 0.0F, 0.0F);
+            axis.Init(
+                currentDirection.y * reference.z -
+                    currentDirection.z * reference.y,
+                currentDirection.z * reference.x -
+                    currentDirection.x * reference.z,
+                currentDirection.x * reference.y -
+                    currentDirection.y * reference.x);
+        }
+        axis.Normalize();
+        delta.Init(axis, std::acos(dot));
+    }
+
+    const LTRotation desiredRotation =
+        delta * currentWorld.m_rRot;
+    // The upper-arm controller has already moved this node's origin to the
+    // solved elbow. Preserve that joint and rotate only the lower arm.
+    const LTTransform desiredWorld(
+        currentWorld.m_vPos,
+        desiredRotation,
+        1.0F);
+    const LTTransform desiredObject =
+        data.m_pModelTransform->GetInverse() * desiredWorld;
+    data.m_pNodeTransform->m_rRot = desiredObject.m_rRot;
+    return true;
+}
+
+void RightUpperArmNodeControl(
+    const NodeControlData& data, void* userData) {
+    (void)userData;
+    if (g_weaponAim.gripValid) {
+        ApplyUpperArmTarget(
+            data, g_rightHandControl,
+            g_weaponAim.gripTransform.m_vPos);
+    }
+}
+
+void LeftUpperArmNodeControl(
+    const NodeControlData& data, void* userData) {
+    (void)userData;
+    if (g_weaponAim.leftGripValid) {
+        ApplyUpperArmTarget(
+            data, g_leftHandControl,
+            g_weaponAim.leftGripTransform.m_vPos);
+    }
+}
+
+void RightForearmNodeControl(
+    const NodeControlData& data, void* userData) {
+    (void)userData;
+    if (!g_weaponAim.gripValid) {
+        return;
+    }
+    if (ApplyForearmTarget(
+            data, g_rightHandControl,
+            g_weaponAim.gripTransform.m_vPos)) {
+        if (InterlockedCompareExchange(
+                &g_rightForearmTrackingActiveLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "right_forearm_tracking_active",
+                "Right_arml rotates from its animated elbow toward "
+                "the right OpenXR grip.");
+        }
+    }
+}
+
+void LeftForearmNodeControl(
+    const NodeControlData& data, void* userData) {
+    (void)userData;
+    if (!g_weaponAim.leftGripValid) {
+        return;
+    }
+    if (ApplyForearmTarget(
+            data, g_leftHandControl,
+            g_weaponAim.leftGripTransform.m_vPos)) {
+        if (InterlockedCompareExchange(
+                &g_leftForearmTrackingActiveLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "left_forearm_tracking_active",
+                "Left_arml rotates from its animated elbow toward "
+                "the left OpenXR grip.");
+        }
+    }
+}
+
+void RightHandNodeControl(
+    const NodeControlData& data, void* userData) {
+    (void)userData;
+    if (!g_weaponAim.valid || !g_weaponAim.gripValid) {
+        return;
+    }
+    const LTRigidTransform desiredSocket(
+        g_weaponAim.gripTransform.m_vPos,
+        g_weaponAim.fireTransform.m_rRot);
+    if (ApplyHandSocketPose(
+            data, g_rightHandControl, desiredSocket) &&
+        InterlockedCompareExchange(
+            &g_weaponHandTrackingActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "weapon_hand_tracking_active",
+            "The Retail RightHand socket exactly follows OpenXR grip "
+            "position and the same aim rotation as bullets.");
+    }
+}
+
+void LeftHandNodeControl(
+    const NodeControlData& data, void* userData) {
+    (void)userData;
+    if (!g_weaponAim.leftGripValid || !g_weaponAim.leftAimValid) {
+        return;
+    }
+    const LTRigidTransform desiredSocket(
+        g_weaponAim.leftGripTransform.m_vPos,
+        g_weaponAim.leftAimTransform.m_rRot);
+    if (ApplyHandSocketPose(
+            data, g_leftHandControl,
+            desiredSocket) &&
+        InterlockedCompareExchange(
+            &g_leftHandTrackingActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "left_hand_tracking_active",
+            "The Retail LeftHand socket follows the left OpenXR grip pose.");
+    }
+}
+
+void RemoveHandNodeControls() noexcept {
+    __try {
+        ILTModel* const model =
+            g_client != nullptr ? g_client->GetModelLT() : nullptr;
+        if (model != nullptr && g_playerBodyObject != nullptr) {
+            if (g_rightHandControl.upperArmInstalled) {
+                model->RemoveNodeControlFn(
+                    g_playerBodyObject,
+                    g_rightHandControl.upperArmNode,
+                    &RightUpperArmNodeControl,
+                    &g_playerBodyObject);
+            }
+            if (g_rightHandControl.forearmInstalled) {
+                model->RemoveNodeControlFn(
+                    g_playerBodyObject,
+                    g_rightHandControl.forearmNode,
+                    &RightForearmNodeControl,
+                    &g_playerBodyObject);
+            }
+            if (g_rightHandControl.installed) {
+                model->RemoveNodeControlFn(
+                    g_playerBodyObject, g_rightHandControl.node,
+                    &RightHandNodeControl, &g_playerBodyObject);
+            }
+            if (g_leftHandControl.upperArmInstalled) {
+                model->RemoveNodeControlFn(
+                    g_playerBodyObject,
+                    g_leftHandControl.upperArmNode,
+                    &LeftUpperArmNodeControl,
+                    &g_playerBodyObject);
+            }
+            if (g_leftHandControl.forearmInstalled) {
+                model->RemoveNodeControlFn(
+                    g_playerBodyObject,
+                    g_leftHandControl.forearmNode,
+                    &LeftForearmNodeControl,
+                    &g_playerBodyObject);
+            }
+            if (g_leftHandControl.installed) {
+                model->RemoveNodeControlFn(
+                    g_playerBodyObject, g_leftHandControl.node,
+                    &LeftHandNodeControl, &g_playerBodyObject);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    g_playerBodyObject = nullptr;
+    g_rightHandControl = HandNodeControlState{};
+    g_leftHandControl = HandNodeControlState{};
+    InterlockedExchange(&g_armGeometryInspectedLogged, 0);
+    InterlockedExchange(&g_armGeometryEmptyAttempts, 0);
+    InterlockedExchange(&g_armGeometryNeverAvailableLogged, 0);
+}
+
+bool InstallHandNodeControl(
+    ILTModel* model, HOBJECT playerBody,
+    const char* nodeName, const char* upperArmNodeName,
+    const char* forearmNodeName,
+    const char* socketName, NodeControlFn handCallback,
+    NodeControlFn upperArmCallback, NodeControlFn forearmCallback,
+    HandNodeControlState& control,
+    const char* installedEvent) noexcept {
+    HMODELNODE node = INVALID_MODEL_NODE;
+    HMODELNODE upperArmNode = INVALID_MODEL_NODE;
+    HMODELNODE forearmNode = INVALID_MODEL_NODE;
+    HMODELSOCKET socket = INVALID_MODEL_SOCKET;
+    LTTransform nodeWorld;
+    LTTransform upperArmWorld;
+    LTTransform forearmWorld;
+    LTTransform socketWorld;
+    if (model->GetNode(playerBody, nodeName, node) != LT_OK ||
+        node == INVALID_MODEL_NODE ||
+        model->GetNode(
+            playerBody, upperArmNodeName, upperArmNode) != LT_OK ||
+        upperArmNode == INVALID_MODEL_NODE ||
+        model->GetNode(
+            playerBody, forearmNodeName, forearmNode) != LT_OK ||
+        forearmNode == INVALID_MODEL_NODE ||
+        model->GetSocket(playerBody, socketName, socket) != LT_OK ||
+        socket == INVALID_MODEL_SOCKET ||
+        model->GetNodeTransform(
+            playerBody, node, nodeWorld, true) != LT_OK ||
+        model->GetNodeTransform(
+            playerBody, upperArmNode, upperArmWorld, true) != LT_OK ||
+        model->GetNodeTransform(
+            playerBody, forearmNode, forearmWorld, true) != LT_OK ||
+        model->GetSocketTransform(
+            playerBody, socket, socketWorld, true) != LT_OK) {
+        return false;
+    }
+
+    control.node = node;
+    control.socketFromNode =
+        nodeWorld.GetInverse() * socketWorld;
+    control.socketFromNodeValid = true;
+    control.upperArmNode = upperArmNode;
+    control.forearmOffsetFromUpperArm =
+        (upperArmWorld.GetInverse() * forearmWorld).m_vPos;
+    control.forearmOffsetFromUpperArmValid =
+        control.forearmOffsetFromUpperArm.MagSqr() > 0.0001F;
+    control.forearmNode = forearmNode;
+    control.socketOffsetFromForearm =
+        (forearmWorld.GetInverse() * socketWorld).m_vPos;
+    control.socketOffsetFromForearmValid =
+        control.socketOffsetFromForearm.MagSqr() > 0.0001F;
+    if (!control.forearmOffsetFromUpperArmValid ||
+        !control.socketOffsetFromForearmValid ||
+        model->AddNodeControlFn(
+            playerBody, upperArmNode, upperArmCallback,
+            &g_playerBodyObject) != LT_OK) {
+        control = HandNodeControlState{};
+        return false;
+    }
+    control.upperArmInstalled = true;
+    if (model->AddNodeControlFn(
+            playerBody, forearmNode, forearmCallback,
+            &g_playerBodyObject) != LT_OK) {
+        model->RemoveNodeControlFn(
+            playerBody, upperArmNode, upperArmCallback,
+            &g_playerBodyObject);
+        control = HandNodeControlState{};
+        return false;
+    }
+    control.forearmInstalled = true;
+    if (model->AddNodeControlFn(
+            playerBody, node, handCallback,
+            &g_playerBodyObject) != LT_OK) {
+        model->RemoveNodeControlFn(
+            playerBody, forearmNode, forearmCallback,
+            &g_playerBodyObject);
+        model->RemoveNodeControlFn(
+            playerBody, upperArmNode, upperArmCallback,
+            &g_playerBodyObject);
+        control = HandNodeControlState{};
+        return false;
+    }
+    control.installed = true;
+    char message[192]{};
+    std::snprintf(
+        message, sizeof(message),
+        "Retail upper arm '%s', forearm '%s', hand '%s' and socket "
+        "'%s' installed with measured two-bone lengths.",
+        upperArmNodeName, forearmNodeName, nodeName, socketName);
+    Report("INFO", installedEvent, message);
+    return true;
+}
+
+// Appends to a fixed buffer and keeps `used` pointing at the terminator.
+void AppendToList(
+    char* list, std::size_t capacity, std::size_t& used,
+    const char* text) noexcept {
+    if (used + 1 >= capacity) {
+        return;
+    }
+    const int written = std::snprintf(
+        list + used, capacity - used, "%s%s",
+        used == 0 ? "" : ", ", text);
+    if (written > 0) {
+        used += (std::min)(
+            static_cast<std::size_t>(written),
+            capacity - used - 1);
+    }
+}
+
+// Lowercases into a caller-owned buffer so name matching is case safe.
+void CopyLowerCase(
+    char* destination, std::size_t capacity,
+    const char* source) noexcept {
+    std::size_t character = 0;
+    for (; character + 1 < capacity && source[character] != '\0';
+         ++character) {
+        const char value = source[character];
+        destination[character] =
+            value >= 'A' && value <= 'Z'
+                ? static_cast<char>(value - 'A' + 'a')
+                : value;
+    }
+    destination[character] = '\0';
+}
+
+// One-shot dump of everything the Retail player-body model exposes. The
+// arm geometry can only be hidden reliably once the real piece, material
+// and node names are known, so log them instead of guessing further.
+void LogRetailPlayerBodyGeometry(
+    ILTModel* model, HOBJECT playerBody,
+    std::uint32_t pieceCount) noexcept {
+    char modelFile[192]{};
+    if (model->GetModelFilename(
+            playerBody, modelFile,
+            static_cast<std::uint32_t>(sizeof(modelFile))) != LT_OK ||
+        modelFile[0] == '\0') {
+        std::snprintf(modelFile, sizeof(modelFile), "<unavailable>");
+    }
+    std::uint32_t nodeCount = 0;
+    if (model->GetNumNodes(playerBody, nodeCount) != LT_OK) {
+        nodeCount = 0;
+    }
+    char summary[320]{};
+    std::snprintf(
+        summary, sizeof(summary),
+        "Retail player body model '%s' reports %u pieces and %u nodes.",
+        modelFile, pieceCount, nodeCount);
+    Report("INFO", "vr_player_body_geometry", summary);
+
+    char materialList[512]{};
+    std::size_t materialUsed = 0;
+    for (std::uint32_t index = 0; index < 16U; ++index) {
+        char materialFile[128]{};
+        if (model->GetMaterialFilename(
+                playerBody, index, materialFile,
+                static_cast<std::uint32_t>(sizeof(materialFile))) !=
+                LT_OK ||
+            materialFile[0] == '\0') {
+            break;
+        }
+        char entry[160]{};
+        std::snprintf(
+            entry, sizeof(entry), "%u=%s", index, materialFile);
+        AppendToList(
+            materialList, sizeof(materialList), materialUsed, entry);
+    }
+    char materialMessage[640]{};
+    std::snprintf(
+        materialMessage, sizeof(materialMessage),
+        "Retail player-body materials: %s",
+        materialList[0] != '\0' ? materialList : "<none>");
+    Report("INFO", "vr_player_body_materials", materialMessage);
+
+    // Node names arrive in pre-order, so log them in chunks rather than
+    // truncating a single oversized line.
+    HMODELNODE node = INVALID_MODEL_NODE;
+    char nodeList[400]{};
+    std::size_t nodeUsed = 0;
+    std::uint32_t logged = 0;
+    for (HMODELNODE next = INVALID_MODEL_NODE;
+         logged < 160U &&
+         model->GetNextNode(playerBody, node, next) == LT_OK &&
+         next != INVALID_MODEL_NODE;
+         node = next) {
+        char nodeName[64]{};
+        if (model->GetNodeName(
+                playerBody, next, nodeName,
+                static_cast<std::uint32_t>(sizeof(nodeName))) != LT_OK) {
+            std::snprintf(nodeName, sizeof(nodeName), "<unnamed>");
+        }
+        ++logged;
+        if (nodeUsed + std::strlen(nodeName) + 2 >= sizeof(nodeList)) {
+            Report("INFO", "vr_player_body_nodes", nodeList);
+            nodeList[0] = '\0';
+            nodeUsed = 0;
+        }
+        AppendToList(nodeList, sizeof(nodeList), nodeUsed, nodeName);
+    }
+    if (nodeList[0] != '\0') {
+        Report("INFO", "vr_player_body_nodes", nodeList);
+    }
+}
+
+// Retail player.Model00p stores no piece names, so visibility is driven by
+// piece index. Re-applied every weapon update because a model reload resets
+// the hide flags.
+void ApplyPlayerBodyPieceMask(
+    ILTModel* model, HOBJECT playerBody,
+    std::uint32_t pieceCount) noexcept {
+    // SetPieceHideStatus only covers the first 32 pieces of a model.
+    const std::uint32_t supportedCount = (std::min)(pieceCount, 32U);
+    for (std::uint32_t index = 0; index < supportedCount; ++index) {
+        HMODELPIECE piece = INVALID_MODEL_PIECE;
+        if (model->GetPiece(playerBody, index, piece) != LT_OK ||
+            piece == INVALID_MODEL_PIECE) {
+            continue;
+        }
+        const bool hidden =
+            (g_hiddenBodyPieceMask & (1U << index)) != 0;
+        model->SetPieceHideStatus(playerBody, piece, hidden);
+    }
+}
+
+// Mask that leaves only piece `index` of a four-piece model visible.
+std::uint32_t IsolatePieceMask(std::uint32_t index) noexcept {
+    return kPlayerBodyPieceMaskAll & ~(1U << index);
+}
+
+// F11 isolates one player-body piece at a time. Showing a single piece names
+// it far better than hiding one does, because Retail stores no piece names.
+// Step 0 is the persisted default, so the probe is only ever needed once.
+void PollBodyPieceProbeKey() noexcept {
+    const bool keyDown = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    if (!keyDown || g_bodyPieceProbeKeyWasDown) {
+        g_bodyPieceProbeKeyWasDown = keyDown;
+        return;
+    }
+    g_bodyPieceProbeKeyWasDown = true;
+    g_bodyPieceProbeStep = (g_bodyPieceProbeStep + 1) % 6U;
+    char message[224]{};
+    if (g_bodyPieceProbeStep == 0) {
+        g_hiddenBodyPieceMask = 0;
+        std::snprintf(
+            message, sizeof(message),
+            "F11 body piece probe: all player-body pieces visible.");
+    } else if (g_bodyPieceProbeStep == 5U) {
+        g_hiddenBodyPieceMask = kPlayerBodyPieceMaskAll;
+        std::snprintf(
+            message, sizeof(message),
+            "F11 body piece probe: every player-body piece hidden "
+            "(mask 0x%X).",
+            g_hiddenBodyPieceMask);
+    } else {
+        const std::uint32_t visible = g_bodyPieceProbeStep - 1U;
+        g_hiddenBodyPieceMask = IsolatePieceMask(visible);
+        std::snprintf(
+            message, sizeof(message),
+            "F11 body piece probe: only player-body piece #%u is visible "
+            "(mask 0x%X). Keep this step if it shows hands and weapon "
+            "without arms.",
+            visible, g_hiddenBodyPieceMask);
+    }
+    WriteVrSetting(
+        L"HiddenBodyPieces",
+        static_cast<int>(g_hiddenBodyPieceMask));
+    Report("INFO", "vr_body_piece_probe", message);
+}
+
+void ConfigureRetailArmPieceVisibility(
+    ILTModel* model, HOBJECT playerBody) noexcept {
+    if (model == nullptr || playerBody == nullptr) {
+        return;
+    }
+    PollBodyPieceProbeKey();
+    if (InterlockedCompareExchange(
+            &g_armGeometryInspectedLogged, 0, 0) != 0) {
+        std::uint32_t currentCount = 0;
+        if (model->GetNumPieces(playerBody, currentCount) == LT_OK) {
+            ApplyPlayerBodyPieceMask(model, playerBody, currentCount);
+        }
+        return;
+    }
+
+    std::uint32_t pieceCount = 0;
+    if (model->GetNumPieces(playerBody, pieceCount) != LT_OK ||
+        pieceCount == 0) {
+        // The player-body object can exist one or more updates before its
+        // render model has finished loading. Do not cache that transient
+        // empty result; retry on the next weapon update. Report once if the
+        // model never starts reporting pieces so the log stays conclusive.
+        if (InterlockedIncrement(&g_armGeometryEmptyAttempts) >= 600 &&
+            InterlockedCompareExchange(
+                &g_armGeometryNeverAvailableLogged, 1, 0) == 0) {
+            LogRetailPlayerBodyGeometry(model, playerBody, 0);
+            Report(
+                "WARN", "vr_arm_pieces_never_available",
+                "The Retail player body kept reporting zero pieces across "
+                "600 weapon updates, so piece hiding cannot be used.");
+        }
+        return;
+    }
+
+    LogRetailPlayerBodyGeometry(model, playerBody, pieceCount);
+
+    bool namedArmPiece = false;
+    char pieceList[640]{};
+    std::size_t used = 0;
+    // SetPieceHideStatus only covers the first 32 pieces of a model.
+    const std::uint32_t supportedCount =
+        (std::min)(pieceCount, 32U);
+    for (std::uint32_t index = 0;
+         index < supportedCount; ++index) {
+        HMODELPIECE piece = INVALID_MODEL_PIECE;
+        char name[64]{};
+        const LTRESULT pieceResult =
+            model->GetPiece(playerBody, index, piece);
+        if (pieceResult != LT_OK || piece == INVALID_MODEL_PIECE) {
+            char entry[64]{};
+            std::snprintf(
+                entry, sizeof(entry), "#%u=<GetPiece %ld>",
+                index, static_cast<long>(pieceResult));
+            AppendToList(pieceList, sizeof(pieceList), used, entry);
+            continue;
+        }
+        const LTRESULT nameResult = model->GetPieceName(
+            playerBody, piece, name,
+            static_cast<std::uint32_t>(sizeof(name)));
+        if (nameResult != LT_OK) {
+            char entry[64]{};
+            std::snprintf(
+                entry, sizeof(entry), "#%u=<GetPieceName %ld>",
+                index, static_cast<long>(nameResult));
+            AppendToList(pieceList, sizeof(pieceList), used, entry);
+            continue;
+        }
+
+        char lowerName[64]{};
+        CopyLowerCase(lowerName, sizeof(lowerName), name);
+        const bool isHand =
+            std::strstr(lowerName, "hand") != nullptr ||
+            std::strstr(lowerName, "glove") != nullptr ||
+            std::strstr(lowerName, "finger") != nullptr;
+        const bool isArm =
+            !isHand &&
+            (std::strstr(lowerName, "arm") != nullptr ||
+             std::strstr(lowerName, "sleeve") != nullptr ||
+             std::strstr(lowerName, "elbow") != nullptr ||
+             std::strstr(lowerName, "shoulder") != nullptr);
+        char entry[96]{};
+        if (isArm) {
+            // A named arm piece is authoritative and seeds the mask.
+            g_hiddenBodyPieceMask |= 1U << index;
+            namedArmPiece = true;
+            std::snprintf(
+                entry, sizeof(entry), "#%u=%s(arm)", index, name);
+        } else {
+            std::snprintf(
+                entry, sizeof(entry), "#%u=%s", index, name);
+        }
+        AppendToList(pieceList, sizeof(pieceList), used, entry);
+    }
+    ApplyPlayerBodyPieceMask(model, playerBody, pieceCount);
+    InterlockedExchange(&g_armGeometryInspectedLogged, 1);
+    char message[768]{};
+    std::snprintf(
+        message, sizeof(message),
+        "%s Hidden piece mask 0x%X. Retail player-body pieces: %s",
+        namedArmPiece
+            ? "Named arm pieces hidden; hand pieces remain visible."
+            : "No separately named arm pieces were available; use the F11 "
+              "probe to identify them by index.",
+        g_hiddenBodyPieceMask,
+        pieceList[0] != '\0' ? pieceList : "<none>");
+    Report(
+        namedArmPiece ? "INFO" : "WARN",
+        namedArmPiece
+            ? "vr_arm_pieces_hidden"
+            : "vr_arm_pieces_unavailable",
+        message);
+}
+
+void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
+    if (playerBody == nullptr || g_client == nullptr) {
+        return;
+    }
+    if (g_playerBodyObject != nullptr &&
+        playerBody != g_playerBodyObject) {
+        RemoveHandNodeControls();
+    }
+    __try {
+        ILTModel* const model = g_client->GetModelLT();
+        if (model == nullptr) {
+            return;
+        }
+        g_playerBodyObject = playerBody;
+        ConfigureRetailArmPieceVisibility(model, playerBody);
+        if (g_rightHandControl.installed &&
+            g_rightHandControl.upperArmInstalled &&
+            g_rightHandControl.forearmInstalled &&
+            g_leftHandControl.installed &&
+            g_leftHandControl.upperArmInstalled &&
+            g_leftHandControl.forearmInstalled) {
+            return;
+        }
+        bool success = true;
+        if (!g_rightHandControl.installed) {
+            success = InstallHandNodeControl(
+                model, playerBody, "Right_hand", "Right_armu",
+                "Right_arml", "RightHand", &RightHandNodeControl,
+                &RightUpperArmNodeControl, &RightForearmNodeControl,
+                g_rightHandControl,
+                "weapon_hand_tracking_installed") && success;
+        }
+        if (!g_leftHandControl.installed) {
+            success = InstallHandNodeControl(
+                model, playerBody, "Left_hand", "Left_armu",
+                "Left_arml", "LeftHand", &LeftHandNodeControl,
+                &LeftUpperArmNodeControl, &LeftForearmNodeControl,
+                g_leftHandControl,
+                "left_hand_tracking_installed") && success;
+        }
+        if (!success &&
+            InterlockedCompareExchange(
+                &g_weaponHandTrackingFailureLogged, 1, 0) == 0) {
+            Report(
+                "WARN", "hand_tracking_unavailable",
+                "At least one Retail hand node/socket pair could not "
+                "install its local OpenXR control callback.");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        RemoveHandNodeControls();
+    }
+}
+
+void __fastcall HookRetailSetTrackedTarget(
+    void* context, void* ignoredEdx, int group,
+    const LTVector& originalTarget) {
+    (void)ignoredEdx;
+    HOBJECT trackerPlayerBody = nullptr;
+    if (IsStaticPlayerBodyTrackerContext(context)) {
+        __try {
+            // CNodeTrackerContext's LTObjRef stores its HOBJECT at +0x10.
+            trackerPlayerBody = *reinterpret_cast<HOBJECT*>(
+                static_cast<unsigned char*>(context) + 0x10);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            trackerPlayerBody = nullptr;
+        }
+    }
+    EnsureHandNodeControls(trackerPlayerBody);
+    if (group != kRetailTrackerGroupAimAt ||
+        !g_weaponAim.valid ||
+        !IsStaticPlayerBodyTrackerContext(context)) {
+        g_retailSetTrackedTarget(context, group, originalTarget);
+        return;
+    }
+    LTVector right;
+    LTVector up;
+    LTVector forward;
+    g_weaponAim.fireTransform.m_rRot.GetVectors(right, up, forward);
+    const LTVector controllerTarget =
+        g_weaponAim.fireTransform.m_vPos + forward * 10000.0F;
+    g_retailSetTrackedTarget(context, group, controllerTarget);
+    if (InterlockedCompareExchange(
+            &g_weaponBodyAimActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "weapon_body_aim_active",
+            "The Retail player-body AimAt target follows the right "
+            "OpenXR controller while the weapon stays on its hand socket.");
+    }
+}
+
+bool __fastcall HookRetailGetFireVectors(
+    const void* weapon, void* ignoredEdx,
+    LTVector& right, LTVector& up,
+    LTVector& forward, LTVector& firePosition) {
+    (void)ignoredEdx;
+    const bool result = g_retailGetFireVectors(
+        weapon, right, up, forward, firePosition);
+    if (!result || !g_weaponAim.valid) {
+        return result;
+    }
+    g_weaponAim.fireTransform.m_rRot.GetVectors(right, up, forward);
+    UpdateRetailMuzzlePosition(weapon);
+    if (g_weaponAim.muzzleValid) {
+        g_weaponAim.muzzleTransform.m_rRot.GetVectors(
+            right, up, forward);
+    }
+    firePosition = g_weaponAim.muzzleValid
+        ? g_weaponAim.muzzleTransform.m_vPos
+        : g_weaponAim.fireTransform.m_vPos;
+    return true;
+}
+
+void RemoveWeaponAimHooks() noexcept {
+    RemoveHandNodeControls();
+    if (g_retailWeaponManagerUpdateTarget != nullptr) {
+        MH_DisableHook(g_retailWeaponManagerUpdateTarget);
+        MH_RemoveHook(g_retailWeaponManagerUpdateTarget);
+    }
+    if (g_retailGetFireVectorsTarget != nullptr) {
+        MH_DisableHook(g_retailGetFireVectorsTarget);
+        MH_RemoveHook(g_retailGetFireVectorsTarget);
+    }
+    if (g_retailSetTrackedTargetTarget != nullptr) {
+        MH_DisableHook(g_retailSetTrackedTargetTarget);
+        MH_RemoveHook(g_retailSetTrackedTargetTarget);
+    }
+    g_retailWeaponManagerUpdateTarget = nullptr;
+    g_retailGetFireVectorsTarget = nullptr;
+    g_retailSetTrackedTargetTarget = nullptr;
+    g_retailWeaponManagerUpdate = nullptr;
+    g_retailSetWeaponTransform = nullptr;
+    g_retailSetWeaponVisible = nullptr;
+    g_retailGetFireVectors = nullptr;
+    g_retailSetTrackedTarget = nullptr;
+    g_retailAccuracyManager = nullptr;
+    g_weaponAim.valid = false;
+    g_weaponAim.gripValid = false;
+    g_weaponAim.leftAimValid = false;
+    g_weaponAim.leftGripValid = false;
+    g_weaponAim.muzzleValid = false;
+    g_weaponAim.muzzleDirectionValid = false;
+    g_weaponAim.muzzleDiagnosticLogged = false;
+    g_weaponAim.muzzleWeapon = nullptr;
+    g_rightHandOrientation = HandOrientationCalibration{};
+    g_leftHandOrientation = HandOrientationCalibration{};
+    g_lastWeaponManagerUpdateTick = 0;
+}
+
+bool InstallWeaponAimHooks() noexcept {
+    void* update = nullptr;
+    void* setTransform = nullptr;
+    void* setVisible = nullptr;
+    void* fireVectors = nullptr;
+    void* setTrackedTarget = nullptr;
+    if (!ResolveRetailWeaponTargets(
+            update, setTransform, setVisible, fireVectors,
+            setTrackedTarget)) {
+        Report(
+            "ERROR", "weapon_aim_layout_mismatch",
+            "Retail 1.08 weapon transform/fire-vector signatures "
+            "did not match; 6DoF weapon aiming remains disabled.");
+        return false;
+    }
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        Report(
+            "ERROR", "weapon_aim_hook_initialize_failed",
+            MH_StatusToString(initialize));
+        return false;
+    }
+    g_retailWeaponManagerUpdateTarget = update;
+    g_retailGetFireVectorsTarget = fireVectors;
+    g_retailSetTrackedTargetTarget = setTrackedTarget;
+    g_retailSetWeaponTransform =
+        reinterpret_cast<RetailSetWeaponTransformFunction>(
+            setTransform);
+    g_retailSetWeaponVisible =
+        reinterpret_cast<RetailSetWeaponVisibleFunction>(
+            setVisible);
+    const HMODULE retailModule =
+        GetModuleHandleW(L"GameOrig.dll");
+    g_retailAccuracyManager =
+        retailModule != nullptr
+            ? reinterpret_cast<RetailAccuracyManagerFunction>(
+                  reinterpret_cast<unsigned char*>(retailModule) +
+                  kRetailAccuracyManagerRva)
+            : nullptr;
+
+    MH_STATUS status = MH_CreateHook(
+        update,
+        reinterpret_cast<void*>(&HookRetailWeaponManagerUpdate),
+        reinterpret_cast<void**>(&g_retailWeaponManagerUpdate));
+    if (status == MH_OK) {
+        status = MH_CreateHook(
+            fireVectors,
+            reinterpret_cast<void*>(&HookRetailGetFireVectors),
+            reinterpret_cast<void**>(&g_retailGetFireVectors));
+    }
+    if (status == MH_OK) {
+        status = MH_CreateHook(
+            setTrackedTarget,
+            reinterpret_cast<void*>(&HookRetailSetTrackedTarget),
+            reinterpret_cast<void**>(&g_retailSetTrackedTarget));
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(update);
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(fireVectors);
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(setTrackedTarget);
+    }
+    if (status != MH_OK) {
+        Report(
+            "ERROR", "weapon_aim_hook_install_failed",
+            MH_StatusToString(status));
+        RemoveWeaponAimHooks();
+        return false;
+    }
+    Report(
+        "INFO", "weapon_aim_hooks_installed",
+        "Verified Retail 1.08 weapon visibility, body AimAt and "
+        "fire-vector hooks use the right OpenXR aim pose.");
+    return true;
+}
+
+void RemoveSemanticInputHook() noexcept {
+    if (g_retailGetBindingValueTarget == nullptr) {
+        return;
+    }
+    MH_DisableHook(g_retailGetBindingValueTarget);
+    MH_RemoveHook(g_retailGetBindingValueTarget);
+    g_retailGetBindingValueTarget = nullptr;
+    g_retailGetBindingValue = nullptr;
+}
+
+bool InstallSemanticInputHook(
+    const void* clientUpdateTarget) noexcept {
+    const unsigned char* const getBindingValue =
+        FindRetailGetBindingValue(clientUpdateTarget);
+    if (!IsExecutableAddress(getBindingValue)) {
+        Report(
+            "ERROR", "controller_binding_layout_mismatch",
+            "Retail CBindMgr layout did not match the verified 1.08 "
+            "code path; controller commands remain disabled.");
+        return false;
+    }
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        Report(
+            "ERROR", "controller_binding_hook_initialize_failed",
+            MH_StatusToString(initialize));
+        return false;
+    }
+
+    g_retailGetBindingValueTarget =
+        const_cast<unsigned char*>(getBindingValue);
+    MH_STATUS status = MH_CreateHook(
+        g_retailGetBindingValueTarget,
+        reinterpret_cast<void*>(&HookRetailGetBindingValue),
+        reinterpret_cast<void**>(&g_retailGetBindingValue));
+    if (status != MH_OK) {
+        Report(
+            "ERROR", "controller_binding_hook_create_failed",
+            MH_StatusToString(status));
+        g_retailGetBindingValueTarget = nullptr;
+        return false;
+    }
+    status = MH_EnableHook(g_retailGetBindingValueTarget);
+    if (status != MH_OK) {
+        Report(
+            "ERROR", "controller_binding_hook_enable_failed",
+            MH_StatusToString(status));
+        RemoveSemanticInputHook();
+        return false;
+    }
+    Report(
+        "INFO", "controller_binding_hook_installed",
+        "Verified Retail 1.08 CBindMgr command values now merge "
+        "OpenXR controller input with existing bindings.");
+    return true;
+}
+
+void PollControllerInput() noexcept {
+    if (g_getInputState == nullptr) {
+        return;
+    }
+
+    FearVrInputState input{};
+    const bool received = g_getInputState(&input) != FALSE;
+    const ULONGLONG now = GetTickCount64();
+    if (received && input.sampleId != 0 &&
+        input.sampleId != g_lastInputSampleId) {
+        g_lastInputSampleId = input.sampleId;
+        g_lastInputSampleTick = now;
+    }
+    const bool fresh =
+        received && g_lastInputSampleTick != 0 &&
+        now - g_lastInputSampleTick <= 250;
+    if (!IsInputStateUsable(input, fresh)) {
+        NeutralizeInputState(input);
+    }
+    constexpr float kTurnSpeedScale[] = {0.75F, 1.0F, 1.25F};
+    const int turnPreset = std::clamp(g_turnSpeedPreset, 0, 2);
+    input.turnX = std::clamp(
+        input.turnX * kTurnSpeedScale[turnPreset], -1.0F, 1.0F);
+    g_currentInput = input;
+
+    if (input.activeHands != g_lastActiveHands) {
+        char message[96]{};
+        std::snprintf(
+            message, sizeof(message),
+            "active_hands=0x%X", input.activeHands);
+        Report("INFO", "client_input_devices_changed", message);
+        g_lastActiveHands = input.activeHands;
+    }
+    if (input.buttons != g_lastInputButtons) {
+        char message[96]{};
+        std::snprintf(
+            message, sizeof(message),
+            "buttons=0x%X", input.buttons);
+        Report("INFO", "client_input_buttons_changed", message);
+        g_lastInputButtons = input.buttons;
+    }
+
+    const bool recenterDown =
+        (input.buttons & FEARVR_IB_RIGHT_STICK) != 0;
+    bool stereoEnabled = false;
+    if (g_isStereoEnabled != nullptr) {
+        __try {
+            stereoEnabled = g_isStereoEnabled() != FALSE;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            stereoEnabled = false;
+        }
+    }
+    if (recenterDown && !g_controllerRecenterWasDown &&
+        stereoEnabled) {
+        InterlockedIncrement(&g_trackingResetGeneration);
+        Report(
+            "INFO", "controller_recenter_requested",
+            "Right stick click requested head-tracking recenter "
+            "while stereo is active.");
+    }
+    g_controllerRecenterWasDown = recenterDown;
+
+    const bool fireTriggerDown =
+        (input.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
+        input.trigger[FEARVR_HAND_RIGHT] >= 0.55F;
+    if (fireTriggerDown && !g_fireTriggerWasDown &&
+        g_submitHapticRequest != nullptr &&
+        g_controllerHapticsEnabled) {
+        FearVrHapticRequest request{};
+        request.requestId = ++g_hapticRequestId;
+        request.durationNs = 35'000'000;
+        request.amplitude = 0.25F;
+        request.frequency = 0.0F;
+        request.handMask = FEARVR_HAND_MASK_RIGHT;
+        request.flags = FEARVR_HF_VALID;
+        if (g_submitHapticRequest(&request)) {
+            Report(
+                "INFO", "controller_fire_haptic",
+                "Right trigger firing edge requested a short "
+                "haptic pulse.");
+        }
+    }
+    g_fireTriggerWasDown = fireTriggerDown;
+}
+
+void TapMenuKey(int key) noexcept {
+    if (g_clientShell == nullptr) {
+        return;
+    }
+    __try {
+        g_clientShell->OnKeyDown(key, 1);
+        g_clientShell->OnKeyUp(key);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Report(
+            "WARN", "controller_menu_key_failed",
+            "Retail IClientShell rejected a synthesized menu key.");
+    }
+}
+
+void UpdateMenuAxis(
+    std::size_t index, bool pressed, int key,
+    ULONGLONG now) noexcept {
+    constexpr ULONGLONG kInitialRepeatDelayMs = 350;
+    constexpr ULONGLONG kRepeatDelayMs = 120;
+    if (!pressed) {
+        g_menuAxisDown[index] = false;
+        g_menuAxisRepeatTick[index] = 0;
+        return;
+    }
+    if (!g_menuAxisDown[index]) {
+        g_menuAxisDown[index] = true;
+        g_menuAxisRepeatTick[index] =
+            now + kInitialRepeatDelayMs;
+        TapMenuKey(key);
+        return;
+    }
+    if (now >= g_menuAxisRepeatTick[index]) {
+        g_menuAxisRepeatTick[index] = now + kRepeatDelayMs;
+        TapMenuKey(key);
+    }
+}
+
+void PollControllerMenuInput() noexcept {
+    const std::uint32_t buttons = g_currentInput.buttons;
+    const std::uint32_t pressed =
+        buttons & ~g_lastMenuButtons;
+    const bool triggerDown =
+        (g_currentInput.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
+        g_currentInput.trigger[FEARVR_HAND_RIGHT] >= 0.55F;
+    const bool triggerPressed =
+        triggerDown && !g_lastMenuTriggerDown;
+    const bool menuRequested =
+        (pressed & FEARVR_IB_LEFT_STICK) != 0;
+
+    const ULONGLONG now = GetTickCount64();
+    bool flatPanelActive = false;
+    if (g_isFlatPanelActive != nullptr) {
+        __try {
+            flatPanelActive = g_isFlatPanelActive() != FALSE;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            flatPanelActive = false;
+        }
+    }
+    // Main screens are intentionally mono until F8, so render coverage alone
+    // cannot identify them. The verified weapon-manager hook is called every
+    // playing frame and stops for screens, pause menus and message boxes.
+    constexpr ULONGLONG kPlayingFrameFreshMs = 250;
+    const bool playingFrameFresh =
+        g_lastWeaponManagerUpdateTick != 0 &&
+        now - g_lastWeaponManagerUpdateTick <= kPlayingFrameFreshMs;
+    const bool menuActive = flatPanelActive || !playingFrameFresh;
+    if (menuRequested) {
+        TapMenuKey(VK_ESCAPE);
+        Report(
+            "INFO", "controller_pause_requested",
+            "Left stick click sent one Escape key edge.");
+    }
+    if (!menuActive) {
+        for (std::size_t index = 0; index < 4; ++index) {
+            g_menuAxisDown[index] = false;
+            g_menuAxisRepeatTick[index] = 0;
+        }
+        g_menuControllerActive = false;
+        g_lastMenuButtons = buttons;
+        g_lastMenuTriggerDown = triggerDown;
+        return;
+    }
+    if (!g_menuControllerActive) {
+        Report(
+            "INFO", "controller_menu_active",
+            "Flat VR menu accepts sticks, A/trigger and B/menu.");
+        g_menuControllerActive = true;
+    }
+
+    if ((pressed & FEARVR_IB_RIGHT_PRIMARY) != 0 ||
+        triggerPressed) {
+        TapMenuKey(VK_RETURN);
+    }
+    if ((pressed & FEARVR_IB_RIGHT_SECONDARY) != 0) {
+        if (g_vrSettingsPageActive) {
+            LeaveRetailVrSettingsPage();
+        } else {
+            TapMenuKey(VK_ESCAPE);
+        }
+    }
+
+    const float horizontal =
+        std::fabs(g_currentInput.moveX) >=
+                std::fabs(g_currentInput.turnX)
+            ? g_currentInput.moveX
+            : g_currentInput.turnX;
+    const float vertical =
+        std::fabs(g_currentInput.moveY) >=
+                std::fabs(g_currentInput.turnY)
+            ? g_currentInput.moveY
+            : g_currentInput.turnY;
+    UpdateMenuAxis(0, horizontal <= -0.55F, VK_LEFT, now);
+    UpdateMenuAxis(1, horizontal >= 0.55F, VK_RIGHT, now);
+    UpdateMenuAxis(2, vertical >= 0.55F, VK_UP, now);
+    UpdateMenuAxis(3, vertical <= -0.55F, VK_DOWN, now);
+
+    g_lastMenuButtons = buttons;
+    g_lastMenuTriggerDown = triggerDown;
+}
+
+void __fastcall HookClientShellUpdate(
+    IClientShell* clientShell, void* ignoredEdx) {
+    (void)ignoredEdx;
+    if (InterlockedCompareExchange(
+            &g_clientInputHookCallLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "client_input_hook_called",
+            "IClientShell version-5 Update slot 20 is active.");
+    }
+    PollControllerInput();
+    PollControllerMenuInput();
+    if (g_vrSettingsPageActive) {
+        // Tastatur, Maus und Controller navigieren alle direkt über
+        // CLTGUIListCtrl::NextSelection. Der Listenanfang muss deshalb hier
+        // festgehalten werden, nicht nur wenn der Hook selbst auswählt.
+        ResetRetailVrMenuScroll();
+    }
+    UpdateCrosshairOverride();
+    g_semanticBitsInjected = false;
+    g_clientShellUpdate(clientShell);
+}
+
+bool InstallClientInputHook(void* masterDatabase) noexcept {
+    if (!CommandLineContains(L"-fearvr-input")) {
+        return true;
+    }
+    if (g_getInputState == nullptr ||
+        g_submitHapticRequest == nullptr ||
+        g_isFlatPanelActive == nullptr) {
+        Report(
+            "ERROR", "input_bridge_exports_missing",
+            "The staged bridge lacks the M5 input exports.");
+        return false;
+    }
+    g_clientShell = static_cast<IClientShell*>(
+        FindCurrentInterface(
+            masterDatabase, "IClientShell.Default", 5));
+    if (g_clientShell == nullptr) {
+        Report(
+            "ERROR", "client_shell_interface_missing",
+            "IClientShell.Default version 5 was not found.");
+        return false;
+    }
+    void** const vtable =
+        *reinterpret_cast<void***>(g_clientShell);
+    void** const slot =
+        vtable == nullptr
+            ? nullptr
+            : &vtable[kClientShellUpdateSlot];
+    void* const target = slot == nullptr ? nullptr : *slot;
+    if (!IsExecutableAddress(target)) {
+        Report(
+            "ERROR", "client_input_hook_layout_mismatch",
+            "IClientShell Update slot is not executable.");
+        return false;
+    }
+    g_clientShellUpdate =
+        reinterpret_cast<ClientShellUpdateFunction>(target);
+    if (!InstallSemanticInputHook(target)) {
+        g_clientShellUpdate = nullptr;
+        return false;
+    }
+    if (!ExchangeVtableSlot(
+            slot, target,
+            reinterpret_cast<void*>(&HookClientShellUpdate))) {
+        RemoveSemanticInputHook();
+        g_clientShellUpdate = nullptr;
+        return false;
+    }
+    if (!InstallWeaponAimHooks()) {
+        Report(
+            "WARN", "weapon_aim_unavailable",
+            "Controller gameplay input remains active, but the "
+            "verified Retail weapon hooks could not be installed.");
+    }
+    Report(
+        "INFO", "client_input_hook_installed",
+        "M5 polls OpenXR input from IClientShell::Update and merges "
+        "semantic controller commands with existing game input.");
+    return true;
+}
+
 bool TryInstallRendererHook() noexcept {
     AcquireSRWLockExclusive(&g_hookLock);
     if (g_hookInstalled) {
@@ -701,6 +4188,7 @@ void __cdecl SetStereoHookEnabled(BOOL enabled) {
     } else {
         TryRemoveRendererHook();
     }
+    UpdateCrosshairOverride();
 }
 
 template <typename Function>
@@ -726,12 +4214,45 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     g_isStereoEnabled =
         Resolve<IsStereoEnabledFunction>(
             bridge, "FearVr_IsStereoEnabled");
+    g_setStereoEnabled =
+        Resolve<SetStereoEnabledFunction>(
+            bridge, "FearVr_SetStereoEnabled");
+    g_isTranslationEnabled =
+        Resolve<GetBooleanOptionFunction>(
+            bridge, "FearVr_IsTranslationEnabled");
+    g_setTranslationEnabled =
+        Resolve<SetBooleanOptionFunction>(
+            bridge, "FearVr_SetTranslationEnabled");
+    g_isStereoHudEnabled =
+        Resolve<GetBooleanOptionFunction>(
+            bridge, "FearVr_IsStereoHudEnabled");
+    g_setStereoHudEnabled =
+        Resolve<SetBooleanOptionFunction>(
+            bridge, "FearVr_SetStereoHudEnabled");
+    g_isComfortModeEnabled =
+        Resolve<GetBooleanOptionFunction>(
+            bridge, "FearVr_IsComfortModeEnabled");
+    g_setComfortModeEnabled =
+        Resolve<SetBooleanOptionFunction>(
+            bridge, "FearVr_SetComfortModeEnabled");
+    g_requestRecenter =
+        Resolve<RequestRecenterFunction>(
+            bridge, "FearVr_RequestRecenter");
+    g_isFlatPanelActive =
+        Resolve<IsFlatPanelActiveFunction>(
+            bridge, "FearVr_IsFlatPanelActive");
     g_registerStereoToggle =
         Resolve<RegisterStereoToggleFunction>(
             bridge, "FearVr_RegisterStereoToggleCallback");
     g_getRenderRequest =
         Resolve<GetRenderRequestFunction>(
             bridge, "FearVr_GetRenderRequest");
+    g_getInputState =
+        Resolve<GetInputStateFunction>(
+            bridge, "FearVr_GetInputState");
+    g_submitHapticRequest =
+        Resolve<SubmitHapticRequestFunction>(
+            bridge, "FearVr_SubmitHapticRequest");
     g_beginEye =
         Resolve<BeginEyeFunction>(bridge, "FearVr_BeginEye");
     g_captureEye =
@@ -745,6 +4266,14 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     if (g_isHostConnected == nullptr ||
         g_isStereoAvailable == nullptr ||
         g_isStereoEnabled == nullptr ||
+        g_setStereoEnabled == nullptr ||
+        g_isTranslationEnabled == nullptr ||
+        g_setTranslationEnabled == nullptr ||
+        g_isStereoHudEnabled == nullptr ||
+        g_setStereoHudEnabled == nullptr ||
+        g_isComfortModeEnabled == nullptr ||
+        g_setComfortModeEnabled == nullptr ||
+        g_requestRecenter == nullptr ||
         g_registerStereoToggle == nullptr ||
         g_getRenderRequest == nullptr || g_beginEye == nullptr ||
         g_captureEye == nullptr || g_endStereoFrame == nullptr) {
@@ -795,12 +4324,26 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     Report(
         "INFO", "engine_interfaces_found",
         "Read-only lookup found ILTClient 105 and ILTRenderer 0; "
-        "the active renderer was resolved through ILTClient.");
+              "the active renderer was resolved through ILTClient.");
     ConfigureComfortOptions();
+    InitializeVrSettings();
+    if (CommandLineContains(L"-fearvr-input") &&
+        !InstallRetailVrMenuHooks()) {
+        Report(
+            "WARN", "vr_settings_menu_unavailable",
+            "The game remains playable, but the in-game VR settings "
+            "entry could not be installed.");
+    }
+    if (!InstallClientInputHook(masterDatabase)) {
+        Report(
+            "WARN", "client_input_hook_unavailable",
+            "M5 input remains disabled; original game input is untouched.");
+    }
     g_registerStereoToggle(&SetStereoHookEnabled);
     Report(
         "INFO", "stereo_hook_armed",
-        "Renderer VTable remains original until F8 enables native stereo.");
+        "Renderer VTable remains original in menus; the first verified "
+        "playing frame enables native stereo automatically.");
     return true;
 }
 

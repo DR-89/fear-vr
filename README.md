@@ -3,11 +3,16 @@
 Quelloffener, lokal baubarer VR-Mod für die **Singleplayer-Basisversion von
 F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
-> **Status:** M4 — nativer Stereo-Weltrender, relatives HMD-Headtracking,
+> **Status:** M5 — nativer Stereo-Weltrender, relatives HMD-Headtracking,
 > F9-Recenter, lesbares raumfestes Menü und Stereo-HUD sind mit dem echten
-> F.E.A.R. auf Quest 3/SteamVR bestätigt. Der klassische D3D9-Pfad verwendet
-> weiterhin einen markierten CPU-Kompatibilitätspfad; Translation bleibt ohne
-> Weltkollision opt-in. Details: `docs/TESTING.md`.
+> F.E.A.R. auf Quest 3/SteamVR bestätigt. Die OpenXR-Controller steuern das
+> Spiel vollständig: Bewegen, Drehen, Waffenwahl, Springen, Nachladen, Ducken,
+> Zeitlupe, Rennen, Benutzen, Zielen/Feuern, Recenter und Pausenmenü; Lehnen
+> läuft über die Neigung der linken Hand. Im Ego-Blick sind nur Hände und Waffe
+> sichtbar, und das ESC-Menü enthält eine native VR-Einstellungsseite. Der
+> klassische D3D9-Pfad verwendet weiterhin einen markierten
+> CPU-Kompatibilitätspfad; Translation bleibt ohne Weltkollision opt-in.
+> Details: `docs/TESTING.md`.
 
 ## Grundprinzipien
 
@@ -48,7 +53,7 @@ Details: `docs/ARCHITECTURE.md`.
 | `patches/` | minimale, lizenzgeprüfte Diffs / Transformationsskripte |
 | `shaders/` | Host-Fullscreen-/Composite-Shader |
 | `tests/` | automatisierte Tests (Protokoll, Mathe, State-Machine …) |
-| `tools/` | `prepare-stage.ps1`, `verify-install.ps1`, `launch-vr.ps1` |
+| `tools/` | `verify-install.ps1`, `prepare-m5-stage.ps1`, `launch-m5-fear.ps1` … |
 | `vendor-local/`, `build/`, `stage/`, `logs/` | lokal, **nicht** in Git |
 
 ## Voraussetzungen
@@ -110,7 +115,24 @@ pwsh -File tools\prepare-m4-stage.ps1
 pwsh -File tools\launch-m4-fear.ps1
 ```
 
-Der M4-Start aktiviert das bestätigte Stereo-HUD standardmäßig und schließt
+M5 mit Motion Controls:
+
+```powershell
+pwsh -File tools\prepare-m5-stage.ps1
+pwsh -File tools\launch-m5-fear.ps1
+```
+
+Belegung: linker Stick bewegt, linker Grip rennt, linker Stick-Klick öffnet
+die Pause. Rechter Stick dreht, hoch/runter wechselt die Waffe, Stick-Klick
+zentriert die Blickrichtung. A springt, B lädt nach, X duckt, Y schaltet
+Zeitlupe. Rechter Grip benutzt, die Trigger zielen und feuern. Die linke Hand
+seitlich zu neigen lehnt um die Ecke. Maus, Tastatur und Gamepad bleiben
+parallel nutzbar. Details: `docs/OPENXR-INPUT.md`.
+
+Im Ego-Blick sind nur Hände und Waffe zu sehen; Ober- und Unterarm sind
+ausgeblendet.
+
+Der M5-Start aktiviert das bestätigte Stereo-HUD standardmäßig und schließt
 SteamVRs verzögertes F.E.A.R.-Desktop-Theater automatisch. Optionen:
 
 - `-Translation`: begrenzte HMD-Translation bis 25 cm, ohne Weltkollision;
@@ -122,7 +144,18 @@ Tasten im Spiel:
 - F8: nativen Stereo-Weltrender ein-/ausschalten;
 - F9: aktuelle HMD-Ausrichtung zentrieren;
 - F10: raumfesten Komfortbildschirm für Camera-Shakes und Zwischensequenzen
-  ein-/ausschalten.
+  ein-/ausschalten;
+- F11: Player-Body-Pieces einzeln isolieren, um das Arm-Piece neu zu
+  kalibrieren. Nur nötig, wenn der Standard einmal nicht passt.
+
+Das ESC-Menü enthält in M5 direkt hinter „Optionen“ den englisch beschrifteten
+Eintrag „VR SETTINGS“. Die Seite ist bewusst kurz und einseitig: Stereo
+rendering, Stereo HUD, Turn speed, Red aim guide, Controller vibration,
+Recenter view, Reset VR defaults und BACK. HMD-Translation, Head-Bob und
+Komfortbildschirm bleiben in `fearvr.ini` einstellbar, ohne die native
+Menüliste zu überfüllen. Die Auswahl wird unter
+`stage/userdata-m5/fearvr.ini` gespeichert. Stick navigiert, A oder Trigger
+bestätigt und B geht zurück.
 
 ## Lizenz
 

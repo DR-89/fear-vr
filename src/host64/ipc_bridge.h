@@ -27,6 +27,8 @@ public:
 
     void Tick();
     void PublishRenderRequest(const FearVrRenderRequest& request);
+    void PublishInputState(const FearVrInputState& input);
+    bool ConsumeHapticRequest(FearVrHapticRequest& request);
     bool ConsumeLatestPair();
 
     [[nodiscard]] bool Enabled() const noexcept;
@@ -74,6 +76,7 @@ private:
     ULONGLONG lastGameHeartbeatTick_{0};
     std::uint64_t lastGameHeartbeat_{0};
     std::uint64_t latestFrameId_{0};
+    std::uint64_t lastHapticRequestId_{0};
     std::uint64_t consumedFrames_{0};
     std::uint32_t consecutiveOpenFailures_{0};
     bool gameConnected_{false};

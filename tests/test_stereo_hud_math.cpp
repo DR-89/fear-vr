@@ -40,6 +40,12 @@ int main() {
         !fearvr::IsSafePostWorldCoverage(0, 100),
         "an empty delta must not enter the compositor");
     ok &= Expect(
+        !fearvr::IsFlatPanelCoverage(79, 100),
+        "a full-screen gameplay effect must keep the stereo world");
+    ok &= Expect(
+        fearvr::IsFlatPanelCoverage(82, 100),
+        "the observed menu coverage boundary must select the flat panel");
+    ok &= Expect(
         fearvr::IsFlatPanelCoverage(95, 100),
         "a full-screen menu delta must select the flat panel");
     ok &= Expect(
@@ -60,6 +66,9 @@ int main() {
     ok &= Expect(
         fearvr::StereoHudSourceColumn(132, 600, 1024, 768) == 100,
         "the lower-left HUD must move slightly right");
+    ok &= Expect(
+        fearvr::StereoHudSourceColumn(200, 300, 1024, 768) == 72,
+        "the left-side weapon HUD must move substantially inward");
     ok &= Expect(
         fearvr::StereoHudSourceColumn(748, 400, 1024, 768) == 850,
         "the right-side HUD must move toward the reticle");

@@ -30,6 +30,8 @@ add_executable(fearvr-host
   main.cpp
   openxr_host.cpp
   openxr_host.h
+  xr_input.cpp
+  xr_input.h
   texture_renderer.cpp
   texture_renderer.h
 )

@@ -33,7 +33,7 @@ extern "C" {
 /* ---- Protokoll-Identität ------------------------------------------------- */
 /* 'F','R','V','R' als Little-Endian-uint32 => 0x52565246 */
 #define FEARVR_PROTOCOL_MAGIC   0x52565246u
-#define FEARVR_PROTOCOL_VERSION 2u
+#define FEARVR_PROTOCOL_VERSION 5u
 
 /* ---- Augen & Ringpuffer -------------------------------------------------- */
 enum {
@@ -44,6 +44,39 @@ enum {
 
 /* Mind. 2, besser 3 Slots pro Auge (§6). */
 #define FEARVR_SLOTS_PER_EYE 3u
+
+/* ---- OpenXR-Controller --------------------------------------------------- */
+enum {
+  FEARVR_HAND_LEFT  = 0,
+  FEARVR_HAND_RIGHT = 1,
+  FEARVR_HAND_COUNT = 2
+};
+
+enum {
+  FEARVR_HAND_MASK_LEFT  = 0x00000001u,
+  FEARVR_HAND_MASK_RIGHT = 0x00000002u
+};
+
+/* Physische, noch nicht auf Spielbefehle abgebildete Tasten. */
+enum {
+  FEARVR_IB_LEFT_PRIMARY   = 0x00000001u,
+  FEARVR_IB_LEFT_SECONDARY = 0x00000002u,
+  FEARVR_IB_LEFT_MENU      = 0x00000004u,
+  FEARVR_IB_LEFT_STICK     = 0x00000008u,
+  FEARVR_IB_RIGHT_PRIMARY  = 0x00000010u,
+  FEARVR_IB_RIGHT_SECONDARY = 0x00000020u,
+  FEARVR_IB_RIGHT_MENU     = 0x00000040u,
+  FEARVR_IB_RIGHT_STICK    = 0x00000080u
+};
+
+enum {
+  FEARVR_IF_VALID   = 0x00000001u,
+  FEARVR_IF_FOCUSED = 0x00000002u
+};
+
+enum {
+  FEARVR_HF_VALID = 0x00000001u
+};
 
 /* ---- Slot-/Frame-Zustände ------------------------------------------------ */
 enum {
@@ -106,6 +139,38 @@ typedef struct FearVrRenderRequest {
 FEARVR_STATIC_ASSERT(sizeof(FearVrRenderRequest) == 8 + 8 + 88 + 4 + 4,
                      "FearVrRenderRequest size (112)");
 
+/* ---- Controllerzustand (Host -> Game) ----------------------------------- */
+typedef struct FearVrInputState {
+  uint64_t sampleId;                /* monoton pro Veröffentlichung          */
+  uint64_t predictedDisplayTimeNs;  /* OpenXR-Zeit der Abtastung             */
+  float moveX, moveY;               /* linker Stick/Trackpad, [-1,+1]        */
+  float turnX, turnY;               /* rechter Stick/Trackpad, [-1,+1]       */
+  float trigger[FEARVR_HAND_COUNT]; /* analog, [0,1]                         */
+  float squeeze[FEARVR_HAND_COUNT]; /* analog, [0,1]                         */
+  uint32_t buttons;                 /* FEARVR_IB_*                           */
+  uint32_t activeHands;             /* FEARVR_HAND_MASK_*                    */
+  uint32_t flags;                   /* FEARVR_IF_*                           */
+  uint32_t aimPoseValidHands;       /* gültige handAimPose, FEARVR_HAND_*    */
+  uint32_t gripPoseValidHands;      /* gültige handGripPose, FEARVR_HAND_*   */
+  FearVrPose handAimPose[FEARVR_HAND_COUNT]; /* OpenXR LOCAL aim/pose          */
+  FearVrPose handGripPose[FEARVR_HAND_COUNT]; /* OpenXR LOCAL grip/pose        */
+  uint32_t reserved0[2];
+} FearVrInputState;
+FEARVR_STATIC_ASSERT(sizeof(FearVrInputState) == 192,
+                     "FearVrInputState size (192)");
+
+/* ---- Haptikanforderung (Game -> Host) ----------------------------------- */
+typedef struct FearVrHapticRequest {
+  uint64_t requestId;       /* monoton; 0 bedeutet keine Anforderung         */
+  uint64_t durationNs;      /* OpenXR-Dauer in Nanosekunden                   */
+  float amplitude;          /* [0,1]                                          */
+  float frequency;          /* Hz oder XR_FREQUENCY_UNSPECIFIED              */
+  uint32_t handMask;        /* FEARVR_HAND_MASK_*                             */
+  uint32_t flags;           /* FEARVR_HF_*                                    */
+} FearVrHapticRequest;
+FEARVR_STATIC_ASSERT(sizeof(FearVrHapticRequest) == 32,
+                     "FearVrHapticRequest size (32)");
+
 /* ---- Slot-Deskriptor (ein Ring-Slot, ein Auge) --------------------------- */
 typedef struct FearVrSlot {
   uint64_t sharedHandle;   /* D3D9-Shared-Texture-Handle (validieren!)       */
@@ -138,6 +203,8 @@ typedef struct FearVrSharedHeader {
   uint64_t hostHeartbeat;  /* vom Host hochgezählt                          */
   uint64_t gameHeartbeat;  /* vom Game hochgezählt                          */
   uint64_t requestSequence; /* Seqlock: ungerade=Schreibvorgang, gerade=stabil */
+  uint64_t inputSequence;  /* Host -> Game, Seqlock für input                */
+  uint64_t hapticSequence; /* Game -> Host, Seqlock für haptic              */
   uint64_t hostAdapterLuid; /* HighPart: obere 32 Bit, LowPart: untere 32 Bit */
   uint64_t gameAdapterLuid; /* HighPart: obere 32 Bit, LowPart: untere 32 Bit */
   uint32_t hostProcessId;
@@ -145,13 +212,17 @@ typedef struct FearVrSharedHeader {
   uint32_t bridgeFlags;     /* FEARVR_BF_*                                   */
   uint32_t reserved1;
   FearVrRenderRequest request; /* neuester vollständig veröffentlichter Auftrag */
+  FearVrInputState input;   /* neuester vollständiger Controllerzustand      */
+  FearVrHapticRequest haptic; /* neueste Haptikanforderung                   */
   /* Slots: [eye][slot] direkt nach dem Header im Mapping. */
   FearVrSlot slot[FEARVR_EYE_COUNT][FEARVR_SLOTS_PER_EYE];
 } FearVrSharedHeader;
 FEARVR_STATIC_ASSERT(
   sizeof(FearVrSharedHeader) ==
-    24 /* 6x uint32 */ + 40 /* 5x uint64 */ + 16 /* 4x uint32 */
+    24 /* 6x uint32 */ + 56 /* 7x uint64 */ + 16 /* 4x uint32 */
     + sizeof(FearVrRenderRequest)
+    + sizeof(FearVrInputState)
+    + sizeof(FearVrHapticRequest)
     + (uint32_t)(FEARVR_EYE_COUNT * FEARVR_SLOTS_PER_EYE) * sizeof(FearVrSlot),
   "FearVrSharedHeader size");
 

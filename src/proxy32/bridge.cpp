@@ -411,9 +411,110 @@ public:
         return config_.stereoEnabled ? TRUE : FALSE;
     }
 
+    void SetStereoEnabled(BOOL enabled) noexcept {
+        StereoToggleCallback callback = nullptr;
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const bool requested = enabled != FALSE;
+            if (config_.stereoEnabled != requested) {
+                config_.stereoEnabled = requested;
+                ClearStereoFrame();
+                if (shared_ != nullptr && !requested) {
+                    InterlockedAnd(
+                        AtomicFlags(*shared_),
+                        static_cast<LONG>(
+                            ~FEARVR_BF_STEREO_ACTIVE));
+                }
+                callback = stereoToggleCallback_;
+                changed = true;
+                logger_.Write(
+                    "INFO", "stereo_set",
+                    requested
+                        ? "Native stereo enabled automatically after loading."
+                        : "Native stereo disabled programmatically.");
+            }
+        }
+        if (changed && callback != nullptr) {
+            callback(enabled != FALSE ? TRUE : FALSE);
+        }
+    }
+
+    BOOL TranslationEnabled() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return config_.translationEnabled ? TRUE : FALSE;
+    }
+
+    void SetTranslationEnabled(BOOL enabled) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        config_.translationEnabled = enabled != FALSE;
+        logger_.Write(
+            "INFO", "translation_set",
+            config_.translationEnabled
+                ? "Bounded HMD translation enabled from the VR menu."
+                : "HMD translation disabled from the VR menu.");
+    }
+
+    BOOL StereoHudEnabled() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return config_.stereoHudEnabled ? TRUE : FALSE;
+    }
+
+    void SetStereoHudEnabled(BOOL enabled) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        config_.stereoHudEnabled = enabled != FALSE;
+        ClearStereoFrame();
+        logger_.Write(
+            "INFO", "stereo_hud_set",
+            config_.stereoHudEnabled
+                ? "Stereo HUD enabled from the VR menu."
+                : "Stereo HUD disabled from the VR menu.");
+    }
+
+    BOOL ComfortModeEnabled() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return comfortModeEnabled_ ? TRUE : FALSE;
+    }
+
+    void SetComfortModeEnabled(BOOL enabled) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const bool requested = enabled != FALSE;
+        if (comfortModeEnabled_ == requested) {
+            return;
+        }
+        comfortModeEnabled_ = requested;
+        ClearStereoFrame();
+        if (shared_ != nullptr) {
+            InterlockedAnd(
+                AtomicFlags(*shared_),
+                static_cast<LONG>(~FEARVR_BF_STEREO_ACTIVE));
+        }
+        if (!comfortModeEnabled_) {
+            IncrementRecenterGeneration();
+        }
+        logger_.Write(
+            "INFO", "comfort_mode_set",
+            comfortModeEnabled_
+                ? "World-locked comfort panel enabled from the VR menu."
+                : "Comfort panel disabled from the VR menu; stereo resumes.");
+    }
+
+    void RequestRecenter() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        IncrementRecenterGeneration();
+        logger_.Write(
+            "INFO", "recenter_requested",
+            "The in-game VR menu requested a new neutral HMD pose.");
+    }
+
     BOOL StereoAvailable() const noexcept {
         return config_.stereoEnabled ||
                config_.stereoToggleAllowed ? TRUE : FALSE;
+    }
+
+    BOOL FlatPanelActive() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return stereoHudFlatFrame_ ? TRUE : FALSE;
     }
 
     void RegisterStereoToggle(
@@ -461,6 +562,52 @@ public:
             }
         }
         return FALSE;
+    }
+
+    BOOL ReadInputState(FearVrInputState* output) noexcept {
+        if (output == nullptr) {
+            return FALSE;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!EnsureIpc()) {
+            return FALSE;
+        }
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            const std::uint64_t before =
+                ReadAtomic64(shared_->inputSequence);
+            if ((before & 1ULL) != 0 || before == 0) {
+                continue;
+            }
+            const FearVrInputState snapshot = shared_->input;
+            MemoryBarrier();
+            const std::uint64_t after =
+                ReadAtomic64(shared_->inputSequence);
+            if (before == after && (after & 1ULL) == 0 &&
+                (snapshot.flags & FEARVR_IF_VALID) != 0) {
+                *output = snapshot;
+                return TRUE;
+            }
+        }
+        return FALSE;
+    }
+
+    BOOL WriteHapticRequest(
+        const FearVrHapticRequest* request) noexcept {
+        if (request == nullptr ||
+            (request->flags & FEARVR_HF_VALID) == 0 ||
+            request->requestId == 0) {
+            return FALSE;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!EnsureIpc() || !hostConnected_) {
+            return FALSE;
+        }
+        InterlockedIncrement64(Atomic64(shared_->hapticSequence));
+        MemoryBarrier();
+        shared_->haptic = *request;
+        MemoryBarrier();
+        InterlockedIncrement64(Atomic64(shared_->hapticSequence));
+        return TRUE;
     }
 
     void BeginStereoEye(std::uint32_t eye) noexcept {
@@ -554,6 +701,13 @@ private:
         stereoAccepting_ = false;
     }
 
+    void IncrementRecenterGeneration() noexcept {
+        ++recenterGeneration_;
+        if (recenterGeneration_ == 0) {
+            ++recenterGeneration_;
+        }
+    }
+
     void PollStereoToggle() noexcept {
         if (!config_.stereoToggleAllowed) {
             return;
@@ -589,10 +743,7 @@ private:
             const bool recenterKeyDown =
                 (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
             if (recenterKeyDown && !recenterKeyWasDown_) {
-                ++recenterGeneration_;
-                if (recenterGeneration_ == 0) {
-                    ++recenterGeneration_;
-                }
+                IncrementRecenterGeneration();
                 logger_.Write(
                     "INFO", "recenter_requested",
                     "F9 requested a new neutral HMD orientation.");
@@ -611,10 +762,7 @@ private:
                             ~FEARVR_BF_STEREO_ACTIVE));
                 }
                 if (!comfortModeEnabled_) {
-                    ++recenterGeneration_;
-                    if (recenterGeneration_ == 0) {
-                        ++recenterGeneration_;
-                    }
+                    IncrementRecenterGeneration();
                 }
                 logger_.Write(
                     "INFO", "comfort_mode_toggle",
@@ -2087,6 +2235,42 @@ BOOL IsStereoEnabled() noexcept {
     return GetBridge().StereoEnabled();
 }
 
+void SetStereoEnabled(BOOL enabled) noexcept {
+    GetBridge().SetStereoEnabled(enabled);
+}
+
+BOOL IsTranslationEnabled() noexcept {
+    return GetBridge().TranslationEnabled();
+}
+
+void SetTranslationEnabled(BOOL enabled) noexcept {
+    GetBridge().SetTranslationEnabled(enabled);
+}
+
+BOOL IsStereoHudEnabled() noexcept {
+    return GetBridge().StereoHudEnabled();
+}
+
+void SetStereoHudEnabled(BOOL enabled) noexcept {
+    GetBridge().SetStereoHudEnabled(enabled);
+}
+
+BOOL IsComfortModeEnabled() noexcept {
+    return GetBridge().ComfortModeEnabled();
+}
+
+void SetComfortModeEnabled(BOOL enabled) noexcept {
+    GetBridge().SetComfortModeEnabled(enabled);
+}
+
+void RequestRecenter() noexcept {
+    GetBridge().RequestRecenter();
+}
+
+BOOL IsFlatPanelActive() noexcept {
+    return GetBridge().FlatPanelActive();
+}
+
 void RegisterStereoToggleCallback(
     StereoToggleCallback callback) noexcept {
     GetBridge().RegisterStereoToggle(callback);
@@ -2094,6 +2278,15 @@ void RegisterStereoToggleCallback(
 
 BOOL GetRenderRequest(FearVrRenderRequest* request) noexcept {
     return GetBridge().ReadRenderRequest(request);
+}
+
+BOOL GetInputState(FearVrInputState* input) noexcept {
+    return GetBridge().ReadInputState(input);
+}
+
+BOOL SubmitHapticRequest(
+    const FearVrHapticRequest* request) noexcept {
+    return GetBridge().WriteHapticRequest(request);
 }
 
 void BeginEye(std::uint32_t eye) noexcept {

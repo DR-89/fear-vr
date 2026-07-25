@@ -12,9 +12,16 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(FearVr
-  VERSION 0.0.0
+  VERSION 1.0.0
   DESCRIPTION "Open-source VR mod for F.E.A.R. 1.08 (Singleplayer)"
   LANGUAGES C CXX)
+
+# Vorabkennzeichnung nach SemVer. CMake selbst kennt keine Prerelease-Anhaenge,
+# deshalb steht das Label hier daneben und wird in fearvr-version.cmake zur
+# vollstaendigen Versionszeichenkette zusammengesetzt. Leer lassen fuer ein
+# endgueltiges Release. tools/make-release.ps1 liest beide Werte aus dieser
+# Datei, damit es nur eine Quelle der Wahrheit gibt.
+set(FEARVR_VERSION_LABEL "beta.1")
 
 # ---- Optionen ---------------------------------------------------------------
 option(FEARVR_BUILD_HOST  "Build x64 OpenXR host (fearvr-host.exe)" OFF)

@@ -46,7 +46,20 @@ if ($gitDirty) {
     Write-Host 'WARNUNG: Der Arbeitsbaum ist nicht sauber. Das Paket ist damit keinem Commit eindeutig zuzuordnen.' `
         -ForegroundColor Yellow
 }
-$version = "0.0.0+$gitCommit"
+# Version und Prerelease-Label kommen aus CMakeLists.txt, damit Paketname,
+# Manifest und die in die Binaries kompilierte Versionszeichenkette nicht
+# auseinanderlaufen koennen.
+$cmakeLists = Get-Content -Raw -LiteralPath (Join-Path $cfg.ProjectRoot 'CMakeLists.txt')
+if ($cmakeLists -notmatch '(?m)^\s*VERSION\s+(\d+\.\d+\.\d+)\s*$') {
+    throw 'In CMakeLists.txt wurde keine project(VERSION x.y.z) gefunden.'
+}
+$semver = $Matches[1]
+$label = ''
+if ($cmakeLists -match '(?m)^\s*set\(FEARVR_VERSION_LABEL\s+"([^"]*)"\)') {
+    $label = $Matches[1]
+}
+if ($label) { $semver = "$semver-$label" }
+$version = "$semver+$gitCommit"
 
 $distRoot = Assert-UnderProjectRoot (Join-Path $cfg.ProjectRoot 'dist')
 $packageName = "fearvr-$version"

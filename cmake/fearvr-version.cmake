@@ -4,6 +4,14 @@ set(FEARVR_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(FEARVR_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(FEARVR_VERSION_PATCH ${PROJECT_VERSION_PATCH})
 
+# Vollstaendige SemVer-Zeichenkette inklusive Prerelease-Anhang aus
+# FEARVR_VERSION_LABEL (in CMakeLists.txt gesetzt, darf leer sein).
+if(FEARVR_VERSION_LABEL STREQUAL "")
+  set(FEARVR_VERSION_FULL "${PROJECT_VERSION}")
+else()
+  set(FEARVR_VERSION_FULL "${PROJECT_VERSION}-${FEARVR_VERSION_LABEL}")
+endif()
+
 # Git-Kurz-Hash (falls verfügbar) für Log-/Diagnosezwecke.
 find_package(Git QUIET)
 set(FEARVR_GIT_HASH "unknown")

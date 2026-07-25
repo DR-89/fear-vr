@@ -311,6 +311,12 @@ ULONGLONG g_lastWeaponManagerUpdateTick = 0;
 // Laeuft das Weapon-Manager-Update, ist ein normaler Spielframe aktiv.
 // Zwischensequenzen, Ladebildschirme und Menues halten es an.
 constexpr ULONGLONG kPlayingFrameFreshMilliseconds = 500;
+// Retail-Spielzustand (`CInterfaceMgr::m_eGameState`). Er ist die einzige
+// verlaessliche Quelle dafuer, ob gerade ein Vollbild-UI laeuft.
+const void* const* g_retailInterfaceMgrPointer = nullptr;
+bool g_retailGameStateResolveAttempted = false;
+bool g_disableRetailGameState = false;
+int g_lastReportedRetailGameState = -2;
 LONG g_commandInjectionSuspendedLogged = 0;
 bool g_autoStereoActivationAttempted = false;
 bool g_crosshairOverrideApplied = false;
@@ -478,6 +484,26 @@ constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
 constexpr std::size_t kRetailRightWeaponModelObjectOffset = 0x1C;
 constexpr std::size_t kRetailRightWeaponMuzzleSocketOffset = 0x50;
 constexpr int kRetailTrackerGroupAimAt = 1;
+// UI-Zustand fuer den Flachbildmodus. Herleitung in
+// docs/RETAIL-ACTIVATION.md: `g_pInterfaceMgr` liegt als Zeiger bei
+// GameOrig+0x2E1BAC, `m_eGameState` als dword bei +0x08.
+constexpr std::uintptr_t kRetailInterfaceMgrPointerRva = 0x002E1BACU;
+constexpr std::size_t kRetailInterfaceMgrGameStateOffset = 0x08;
+// Ladestelle des Zeigers in CInterfaceResMgr::DrawScreen. Belegt, dass die
+// RVA in dieser Binary wirklich der Interface-Manager ist, und liefert die
+// relozierte Adresse.
+constexpr std::uintptr_t kRetailInterfaceMgrLoadSiteRva = 0x000FE51CU;
+// `cmp dword ptr [ecx+8], GS_MENU; setne al; ret` — der kleinste Beweis
+// dafuer, dass der Spielzustand als dword bei +0x08 steht.
+constexpr std::uintptr_t kRetailGameStateMenuTestRva = 0x000EF900U;
+// `mov eax,[ecx+8]; cmp eax, GS_MOVIE; ja ...` — Sprungtabelle ueber genau
+// zehn Zustaende, also dieselbe Enum-Reihenfolge wie im SDK.
+constexpr std::uintptr_t kRetailGameStateSwitchRva = 0x000F1F20U;
+// GS_UNDEFINED=0, GS_PLAYING=1, GS_EXITINGLEVEL=2, GS_LOADINGLEVEL=3,
+// GS_SPLASHSCREEN=4, GS_MENU=5, GS_SCREEN=6, GS_PAUSED=7, GS_DEMOSCREEN=8,
+// GS_MOVIE=9. Nur GS_PLAYING rendert die Welt; alles andere ist Flachbild.
+constexpr int kRetailGameStatePlaying = 1;
+constexpr int kRetailGameStateCount = 10;
 constexpr unsigned char kRetailPlayerCameraForwarder[] = {
     0x8B, 0x54, 0x24, 0x04, // mov edx,[esp+4]
     0x8B, 0x01,             // mov eax,[ecx]
@@ -837,6 +863,10 @@ void ConfigureComfortOptions() noexcept {
         CommandLineContains(L"-fearvr-no-aim-hooks");
     g_disableInteractionHooks =
         safeMode || CommandLineContains(L"-fearvr-no-interaction");
+    // Notausstieg zurueck auf die alte Heuristik, falls das Lesen des
+    // Retail-Spielzustands je Aerger macht.
+    g_disableRetailGameState =
+        CommandLineContains(L"-fearvr-no-gamestate");
     // Der AimAt-Hook wird NICHT mehr installiert.
     //
     // Belegt am 25.07.2026: An einer geskripteten Szene, in der ein NPC
@@ -5010,6 +5040,147 @@ void PollFlashlightToggle() noexcept {
     g_leftTriggerWasDown = leftTriggerDown;
 }
 
+// Sucht den Zeiger auf `CInterfaceMgr` und belegt dabei, dass der
+// Spielzustand in dieser Binary wirklich bei +0x08 liegt.
+//
+// Zwei unabhaengige Proben:
+//   1. Die Ladestelle in CInterfaceResMgr::DrawScreen (`mov ecx,[imm32]`)
+//      liefert die relozierte Adresse des Globals. Passt sie nicht zur
+//      erwarteten RVA, ist das Layout ein anderes.
+//   2. Zwei kleine Zugriffsfunktionen lesen den Zustand bei +0x08 — einmal
+//      als Menuetest, einmal als Sprungtabelle ueber genau zehn Werte.
+void ResolveRetailGameStatePointer() noexcept {
+    if (g_retailGameStateResolveAttempted) {
+        return;
+    }
+    g_retailGameStateResolveAttempted = true;
+    if (g_disableRetailGameState) {
+        Report(
+            "WARN", "retail_game_state_skipped",
+            "Diagnostic switch: the flat-panel decision falls back to the "
+            "weapon-manager freshness heuristic.");
+        return;
+    }
+
+    HMODULE module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr) {
+        return;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(module);
+    __try {
+        const auto* const dos =
+            reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew <= 0) {
+            return;
+        }
+        const auto* const nt =
+            reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->FileHeader.TimeDateStamp !=
+                kRetailGameClientTimeDateStamp ||
+            nt->OptionalHeader.SizeOfImage !=
+                kRetailGameClientSizeOfImage) {
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+
+    // cmp dword ptr [ecx+8], 5 (GS_MENU); setne al; ret
+    constexpr unsigned char kMenuTest[] = {
+        0x83, 0x79, 0x08, 0x05, 0x0F, 0x95, 0xC0, 0xC3};
+    // mov al,[ecx+0x370C]; test al,al; jne …; mov eax,[ecx+8];
+    // cmp eax, 9 (GS_MOVIE); ja …
+    constexpr unsigned char kStateSwitch[] = {
+        0x8A, 0x81, 0x0C, 0x37, 0x00, 0x00, 0x84, 0xC0,
+        0x75, 0x41, 0x8B, 0x41, 0x08, 0x83, 0xF8,
+        static_cast<unsigned char>(kRetailGameStateCount - 1)};
+    if (!MatchesCode(
+            base + kRetailGameStateMenuTestRva, kMenuTest,
+            sizeof(kMenuTest)) ||
+        !MatchesCode(
+            base + kRetailGameStateSwitchRva, kStateSwitch,
+            sizeof(kStateSwitch))) {
+        Report(
+            "ERROR", "retail_game_state_layout_mismatch",
+            "The Retail game-state accessors did not match; the flat-panel "
+            "decision falls back to the weapon-manager heuristic.");
+        return;
+    }
+
+    const void* const* candidate = nullptr;
+    __try {
+        auto* const loadSite = base + kRetailInterfaceMgrLoadSiteRva;
+        // mov ecx, dword ptr [imm32]
+        if (loadSite[0] != 0x8B || loadSite[1] != 0x0D) {
+            Report(
+                "ERROR", "retail_game_state_layout_mismatch",
+                "The interface-manager load site is not the expected "
+                "absolute move.");
+            return;
+        }
+        std::uintptr_t address = 0;
+        std::memcpy(&address, loadSite + 2, sizeof(address));
+        if (address !=
+            reinterpret_cast<std::uintptr_t>(
+                base + kRetailInterfaceMgrPointerRva)) {
+            Report(
+                "ERROR", "retail_game_state_layout_mismatch",
+                "The interface-manager global does not sit at the expected "
+                "relative address.");
+            return;
+        }
+        candidate = reinterpret_cast<const void* const*>(address);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+
+    g_retailInterfaceMgrPointer = candidate;
+    Report(
+        "INFO", "retail_game_state_available",
+        "The Retail interface manager reports the game state; fullscreen "
+        "screens now select the flat panel directly.");
+}
+
+// Der aktuelle Retail-Spielzustand, oder -1 solange er nicht lesbar ist.
+int ReadRetailGameState() noexcept {
+    ResolveRetailGameStatePointer();
+    if (g_retailInterfaceMgrPointer == nullptr) {
+        return -1;
+    }
+    int state = -1;
+    __try {
+        const auto* const manager =
+            reinterpret_cast<const unsigned char*>(
+                *g_retailInterfaceMgrPointer);
+        if (manager == nullptr) {
+            return -1;
+        }
+        std::int32_t value = 0;
+        std::memcpy(
+            &value, manager + kRetailInterfaceMgrGameStateOffset,
+            sizeof(value));
+        if (value < 0 || value >= kRetailGameStateCount) {
+            return -1;
+        }
+        state = static_cast<int>(value);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+    if (state != g_lastReportedRetailGameState) {
+        g_lastReportedRetailGameState = state;
+        char message[128];
+        _snprintf_s(
+            message, sizeof(message), _TRUNCATE,
+            "state=%d playing=%d", state,
+            state == kRetailGameStatePlaying ? 1 : 0);
+        Report("INFO", "retail_game_state", message);
+    }
+    return state;
+}
+
 void PollControllerMenuInput() noexcept {
     PollFlashlightToggle();
     const std::uint32_t buttons = g_currentInput.buttons;
@@ -5062,19 +5233,23 @@ void PollControllerMenuInput() noexcept {
         now - g_lastWeaponManagerUpdateTick <= kPlayingFrameFreshMs;
     const bool menuActivationHeld =
         now < g_menuActivationHoldUntil;
-    // Beide Signale muessen gelten, nicht nur das jeweils genauere.
+    // Der Retail-Spielzustand entscheidet, sobald er lesbar ist.
     //
-    // Der Retail-Fokus kennt ausschliesslich Pausenmenues. Vollbildschirme des
-    // Spiels — das Missionsbriefing etwa — melden keinen Menuefokus, halten
-    // aber genauso den Weapon-Manager an. Wurde der Fokus einmal gelesen,
-    // hat sein "kein Menue" bisher den Frischetest verdraengt: Solche
-    // Bildschirme galten dann als Spiel, ihre Vollbilddarstellung fiel im
-    // Compositor zwischen HUD-Overlay und Flachbild und wurde verworfen. Im
-    // Headset blieb die Welt stehen, waehrend das Desktopfenster das Briefing
-    // zeigte.
+    // Die frueheren Ersatzsignale reichten fuer Vollbildschirme wie das
+    // Missionsbriefing nicht: Der Menuefokus kennt nur Pausenmenues, und der
+    // Weapon-Manager laeuft waehrend eines Briefings weiter. Das Briefing galt
+    // damit als Spielframe, fiel im Compositor zwischen HUD-Overlay und
+    // Flachbild und wurde verworfen — im Headset blitzte es nur waehrend der
+    // Umschaltframes auf und verschwand wieder.
+    //
+    // `CInterfaceMgr::m_eGameState` ist dagegen exakt: Nur GS_PLAYING rendert
+    // die Welt, jeder andere Zustand ist ein Vollbild-UI.
+    const int retailGameState = ReadRetailGameState();
     const bool menuActive =
-        menuActivationHeld || !playingFrameFresh ||
-        (g_menuFocusKnown && g_menuFocusActive);
+        retailGameState >= 0
+            ? retailGameState != kRetailGameStatePlaying
+            : (menuActivationHeld || !playingFrameFresh ||
+               (g_menuFocusKnown && g_menuFocusActive));
     if (g_setMenuActive != nullptr) {
         __try {
             g_setMenuActive(menuActive ? TRUE : FALSE);

@@ -76,6 +76,62 @@ Teilrotationen aus, statt einen fertigen Member zu liefern.
 - `+0xB4` — `m_ActivationData.m_vPos`
 - `+0xC0` — `m_ActivationData.m_rRot`
 
+## Gelöst: UI-Zustand für den Flachbildmodus
+
+Der Compositor braucht ein verlässliches Signal, wann ein Retail-Vollbild-UI
+aktiv ist — sonst fällt etwa das Missionsbriefing zwischen HUD-Overlay und
+Flachbild und wird verworfen (`stereo_hud_rejected`, `coverage_percent≈99`).
+Die Pixelabdeckung darf das nicht entscheiden, weil Slow-Mo genauso
+flächendeckend ist. Die Ersatzsignale taugten ebenfalls nicht: Der
+Menüfokus kennt nur Pausenmenüs, und der Weapon-Manager läuft während eines
+Briefings weiter, sodass die Frischeheuristik es als Spielframe wertete.
+
+Die Enum-Reihenfolge aus `Source/Game/ClientShellDLL/InterfaceMgr.h`:
+
+```text
+GS_UNDEFINED=0, GS_PLAYING, GS_EXITINGLEVEL, GS_LOADINGLEVEL,
+GS_SPLASHSCREEN, GS_MENU, GS_SCREEN, GS_PAUSED, GS_DEMOSCREEN, GS_MOVIE
+```
+
+Alles außer `GS_PLAYING` gehört ins Flachbild.
+
+### Vermessene Fakten (GameOrig.dll, Retail 1.08)
+
+- **`g_pInterfaceMgr` liegt als Zeiger bei RVA `0x002E1BAC`.** 367
+  Referenzen in `.text`; die Ladestelle `mov ecx,[imm32]` bei RVA
+  `0x000FE51C` steht in `CInterfaceResMgr::DrawScreen` (identifiziert über
+  den Assert-String `0x296618`) und dient im Code als Beleg, weil sie die
+  relozierte Adresse mitliefert.
+- **`m_eGameState` ist ein dword bei `+0x08`.** Drei unabhängige Belege,
+  alle mit `ecx = [0x002E1BAC]` aufgerufen:
+  - `0x000EF900`: `cmp dword ptr [ecx+8], 5; setne al; ret` — Test gegen
+    `GS_MENU`.
+  - `0x000F2510`: liefert `true` für die Werte 1…2, also `GS_PLAYING`
+    und `GS_EXITINGLEVEL` („ist in der Welt“).
+  - `0x000F1F20`: `mov eax,[ecx+8]; cmp eax,9; ja …` mit Sprungtabelle über
+    genau zehn Zustände — dieselbe Anzahl wie die SDK-Enum.
+- Zwei frühere Anker bleiben **Sackgassen**, nicht erneut versuchen: die
+  Namenstabelle `GS_MOVIE`…`GS_UNDEFINED` (`0x294D58`…`0x294DE4`) und die
+  `InterfaceMgr::…`-Strings sind unreferenzierte tote Debug-Strings; die
+  Dateinamen-Strings `ScreenMgr.cpp` (`0x2A452D`) und `InterfaceMgr.cpp`
+  (`0x295145`) haben ebenfalls keine Referenz.
+
+### Umsetzung
+
+In `stereo_hook.cpp`:
+
+- `ResolveRetailGameStatePointer()` prüft einmalig Modulidentität
+  (TimeDateStamp/SizeOfImage), die Bytefolgen der beiden Zugriffsfunktionen
+  und die Ladestelle und merkt sich den Zeiger. Schlägt eine Probe fehl,
+  bleibt der alte Heuristikpfad aktiv und es wird
+  `retail_game_state_layout_mismatch` geloggt.
+- `ReadRetailGameState()` liest den Zustand pro Frame und loggt jeden
+  Wechsel als `retail_game_state` (`state=<n> playing=<0|1>`).
+- `PollControllerMenuInput()` setzt das Flachbild jetzt genau dann, wenn der
+  Zustand bekannt und ungleich `GS_PLAYING` ist. Menüfokus, Escape-Haltezeit
+  und Weapon-Manager-Frische greifen nur noch als Rückfallebene.
+- Notausstieg: `-fearvr-no-gamestate` erzwingt die alte Heuristik.
+
 ## Umsetzung (in `stereo_hook.cpp`)
 
 `CheckForIntersect` liest die Kamera **ausschließlich** in den ersten

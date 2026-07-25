@@ -45,11 +45,15 @@ Folgende Punkte funktionieren:
     Triggerflanke, damit auch Dauerfeuer vibriert
   - HUD-Stauchung: gleichmaessig zur Bildmitte (5/4) statt zonenweiser
     Verschiebungen, die HUD-Elemente an den Zonengrenzen zerschnitten haben
-  - Flachbildzustand: Menuefokus UND Weapon-Manager-Frische werden jetzt
-    oder-verknuepft. Der Fokus kennt nur Pausenmenues; Vollbildschirme wie das
-    Missionsbriefing wurden dadurch als Spiel gewertet und vom Compositor
-    verworfen — im Headset blieb die Welt stehen, das Desktopfenster zeigte
-    das Briefing.
+  - Flachbildzustand kommt jetzt aus dem Retail-Spielzustand
+    `CInterfaceMgr::m_eGameState` (Zeiger `GameOrig+0x2E1BAC`, Zustand bei
+    `+0x08`, nur `GS_PLAYING=1` rendert die Welt). Menuefokus, Escape-
+    Haltezeit und Weapon-Manager-Frische sind nur noch Rueckfallebene: Der
+    Fokus kennt nur Pausenmenues, und der Weapon-Manager laeuft waehrend
+    eines Briefings weiter — das Briefing blitzte deshalb nur in den
+    Umschaltframes auf. Herleitung: `docs/RETAIL-ACTIVATION.md`; Notausstieg
+    `-fearvr-no-gamestate`; Logereignis `retail_game_state`.
+    Gebaut und gestaged, aber noch **nicht im Spiel getestet**.
   - Retail-Taschenlampe entfaellt komplett (Kommandopuls und Kamera-Override
     entfernt). Sie war die zweite, nicht schaltbare Lichtquelle, die nach
     Zwischensequenzen sichtbar neben dem Handscheinwerfer stand.

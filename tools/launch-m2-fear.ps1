@@ -390,13 +390,18 @@ if ($Milestone -ne 'M2') {
         if ($Milestone -eq 'M5') {
             Write-Host (
                 'M5-Controller: linker Stick bewegt, rechter Stick dreht; ' +
-                'rechts hoch/runter wählt nächste/vorherige Waffe. ' +
-                'A springt, B lädt nach, X duckt, Y schaltet Zeitlupe.'
+                'rechts hoch springt, runter duckt (ab 80 Prozent). ' +
+                'A wechselt die Waffe, B kurz lädt nach, B gehalten wirft ' +
+                'eine Granate, X schaltet Zeitlupe, Y öffnet Pause.'
             )
             Write-Host (
-                'Linker Grip rennt, linker Stick-Klick öffnet Pause, ' +
+                'Linker Grip rennt, linker Stick-Klick duckt ebenfalls, ' +
                 'rechter Grip benutzt, Trigger zielen/feuern; ' +
                 'rechter Stick-Klick setzt Recenter.'
+            )
+            Write-Host (
+                'Der rechte Grip aktiviert und nimmt auf, worauf die Waffe ' +
+                'zeigt (Reichweite rund 1,5 m).'
             )
             Write-Host (
                 'Die linke Hand seitlich neigen lehnt um die Ecke: ' +

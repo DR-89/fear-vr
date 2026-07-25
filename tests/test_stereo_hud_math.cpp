@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <iostream>
 
 #include "stereo_hud_math.h"
@@ -52,28 +53,52 @@ int main() {
         !fearvr::IsFlatPanelCoverage(2, 100),
         "a sparse HUD must not select the flat panel");
     ok &= Expect(
-        fearvr::StereoHudSourceRow(300, 768) == 300,
-        "the upper half and crosshair region must stay in place");
-    ok &= Expect(
-        fearvr::StereoHudSourceRow(450, 768) == 450,
-        "the complete reticle region must stay in place");
-    ok &= Expect(
-        fearvr::StereoHudSourceRow(500, 768) == 596,
-        "the lower HUD must move up by one eighth");
-    ok &= Expect(
-        fearvr::StereoHudSourceRow(700, 768) == 768,
-        "rows beyond the shifted source must be clipped");
-    ok &= Expect(
-        fearvr::StereoHudSourceColumn(132, 600, 1024, 768) == 100,
-        "the lower-left HUD must move slightly right");
-    ok &= Expect(
-        fearvr::StereoHudSourceColumn(200, 300, 1024, 768) == 72,
-        "the left-side weapon HUD must move substantially inward");
-    ok &= Expect(
-        fearvr::StereoHudSourceColumn(748, 400, 1024, 768) == 850,
-        "the right-side HUD must move toward the reticle");
+        fearvr::StereoHudSourceRow(384, 768) == 384,
+        "the image centre must remain unchanged");
     ok &= Expect(
         fearvr::StereoHudSourceColumn(512, 384, 1024, 768) == 512,
         "the reticle column must remain unchanged");
+    ok &= Expect(
+        fearvr::StereoHudSourceRow(500, 768) == 529,
+        "the lower HUD must move up toward the centre");
+    ok &= Expect(
+        fearvr::StereoHudSourceColumn(200, 300, 1024, 768) == 122,
+        "the left-side HUD must move inward");
+    ok &= Expect(
+        fearvr::StereoHudSourceColumn(748, 400, 1024, 768) == 807,
+        "the right-side HUD must move inward");
+    ok &= Expect(
+        fearvr::StereoHudSourceRow(20, 768) == 768,
+        "rows whose source lies outside the image must be clipped");
+
+    // Der eigentliche Fehler der frueheren Zonenverschiebung: Ein HUD-Element,
+    // das eine Zonengrenze kreuzte, wurde zerschnitten. Eine stetige und
+    // monotone Abbildung kann das grundsaetzlich nicht — benachbarte
+    // Ausgabespalten duerfen in der Quelle nie auseinanderspringen.
+    std::uint32_t previous = 0;
+    bool contiguous = true;
+    bool monotonic = true;
+    for (std::uint32_t column = 1; column < 1024; ++column) {
+        const std::uint32_t source =
+            fearvr::StereoHudSourceColumn(column, 384, 1024, 768);
+        if (source >= 1024) {
+            continue;
+        }
+        if (previous != 0) {
+            if (source < previous) {
+                monotonic = false;
+            }
+            if (source - previous > 2) {
+                contiguous = false;
+            }
+        }
+        previous = source;
+    }
+    ok &= Expect(
+        monotonic, "the column mapping must never run backwards");
+    ok &= Expect(
+        contiguous,
+        "neighbouring columns must stay neighbours, so no HUD element is "
+        "torn apart");
     return ok ? 0 : 1;
 }

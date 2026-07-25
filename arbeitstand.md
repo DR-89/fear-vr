@@ -29,16 +29,35 @@ Folgende Punkte funktionieren:
 - Controller-Steuerung im Spiel funktioniert:
   - linker Stick: Bewegung
   - rechter Stick links/rechts: Drehen
-  - rechter Stick hoch/runter: Waffenwahl
-  - A: Springen
-  - B: Nachladen
-  - X: Ducken
-  - Y: Zeitlupe
+  - rechter Stick hoch/runter: Springen/Ducken, erst ab 80 % Rohausschlag
+    (der deadzonebereinigte Wert waere gestaucht)
+  - A: Waffenwechsel, zyklisch vorwaerts
+  - B kurz: Nachladen; B ab 350 ms gehalten: Granate werfen
+    (COMMAND_ID_THROW_GRENADE = 81)
+  - X: Zeitlupe
+  - Y: Pausenmenü
   - linker Grip: Rennen
   - rechter Grip: Benutzen
   - Trigger: Zielen/Feuern
   - rechter Stick-Klick: Recenter
-  - linker Stick-Klick: Pausenmenü
+  - linker Stick-Klick: frei (Ducken liegt allein auf dem rechten Stick)
+  - Haptik je Schuss ueber den Fire-Vectors-Aufruf statt ueber die
+    Triggerflanke, damit auch Dauerfeuer vibriert
+  - HUD-Stauchung: gleichmaessig zur Bildmitte (5/4) statt zonenweiser
+    Verschiebungen, die HUD-Elemente an den Zonengrenzen zerschnitten haben
+  - Flachbildzustand: Menuefokus UND Weapon-Manager-Frische werden jetzt
+    oder-verknuepft. Der Fokus kennt nur Pausenmenues; Vollbildschirme wie das
+    Missionsbriefing wurden dadurch als Spiel gewertet und vom Compositor
+    verworfen — im Headset blieb die Welt stehen, das Desktopfenster zeigte
+    das Briefing.
+  - Retail-Taschenlampe entfaellt komplett (Kommandopuls und Kamera-Override
+    entfernt). Sie war die zweite, nicht schaltbare Lichtquelle, die nach
+    Zwischensequenzen sichtbar neben dem Handscheinwerfer stand.
+- Aktivieren und Aufsammeln folgen dem Waffenstrahl statt der Blickrichtung
+  (Hooks auf `CTargetMgr::CheckForIntersect` und `ObjectDetector::Update`,
+  Reichweite 60 Einheiten). Gebaut, aber noch **nicht im Spiel getestet**.
+  Adressen und Layouts: `docs/RETAIL-ACTIVATION.md`; Notausstieg
+  `-fearvr-no-interaction`.
 - Die linke System-/Menütaste kann nicht für Pause verwendet werden, weil
   SteamVR sie abfängt und sein eigenes Systemmenü öffnet.
 - Das native englische VR-Menü im ESC-Menü ist jetzt laut Benutzer völlig in

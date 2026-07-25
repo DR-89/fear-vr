@@ -49,15 +49,33 @@ fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
 
 ## Spielbelegung
 
-- linker Stick: Bewegen; linker Grip: Rennen; linker Stick-Klick: Pause;
-- rechter Stick links/rechts: Drehen; hoch/runter: Waffenwechsel;
-- A: Springen; B: Nachladen; X: Ducken; Y: Zeitlupe;
+- linker Stick: Bewegen; linker Grip: Rennen;
+- rechter Stick links/rechts: Drehen; hoch: Springen; runter: Ducken
+  (jeweils ab 80 % Ausschlag);
+- A: Waffenwechsel; B kurz: Nachladen; B gehalten: Granate werfen;
+- X: Zeitlupe; Y: Pause;
 - rechter Grip: Benutzen; rechter Trigger: Feuern; linker Trigger: Fokus;
 - rechter Stick-Klick: Headtracking-Recenter;
 - linke Hand seitlich neigen: um die Ecke lehnen.
 
-Maus, Tastatur und vorhandenes Gamepad bleiben parallel nutzbar. Der rechte
-Feuer-Trigger erzeugt einen kurzen Haptikimpuls.
+Maus, Tastatur und vorhandenes Gamepad bleiben parallel nutzbar.
+
+Jeder abgefeuerte Schuss erzeugt einen kurzen Haptikimpuls, auch im
+Dauerfeuer. Auslöser ist der Retail-Aufruf der Fire-Vectors, den beide
+Feuerpfade genau einmal pro Schuss ausführen — nicht die Triggerflanke. Damit
+vibriert der Controller bei leerem Magazin korrekt gar nicht.
+
+### Zeigen statt hinsehen: Aktivieren und Aufnehmen
+
+Retail sucht Schalter und Items entlang der Kamerablickrichtung. In VR ist das
+die Kopfrichtung, was weder zum Zeigen noch zum Aufsammeln taugt — Items lagen
+bisher nur beim Draufstehen im Zugriff. Beide Suchen folgen deshalb jetzt der
+Waffenmündung, also demselben Strahl, den auch die rote Zielhilfe zeichnet:
+Der rechte Grip aktiviert, worauf gezeigt wird, und nimmt auf, worauf gezeigt
+wird. Die Reichweite beträgt rund 1,5 m.
+
+Herleitung der dafür verwendeten Retail-Adressen, Speicherlayouts und die
+Absicherung gegen abweichende Binärversionen: `docs/RETAIL-ACTIVATION.md`.
 
 ### Lehnen über die Handneigung
 
@@ -118,11 +136,19 @@ erhalten und werden weiterhin aus `fearvr.ini` gelesen und dorthin
 geschrieben, stehen aber nicht auf der sichtbaren Seite. Ein zweistufiges Menü
 wurde verworfen.
 
-Die Spielertaschenlampe ist im VR-Modus dauerhaft und ohne Batterieverbrauch
-aktiv. Ihr Ursprung folgt der linken Grip-Pose, ihre Strahlrichtung der linken
-Aim-Pose. Die Retail-Kamera wird nur während des Taschenlampenupdates
-vorübergehend auf diese Pose gesetzt und vor dem Rendern beider Augen
-wiederhergestellt.
+Die Taschenlampe ist ein eigener Spot-Projektor an der linken Hand, ohne
+Batterieverbrauch und über einen Klick auf den linken Trigger schaltbar. Ihr
+Ursprung folgt der linken Grip-Pose, ihre Strahlrichtung der linken Aim-Pose.
+
+Die **Retail**-Taschenlampe wird dafür nicht mehr benutzt. Sie wurde früher per
+Kommandopuls dauerhaft eingeschaltet und folgte der Kamera, die währenddessen
+auf die Handpose gesetzt wurde. Im Normalfall lagen beide Lampen übereinander
+und fielen nicht auf — nach Zwischensequenzen aber ruht der Kameraeingriff,
+weil die Kamera dann der Engine gehört. Die Retail-Lampe leuchtete in diesem
+Moment wieder vom Kopf aus, während der Handscheinwerfer weiterlief: zwei
+getrennte Kegel, deren Lichtfelder sich addierten, und nur einer davon ließ
+sich ausschalten. Der Handscheinwerfer allein deckt denselben Zweck ab und
+spart zugleich einen Kameraeingriff in geskripteten Szenen.
 
 ### Warum die Auswahl gesprungen ist
 

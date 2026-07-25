@@ -168,12 +168,14 @@ sie vollständig, und es wird keine SteamVR-Datei angefasst.
 über `steam.exe -applaunch 21090` gestartet. Das ist unabhängig davon, welche
 VR-Runtime rendert. SteamVR selbst muss unter VDXR nicht laufen.
 
-Belegung: linker Stick bewegt, linker Grip rennt, linker Stick-Klick öffnet
-die Pause. Rechter Stick dreht, hoch/runter wechselt die Waffe, Stick-Klick
-zentriert die Blickrichtung. A springt, B lädt nach, X duckt, Y schaltet
-Zeitlupe. Rechter Grip benutzt, die Trigger zielen und feuern. Die linke Hand
-seitlich zu neigen lehnt um die Ecke. Die Taschenlampe ist dauerhaft an und
-ihr Strahl folgt Position und Zielrichtung der linken Hand. Maus, Tastatur und
+Belegung: linker Stick bewegt, linker Grip rennt, linker Stick-Klick duckt.
+Rechter Stick dreht; ab 80 % Ausschlag springt er nach oben und duckt nach
+unten, Stick-Klick zentriert die Blickrichtung. A wechselt die Waffe, B lädt
+kurz gedrückt nach und wirft gehalten eine Granate, X schaltet Zeitlupe,
+Y öffnet die Pause. Rechter Grip benutzt, die Trigger zielen und feuern. Die linke Hand
+seitlich zu neigen lehnt um die Ecke. Die Taschenlampe sitzt in der linken
+Hand, folgt deren Position und Zielrichtung und wird mit einem Klick auf den
+linken Trigger geschaltet. Jeder Schuss vibriert. Maus, Tastatur und
 Gamepad bleiben parallel nutzbar. Details: `docs/OPENXR-INPUT.md`.
 
 Im Ego-Blick sind nur Hände und Waffe zu sehen; Ober- und Unterarm sind

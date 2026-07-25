@@ -87,13 +87,13 @@ VR-Runtime rendert; SteamVR selbst muss unter Virtual Desktop nicht laufen.
 |---|---|
 | linker Stick | Bewegen |
 | linker Grip | Rennen |
-| linker Stick-Klick | Pausenmenü |
+| linker Stick-Klick | Ducken |
 | rechter Stick links/rechts | Drehen |
-| rechter Stick hoch/runter | Waffenwahl |
+| rechter Stick hoch/runter | Springen / Ducken (ab 80 %) |
 | rechter Stick-Klick | Blickrichtung zentrieren |
 | rechter Grip | Benutzen |
 | Trigger | Zielen und Feuern |
-| A / B / X / Y | Springen / Nachladen / Ducken / Zeitlupe |
+| A / B / X / Y | Waffenwahl / Nachladen (gehalten: Granate) / Zeitlupe / Pausenmenü |
 | linke Hand seitlich neigen | um die Ecke lehnen |
 
 Tastatur: **F8** Stereo an/aus, **F9** zentrieren, **F10** raumfester

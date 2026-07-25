@@ -137,6 +137,22 @@ RetailListSetSelectionFunction g_retailListSetSelection = nullptr;
 void* g_retailMenuInitTarget = nullptr;
 void* g_retailMenuOnCommandTarget = nullptr;
 void* g_retailMenuOnFocusTarget = nullptr;
+// Strahlbasierte Interaktion: beides sind thiscall-Ziele, edx bleibt ungenutzt.
+using RetailCheckForIntersectFunction =
+    void(__fastcall*)(void*, void*, float*);
+using RetailObjectDetectorUpdateFunction =
+    void(__fastcall*)(void*, void*, float);
+RetailCheckForIntersectFunction g_retailCheckForIntersect = nullptr;
+RetailObjectDetectorUpdateFunction g_retailObjectDetectorUpdate = nullptr;
+void* g_retailCheckForIntersectTarget = nullptr;
+void* g_retailObjectDetectorUpdateTarget = nullptr;
+void** g_retailPlayerMgrPointer = nullptr;
+volatile LONG g_interactionRayActiveLogged = 0;
+bool g_interactionReachOriginalKnown = false;
+bool g_interactionReachApplied = false;
+float g_activationReachOriginal = 0.0F;
+float g_pickupReachOriginal = 0.0F;
+volatile LONG g_pickupRayActiveLogged = 0;
 void* g_retailWeaponManagerUpdateTarget = nullptr;
 void* g_retailGetFireVectorsTarget = nullptr;
 void* g_retailSetTrackedTargetTarget = nullptr;
@@ -199,8 +215,6 @@ volatile LONG g_weaponHandTrackingFailureLogged = 0;
 volatile LONG g_weaponAimGuideActiveLogged = 0;
 volatile LONG g_handPoseGapBridgedLogged = 0;
 volatile LONG g_weaponSocketSyncActiveLogged = 0;
-volatile LONG g_leftHandFlashlightActiveLogged = 0;
-volatile LONG g_flashlightForcedOnLogged = 0;
 volatile LONG g_armGeometryInspectedLogged = 0;
 volatile LONG g_armGeometryEmptyAttempts = 0;
 volatile LONG g_armGeometryNeverAvailableLogged = 0;
@@ -219,7 +233,8 @@ ULONGLONG g_lastInputSampleTick = 0;
 std::uint32_t g_lastInputButtons = 0;
 std::uint32_t g_lastActiveHands = 0;
 bool g_controllerRecenterWasDown = false;
-bool g_fireTriggerWasDown = false;
+ULONGLONG g_lastFireHapticTick = 0;
+volatile LONG g_fireHapticActiveLogged = 0;
 std::uint32_t g_lastMenuButtons = 0;
 bool g_lastMenuTriggerDown = false;
 bool g_menuAxisDown[4]{};
@@ -233,11 +248,13 @@ bool g_seenForwardAxisBinding = false;
 bool g_seenStrafeAxisBinding = false;
 bool g_controllerCommandActive[128]{};
 bool g_injectedCommandActive[128]{};
-ULONGLONG g_weaponSwitchHoldStartTick = 0;
-ULONGLONG g_weaponSwitchNextRepeatTick = 0;
-int g_weaponSwitchDirection = 0;
+ULONGLONG g_weaponSwitchPulseUntil = 0;
 bool g_weaponSwitchTriggered = false;
-std::uint32_t g_weaponSwitchPulseCommand = 0;
+ULONGLONG g_secondaryHoldStartTick = 0;
+ULONGLONG g_reloadPulseUntil = 0;
+ULONGLONG g_grenadePulseUntil = 0;
+bool g_secondaryWasDown = false;
+bool g_grenadeConsumed = false;
 thread_local bool g_semanticBitsInjected = false;
 FearVrInputState g_currentInput{};
 struct WeaponAimState {
@@ -273,8 +290,6 @@ bool g_flashlightCameraOverridePending = false;
 // Zwischensequenz kann die Spielkamera austauschen; dann darf der gemerkte
 // Transform nicht in ein fremdes oder totes Objekt zurueckgeschrieben werden.
 HLOCALOBJ g_flashlightOverrideObject = nullptr;
-bool g_flashlightCommandPulsePending = false;
-bool g_flashlightCommandPulseActive = false;
 bool g_flashlightEnabled = true;
 bool g_leftTriggerWasDown = false;
 struct TrackedPoseCache {
@@ -332,6 +347,7 @@ bool g_disableClientUpdateWork = false;
 // Laesst Weapon-Manager-, AimAt- und Fire-Vector-Hook ungesetzt. Diese Gruppe
 // war in jedem abgestuerzten Lauf aktiv und im einzigen ueberlebenden nicht.
 bool g_disableAimHooks = false;
+bool g_disableInteractionHooks = false;
 // Nur der AimAt-Node-Tracker. Er laeuft fuer jeden Charakter, nicht nur fuer
 // den Spieler, und ist damit der Kandidat fuer den NPC in der Problemszene.
 bool g_disableAimAtHook = false;
@@ -442,8 +458,20 @@ constexpr std::uintptr_t kRetailAccuracyManagerRva = 0x00009007U;
 // m_hPlayerBody at +0x10.
 constexpr std::uintptr_t kRetailPlayerBodyManagerRva = 0x002D7380U;
 constexpr std::size_t kRetailPlayerBodyObjectOffset = 0x10;
+// Strahlbasierte Interaktion. Herleitung und Gegenproben stehen in
+// docs/RETAIL-ACTIVATION.md.
+constexpr std::uintptr_t kRetailCheckForIntersectRva = 0x001CC150U;
+constexpr std::uintptr_t kRetailObjectDetectorUpdateRva = 0x001205A0U;
+constexpr std::uintptr_t kRetailPlayerMgrPointerRva = 0x002E2C3CU;
+constexpr std::size_t kRetailPlayerMgrCameraOffset = 0x28;
+constexpr std::size_t kRetailPlayerMgrPickupDetectorOffset = 0x3CC;
+constexpr std::size_t kRetailCameraObjectOffset = 0x0C;
+constexpr std::size_t kRetailCameraPositionOffset = 0x10;
+// CheckForIntersect bildet die Blickdrehung als Produkt dieser beiden
+// Teilrotationen. Retail 1.08 haelt keinen fertigen Member dafuer bereit.
+constexpr std::size_t kRetailCameraRotationSecondOffset = 0x1C;
+constexpr std::size_t kRetailCameraRotationFirstOffset = 0xB8;
 constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
-constexpr std::uint32_t kRetailCommandFlashlight = 114;
 // Retail CClientWeapon starts m_RightHandWeapon at +0x10. Its first LTObjRef
 // occupies 16 bytes on x86 (vptr, list links, HOBJECT), putting the model
 // HOBJECT at +0x1c and m_hMuzzleSocket at +0x50.
@@ -807,6 +835,8 @@ void ConfigureComfortOptions() noexcept {
         CommandLineContains(L"-fearvr-no-client-update");
     g_disableAimHooks =
         CommandLineContains(L"-fearvr-no-aim-hooks");
+    g_disableInteractionHooks =
+        safeMode || CommandLineContains(L"-fearvr-no-interaction");
     // Der AimAt-Hook wird NICHT mehr installiert.
     //
     // Belegt am 25.07.2026: An einer geskripteten Szene, in der ein NPC
@@ -1676,6 +1706,62 @@ bool InstallRetailVrMenuHooks() noexcept {
     return true;
 }
 
+// Zeigen ersetzt das Hinlaufen, also muss die Retail-Reichweite ueber die
+// Nasenlaenge hinausgehen. 60 Einheiten sind in LithTech-Zoll rund 1,5 m:
+// bequem aus dem Stand erreichbar, aber nicht quer durch den Raum. Der Wert
+// wird nur angehoben, nie gesenkt, damit ein groesserer Retail- oder
+// Missionswert erhalten bleibt.
+constexpr float kVrInteractionReach = 60.0F;
+
+void UpdateInteractionReachOverride(bool stereoEnabled) noexcept {
+    if (g_disableInteractionHooks ||
+        g_retailCheckForIntersectTarget == nullptr) {
+        return;
+    }
+    if (!g_interactionReachOriginalKnown) {
+        __try {
+            const HCONSOLEVAR activation =
+                g_client->GetConsoleVariable("ActivationDistance");
+            const HCONSOLEVAR pickup =
+                g_client->GetConsoleVariable("PickupDistance");
+            if (activation == nullptr || pickup == nullptr) {
+                return;
+            }
+            g_activationReachOriginal =
+                g_client->GetConsoleVariableFloat(activation);
+            g_pickupReachOriginal =
+                g_client->GetConsoleVariableFloat(pickup);
+            g_interactionReachOriginalKnown = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return;
+        }
+    }
+    if (stereoEnabled == g_interactionReachApplied) {
+        return;
+    }
+    const float activationValue =
+        stereoEnabled
+            ? (g_activationReachOriginal > kVrInteractionReach
+                   ? g_activationReachOriginal
+                   : kVrInteractionReach)
+            : g_activationReachOriginal;
+    const float pickupValue =
+        stereoEnabled
+            ? (g_pickupReachOriginal > kVrInteractionReach
+                   ? g_pickupReachOriginal
+                   : kVrInteractionReach)
+            : g_pickupReachOriginal;
+    __try {
+        if (g_client->SetConsoleVariableFloat(
+                "ActivationDistance", activationValue) == LT_OK &&
+            g_client->SetConsoleVariableFloat(
+                "PickupDistance", pickupValue) == LT_OK) {
+            g_interactionReachApplied = stereoEnabled;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void UpdateCrosshairOverride() noexcept {
     if (g_client == nullptr) {
         return;
@@ -1744,6 +1830,8 @@ void UpdateCrosshairOverride() noexcept {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+
+    UpdateInteractionReachOverride(stereoAimGuideEnabled);
 }
 
 // Liefert die Mündung in Weltkoordinaten.
@@ -1805,6 +1893,193 @@ bool TraceWeaponAim(
         return false;
     }
     return true;
+}
+
+// Ursprung und Richtung, mit denen Retail nach Schaltern und Items suchen
+// soll. Es ist bewusst dieselbe Muendungstransformation, aus der auch der
+// sichtbare rote Zielstrahl und die Fire-Vectors entstehen: Was der Spieler
+// anvisiert, wird damit auch aktiviert.
+bool ResolveInteractionRayPose(LTRigidTransform& pose) noexcept {
+    if (!g_weaponAim.valid) {
+        return false;
+    }
+    ResolveMuzzleWorldTransform(pose);
+    return true;
+}
+
+unsigned char* ResolveRetailPlayerCamera() noexcept {
+    if (g_retailPlayerMgrPointer == nullptr) {
+        return nullptr;
+    }
+    __try {
+        auto* const playerMgr =
+            static_cast<unsigned char*>(*g_retailPlayerMgrPointer);
+        if (playerMgr == nullptr) {
+            return nullptr;
+        }
+        return *reinterpret_cast<unsigned char**>(
+            playerMgr + kRetailPlayerMgrCameraOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+void* ResolveRetailPickupDetector() noexcept {
+    if (g_retailPlayerMgrPointer == nullptr) {
+        return nullptr;
+    }
+    __try {
+        auto* const playerMgr =
+            static_cast<unsigned char*>(*g_retailPlayerMgrPointer);
+        if (playerMgr == nullptr) {
+            return nullptr;
+        }
+        return playerMgr + kRetailPlayerMgrPickupDetectorOffset;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// Ob die Kamera fuer einen Retail-Aufruf ueberhaupt umgesetzt werden darf.
+// Waehrend Zwischensequenzen und im Komfortpanel gehoert sie der Engine —
+// dieselbe Grenze, an der auch der Taschenlampenpfad zurueckweicht.
+bool IsInteractionOverrideAllowed() noexcept {
+    if (!g_hookInstalled || g_disableInteractionHooks) {
+        return false;
+    }
+    bool stereoEnabled = false;
+    if (g_isStereoEnabled != nullptr) {
+        __try {
+            stereoEnabled = g_isStereoEnabled() != FALSE;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+    if (!stereoEnabled) {
+        return false;
+    }
+    if (g_isFlatPanelActive != nullptr) {
+        __try {
+            if (g_isFlatPanelActive() != FALSE) {
+                return false;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// CheckForIntersect liest Position und Drehung der Kamera ausschliesslich in
+// seinen ersten Instruktionen und rechnet danach nur noch mit Kopien. Die drei
+// Member duerfen deshalb fuer die Dauer des Originalaufrufs auf die
+// Waffenpose zeigen, solange sie danach unveraendert zurueckkehren.
+void __fastcall HookRetailCheckForIntersect(
+    void* targetMgr, void* ignoredEdx, float* distance) {
+    unsigned char* const camera = ResolveRetailPlayerCamera();
+    LTRigidTransform ray;
+    if (camera == nullptr || !IsInteractionOverrideAllowed() ||
+        !ResolveInteractionRayPose(ray)) {
+        g_retailCheckForIntersect(targetMgr, ignoredEdx, distance);
+        return;
+    }
+
+    float savedPosition[3];
+    float savedFirst[4];
+    float savedSecond[4];
+    float* position = nullptr;
+    float* first = nullptr;
+    float* second = nullptr;
+    __try {
+        position = reinterpret_cast<float*>(
+            camera + kRetailCameraPositionOffset);
+        first = reinterpret_cast<float*>(
+            camera + kRetailCameraRotationFirstOffset);
+        second = reinterpret_cast<float*>(
+            camera + kRetailCameraRotationSecondOffset);
+        std::memcpy(savedPosition, position, sizeof(savedPosition));
+        std::memcpy(savedFirst, first, sizeof(savedFirst));
+        std::memcpy(savedSecond, second, sizeof(savedSecond));
+
+        position[0] = ray.m_vPos.x;
+        position[1] = ray.m_vPos.y;
+        position[2] = ray.m_vPos.z;
+        first[0] = ray.m_rRot.m_Quat[0];
+        first[1] = ray.m_rRot.m_Quat[1];
+        first[2] = ray.m_rRot.m_Quat[2];
+        first[3] = ray.m_rRot.m_Quat[3];
+        // Der zweite Faktor wird zur Identitaet, damit das Produkt genau die
+        // Waffendrehung ergibt.
+        second[0] = 0.0F;
+        second[1] = 0.0F;
+        second[2] = 0.0F;
+        second[3] = 1.0F;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_retailCheckForIntersect(targetMgr, ignoredEdx, distance);
+        return;
+    }
+
+    g_retailCheckForIntersect(targetMgr, ignoredEdx, distance);
+
+    __try {
+        std::memcpy(position, savedPosition, sizeof(savedPosition));
+        std::memcpy(first, savedFirst, sizeof(savedFirst));
+        std::memcpy(second, savedSecond, sizeof(savedSecond));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+
+    if (InterlockedCompareExchange(
+            &g_interactionRayActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "interaction_ray_active",
+            "Switches and consoles are selected along the VR weapon ray "
+            "instead of the head-mounted view direction.");
+    }
+}
+
+// Der Aufsammelkegel haengt am Kameraobjekt. Ihm fuer genau diesen Aufruf die
+// Waffenpose zu geben ist dasselbe Muster wie beim Taschenlampenpfad; nur der
+// Pickup-Detektor des Spielers ist betroffen, andere Detektoren laufen
+// unveraendert weiter.
+void __fastcall HookRetailObjectDetectorUpdate(
+    void* detector, void* ignoredEdx, float elapsedSeconds) {
+    unsigned char* const camera = ResolveRetailPlayerCamera();
+    LTRigidTransform ray;
+    if (g_client == nullptr || camera == nullptr ||
+        detector != ResolveRetailPickupDetector() ||
+        !IsInteractionOverrideAllowed() ||
+        !ResolveInteractionRayPose(ray)) {
+        g_retailObjectDetectorUpdate(
+            detector, ignoredEdx, elapsedSeconds);
+        return;
+    }
+
+    HLOCALOBJ cameraObject = nullptr;
+    LTRigidTransform saved;
+    __try {
+        cameraObject = *reinterpret_cast<HLOCALOBJ*>(
+            camera + kRetailCameraObjectOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        cameraObject = nullptr;
+    }
+    if (cameraObject == nullptr ||
+        g_client->GetObjectTransform(cameraObject, &saved) != LT_OK ||
+        g_client->SetObjectTransform(cameraObject, ray) != LT_OK) {
+        g_retailObjectDetectorUpdate(
+            detector, ignoredEdx, elapsedSeconds);
+        return;
+    }
+
+    g_retailObjectDetectorUpdate(detector, ignoredEdx, elapsedSeconds);
+    g_client->SetObjectTransform(cameraObject, saved);
+
+    if (InterlockedCompareExchange(
+            &g_pickupRayActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "pickup_ray_active",
+            "The Retail pickup cone follows the VR weapon ray, so items are "
+            "taken by pointing and using instead of by standing on them.");
+    }
 }
 
 void RenderWeaponAimGuide(HLOCALOBJ camera) noexcept {
@@ -2498,51 +2773,80 @@ RegressionCommandLog g_regressionCommands[] = {
      "vr_slowmo_released", "Slow-mo", false, 0, 0},
 };
 
+// Ein injizierter Puls muss laenger stehen als ein einzelnes Update, sonst
+// verpasst ihn der Retail-Bindungspfad je nach Bildrate.
+constexpr ULONGLONG kCommandPulseMs = 100;
+
+// Waffenwechsel auf der rechten Primaertaste: jeder Druck schaltet eine Waffe
+// weiter. Bewusst nur die Flanke, ohne Wiederholung beim Halten — anders als
+// beim frueheren Stick-Ausschlag wuerde Dauerdruck sonst durchrattern.
 void PrepareWeaponSwitchPulse() noexcept {
-    constexpr float kWeaponSwitchThreshold = 0.80F;
-    constexpr ULONGLONG kWeaponSwitchHoldMs = 300;
-    constexpr ULONGLONG kWeaponSwitchRepeatMs = 450;
-    const float vertical = g_currentInput.turnY;
-    const int direction =
-        vertical >= kWeaponSwitchThreshold
-            ? 1
-            : (vertical <= -kWeaponSwitchThreshold ? -1 : 0);
-    g_weaponSwitchPulseCommand = 0;
-    if (direction == 0) {
-        g_weaponSwitchDirection = 0;
-        g_weaponSwitchHoldStartTick = 0;
-        g_weaponSwitchNextRepeatTick = 0;
-        g_weaponSwitchTriggered = false;
-        return;
-    }
+    const bool down =
+        (g_currentInput.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
+        (g_currentInput.buttons & FEARVR_IB_RIGHT_PRIMARY) != 0;
     const ULONGLONG now = GetTickCount64();
-    if (direction != g_weaponSwitchDirection) {
-        g_weaponSwitchDirection = direction;
-        g_weaponSwitchHoldStartTick = now;
-        g_weaponSwitchNextRepeatTick = 0;
-        g_weaponSwitchTriggered = false;
-        return;
+    if (down && !g_weaponSwitchTriggered) {
+        g_weaponSwitchPulseUntil = now + kCommandPulseMs;
+        Report(
+            "INFO", "weapon_switch_gesture",
+            "Weapon switch triggered by the right primary button.");
     }
-    const bool initialTrigger =
-        !g_weaponSwitchTriggered &&
-        now - g_weaponSwitchHoldStartTick >= kWeaponSwitchHoldMs;
-    const bool repeatTrigger =
-        g_weaponSwitchTriggered && g_weaponSwitchNextRepeatTick != 0 &&
-        now >= g_weaponSwitchNextRepeatTick;
-    if (initialTrigger || repeatTrigger) {
-        g_weaponSwitchPulseCommand =
-            direction > 0 ? FEARVR_CMD_NEXT_WEAPON
-                          : FEARVR_CMD_PREV_WEAPON;
-        g_weaponSwitchTriggered = true;
-        g_weaponSwitchNextRepeatTick = now + kWeaponSwitchRepeatMs;
-        Report("INFO", "weapon_switch_gesture", initialTrigger
-            ? "Weapon switch triggered after an 80 percent, 300 ms stick hold."
-            : "Weapon switch repeated while the stick remains held.");
+    g_weaponSwitchTriggered = down;
+}
+
+// Rechte Sekundaertaste: kurz laedt nach, gehalten wirft eine Granate. Der
+// Wurf loest bereits beim Erreichen der Haltezeit aus und nicht erst beim
+// Loslassen, damit die Taste sich wie ein Auslöser anfuehlt. Nachladen kommt
+// dagegen zwangslaeufig erst beim Loslassen, denn vorher ist nicht bekannt,
+// ob es ein kurzer Druck war.
+void PrepareGrenadeAndReloadPulse() noexcept {
+    constexpr ULONGLONG kGrenadeHoldMs = 350;
+    const bool down =
+        (g_currentInput.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
+        (g_currentInput.buttons & FEARVR_IB_RIGHT_SECONDARY) != 0;
+    const ULONGLONG now = GetTickCount64();
+
+    if (down && !g_secondaryWasDown) {
+        g_secondaryHoldStartTick = now;
+        g_grenadeConsumed = false;
+    } else if (down && !g_grenadeConsumed &&
+               now - g_secondaryHoldStartTick >= kGrenadeHoldMs) {
+        g_grenadePulseUntil = now + kCommandPulseMs;
+        g_grenadeConsumed = true;
+        Report(
+            "INFO", "grenade_throw_gesture",
+            "Grenade thrown after holding the right secondary button.");
+    } else if (!down && g_secondaryWasDown && !g_grenadeConsumed) {
+        g_reloadPulseUntil = now + kCommandPulseMs;
+        Report(
+            "INFO", "reload_gesture",
+            "Reload triggered by a short press of the right secondary "
+            "button.");
     }
+    g_secondaryWasDown = down;
 }
 
 bool IsWeaponSwitchPulse(std::uint32_t command) noexcept {
-    return g_weaponSwitchPulseCommand == command;
+    const ULONGLONG now = GetTickCount64();
+    switch (command) {
+    case FEARVR_CMD_NEXT_WEAPON:
+        return now < g_weaponSwitchPulseUntil;
+    case FEARVR_CMD_RELOAD:
+        return now < g_reloadPulseUntil;
+    case FEARVR_CMD_THROW_GRENADE:
+        return now < g_grenadePulseUntil;
+    default:
+        return false;
+    }
+}
+
+// Welche Kommandos ihren Zustand aus der Pulslogik beziehen statt aus der
+// zustandslosen Zuordnung.
+bool IsPulseDrivenCommand(std::uint32_t command) noexcept {
+    return command == FEARVR_CMD_NEXT_WEAPON ||
+           command == FEARVR_CMD_PREV_WEAPON ||
+           command == FEARVR_CMD_RELOAD ||
+           command == FEARVR_CMD_THROW_GRENADE;
 }
 
 void LogRegressionCommandTransition(
@@ -2640,10 +2944,10 @@ void InjectSemanticCommandBits(
         FEARVR_CMD_NEXT_WEAPON,
         FEARVR_CMD_ACTIVATE,
         FEARVR_CMD_RELOAD,
+        FEARVR_CMD_THROW_GRENADE,
         FEARVR_CMD_SLOWMO,
         FEARVR_CMD_LEAN_LEFT,
-        FEARVR_CMD_LEAN_RIGHT,
-        kRetailCommandFlashlight
+        FEARVR_CMD_LEAN_RIGHT
     };
     __try {
         const auto* const bytes =
@@ -2660,14 +2964,10 @@ void InjectSemanticCommandBits(
 
         for (const std::uint32_t command : kDigitalCommands) {
             const FearVrCommandValue controller =
-                command == kRetailCommandFlashlight
+                IsPulseDrivenCommand(command)
                     ? FearVrCommandValue{
-                          1.0F, g_flashlightCommandPulseActive}
-                    : ((command == FEARVR_CMD_NEXT_WEAPON ||
-                        command == FEARVR_CMD_PREV_WEAPON)
-                           ? FearVrCommandValue{
-                                 1.0F, IsWeaponSwitchPulse(command)}
-                           : MapControllerCommand(g_currentInput, command));
+                          1.0F, IsWeaponSwitchPulse(command)}
+                    : MapControllerCommand(g_currentInput, command);
             if (command < sizeof(g_injectedCommandActive) /
                               sizeof(g_injectedCommandActive[0])) {
                 bool& wasActive =
@@ -2725,8 +3025,7 @@ float __fastcall HookRetailGetBindingValue(
     }
 
     const FearVrCommandValue controller =
-        (binding->command == FEARVR_CMD_NEXT_WEAPON ||
-         binding->command == FEARVR_CMD_PREV_WEAPON)
+        IsPulseDrivenCommand(binding->command)
             ? FearVrCommandValue{
                   1.0F, IsWeaponSwitchPulse(binding->command)}
             : MapControllerCommand(g_currentInput, binding->command);
@@ -3172,7 +3471,6 @@ int __fastcall HookRetailWeaponManagerUpdate(
         now - g_lastWeaponManagerUpdateTick > 1000;
     g_lastWeaponManagerUpdateTick = now;
     if (enteringPlayingState) {
-        g_flashlightCommandPulsePending = true;
         // Eine Pause im Weapon-Manager-Update bedeutet Ladebildschirm,
         // Levelwechsel oder eine Sequenz, die den Spielerpfad uebernommen hat.
         // Danach ist die Welt neu aufgebaut und jeder zwischengespeicherte
@@ -3335,61 +3633,23 @@ int __fastcall HookRetailWeaponManagerUpdate(
         }
     }
 
-    // CPlayerMgr::PreRender updates the Retail flashlight immediately after
-    // this weapon-manager call. Its follow object is the player camera. Give
-    // that object the left-hand pose for the flashlight update only; the
-    // RenderCamera hook restores the real camera before rendering either eye.
-    bool stereoEnabled = false;
-    if (g_isStereoEnabled != nullptr) {
-        __try {
-            stereoEnabled = g_isStereoEnabled() != FALSE;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            stereoEnabled = false;
-        }
-    }
-    // Waehrend Zwischensequenzen und Komfortpanel gehoert die Kamera der
-    // Engine. Sie dann zu entfuehren hat das Spiel reproduzierbar zum Absturz
-    // gebracht; ein Handscheinwerfer waere in einer geskripteten Szene ohnehin
-    // falsch.
-    bool flatPanelActive = false;
-    if (g_isFlatPanelActive != nullptr) {
-        __try {
-            flatPanelActive = g_isFlatPanelActive() != FALSE;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            flatPanelActive = true;
-        }
-    }
-    if (stereoEnabled && g_hookInstalled && !flatPanelActive &&
-        !g_disableFlashlight &&
-        g_playerCameraObject != nullptr &&
-        g_weaponAim.leftAimValid && g_weaponAim.leftGripValid &&
-        g_client != nullptr) {
-        __try {
-            if (g_client->GetObjectTransform(
-                    g_playerCameraObject,
-                    &g_flashlightCameraRecovery) == LT_OK) {
-                const LTRigidTransform flashlightPose(
-                    g_weaponAim.leftGripTransform.m_vPos,
-                    g_weaponAim.leftAimTransform.m_rRot);
-                if (g_client->SetObjectTransform(
-                        g_playerCameraObject, flashlightPose) == LT_OK) {
-                    g_flashlightOverrideObject = g_playerCameraObject;
-                    g_flashlightCameraOverridePending = true;
-                    if (InterlockedCompareExchange(
-                            &g_leftHandFlashlightActiveLogged,
-                            1, 0) == 0) {
-                        Report(
-                            "INFO", "left_hand_flashlight_active",
-                            "The always-on Retail flashlight beam follows "
-                            "the left OpenXR grip and aim pose.");
-                    }
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            g_flashlightCameraOverridePending = false;
-            g_flashlightOverrideObject = nullptr;
-        }
-    }
+    // Die Retail-Taschenlampe wird bewusst nicht mehr mitgefuehrt.
+    //
+    // Frueher wurde sie per Kommandopuls dauerhaft eingeschaltet, und die
+    // Kamera — ihr Folgeobjekt — bekam fuer die Dauer ihres Updates die
+    // Handpose. Daneben existiert aber ohnehin ein eigener Spotprojektor an
+    // der linken Hand, der schaltbar ist und der Hand exakt folgt. Beide
+    // Lampen lagen im Normalfall uebereinander und fielen deshalb nicht auf.
+    //
+    // Nach Zwischensequenzen ruht der Kameraeingriff jedoch, weil die Kamera
+    // dann der Engine gehoert. Die Retail-Lampe leuchtete in diesem Moment
+    // wieder vom Kopf aus, waehrend der Handscheinwerfer weiterlief: zwei
+    // getrennte Kegel, deren Lichtfelder sich addierten, und nur einer davon
+    // liess sich ausschalten.
+    //
+    // Der Handscheinwerfer allein deckt denselben Zweck ab. Damit entfaellt
+    // zugleich ein weiterer Kameraeingriff in geskripteten Szenen — genau die
+    // Sorte Eingriff, die hier bereits einmal zu Abstuerzen gefuehrt hat.
     return state;
 }
 
@@ -4217,6 +4477,43 @@ void __fastcall HookRetailSetTrackedTarget(
     }
 }
 
+// Ein Ruckeln je Schuss, auch im Dauerfeuer. Retail holt die Fire-Vectors in
+// seinen beiden Feuerpfaden genau einmal pro Schuss, nicht pro Bild — das ist
+// deshalb die verlaessliche Schussquelle. Sie ist der Triggerflanke auch
+// inhaltlich voraus: Bei leerem Magazin faellt die Vibration korrekt aus.
+void RequestFireHaptic() noexcept {
+    // Beide Feuerpfade koennen denselben Schuss abfragen. Ein Mindestabstand
+    // deutlich unterhalb der schnellsten Kadenz fasst das zu einem Impuls
+    // zusammen, ohne echte Schuesse zu verschlucken.
+    constexpr ULONGLONG kMinimumPulseGapMs = 30;
+    if (g_submitHapticRequest == nullptr ||
+        !g_controllerHapticsEnabled) {
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (g_lastFireHapticTick != 0 &&
+        now - g_lastFireHapticTick < kMinimumPulseGapMs) {
+        return;
+    }
+    g_lastFireHapticTick = now;
+
+    FearVrHapticRequest request{};
+    request.requestId = ++g_hapticRequestId;
+    request.durationNs = 35'000'000;
+    request.amplitude = 0.25F;
+    request.frequency = 0.0F;
+    request.handMask = FEARVR_HAND_MASK_RIGHT;
+    request.flags = FEARVR_HF_VALID;
+    if (g_submitHapticRequest(&request) &&
+        InterlockedCompareExchange(
+            &g_fireHapticActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "controller_fire_haptic",
+            "Every shot requests a haptic pulse, including sustained "
+            "automatic fire.");
+    }
+}
+
 bool __fastcall HookRetailGetFireVectors(
     const void* weapon, void* ignoredEdx,
     LTVector& right, LTVector& up,
@@ -4224,6 +4521,9 @@ bool __fastcall HookRetailGetFireVectors(
     (void)ignoredEdx;
     const bool result = g_retailGetFireVectors(
         weapon, right, up, forward, firePosition);
+    if (result) {
+        RequestFireHaptic();
+    }
     if (!result || !g_weaponAim.valid) {
         return result;
     }
@@ -4276,15 +4576,15 @@ void RemoveWeaponAimHooks() noexcept {
     g_rightHandOrientation = HandOrientationCalibration{};
     g_leftHandOrientation = HandOrientationCalibration{};
     g_lastWeaponManagerUpdateTick = 0;
-    g_flashlightCommandPulsePending = false;
-    g_flashlightCommandPulseActive = false;
     g_flashlightEnabled = true;
     g_leftTriggerWasDown = false;
-    g_weaponSwitchHoldStartTick = 0;
-    g_weaponSwitchNextRepeatTick = 0;
-    g_weaponSwitchDirection = 0;
+    g_weaponSwitchPulseUntil = 0;
     g_weaponSwitchTriggered = false;
-    g_weaponSwitchPulseCommand = 0;
+    g_secondaryHoldStartTick = 0;
+    g_reloadPulseUntil = 0;
+    g_grenadePulseUntil = 0;
+    g_secondaryWasDown = false;
+    g_grenadeConsumed = false;
 }
 
 bool InstallWeaponAimHooks() noexcept {
@@ -4381,6 +4681,148 @@ bool InstallWeaponAimHooks() noexcept {
         "INFO", "weapon_aim_hooks_installed",
         "Verified Retail 1.08 weapon visibility, body AimAt and "
         "fire-vector hooks use the right OpenXR aim pose.");
+    return true;
+}
+
+void RemoveInteractionHooks() noexcept {
+    if (g_retailCheckForIntersectTarget != nullptr) {
+        MH_DisableHook(g_retailCheckForIntersectTarget);
+        MH_RemoveHook(g_retailCheckForIntersectTarget);
+        g_retailCheckForIntersectTarget = nullptr;
+        g_retailCheckForIntersect = nullptr;
+    }
+    if (g_retailObjectDetectorUpdateTarget != nullptr) {
+        MH_DisableHook(g_retailObjectDetectorUpdateTarget);
+        MH_RemoveHook(g_retailObjectDetectorUpdateTarget);
+        g_retailObjectDetectorUpdateTarget = nullptr;
+        g_retailObjectDetectorUpdate = nullptr;
+    }
+    g_retailPlayerMgrPointer = nullptr;
+}
+
+bool ResolveRetailInteractionTargets(
+    void*& checkForIntersect, void*& detectorUpdate,
+    void**& playerMgrPointer) noexcept {
+    checkForIntersect = nullptr;
+    detectorUpdate = nullptr;
+    playerMgrPointer = nullptr;
+
+    HMODULE module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(module);
+    __try {
+        const auto* const dos =
+            reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew <= 0) {
+            return false;
+        }
+        const auto* const nt =
+            reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->FileHeader.TimeDateStamp !=
+                kRetailGameClientTimeDateStamp ||
+            nt->OptionalHeader.SizeOfImage !=
+                kRetailGameClientSizeOfImage) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    auto* const intersect = base + kRetailCheckForIntersectRva;
+    auto* const detector = base + kRetailObjectDetectorUpdateRva;
+    // CTargetMgr::CheckForIntersect: legt den 0x88-Byte-Rahmen fuer
+    // IntersectQuery an und laedt m_hTarget aus this+0x10.
+    constexpr unsigned char kCheckForIntersectPrefix[] = {
+        0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x53, 0x55,
+        0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x10, 0x57, 0x8D,
+        0x7E, 0x04};
+    // ObjectDetector::Update: prueft zuerst die gesetzte Transformquelle
+    // in this+0xC0.
+    constexpr unsigned char kDetectorUpdatePrefix[] = {
+        0x83, 0xEC, 0x08, 0x56, 0x8B, 0xF1, 0x8B, 0x86,
+        0xC0, 0x00, 0x00, 0x00, 0x57, 0x33, 0xFF, 0x3B,
+        0xC7};
+    if (!MatchesCode(
+            intersect, kCheckForIntersectPrefix,
+            sizeof(kCheckForIntersectPrefix)) ||
+        !MatchesCode(
+            detector, kDetectorUpdatePrefix,
+            sizeof(kDetectorUpdatePrefix))) {
+        return false;
+    }
+
+    checkForIntersect = intersect;
+    detectorUpdate = detector;
+    playerMgrPointer = reinterpret_cast<void**>(
+        base + kRetailPlayerMgrPointerRva);
+    return true;
+}
+
+bool InstallInteractionHooks() noexcept {
+    if (g_disableInteractionHooks) {
+        Report(
+            "WARN", "interaction_hooks_skipped",
+            "Diagnostic switch: activation and pickup keep following the "
+            "head-mounted view direction.");
+        return true;
+    }
+
+    void* checkForIntersect = nullptr;
+    void* detectorUpdate = nullptr;
+    void** playerMgrPointer = nullptr;
+    if (!ResolveRetailInteractionTargets(
+            checkForIntersect, detectorUpdate, playerMgrPointer)) {
+        Report(
+            "ERROR", "interaction_layout_mismatch",
+            "Retail 1.08 activation and object-detector signatures did not "
+            "match; ray interaction remains disabled.");
+        return false;
+    }
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        Report(
+            "ERROR", "interaction_hook_initialize_failed",
+            MH_StatusToString(initialize));
+        return false;
+    }
+
+    g_retailPlayerMgrPointer = playerMgrPointer;
+    MH_STATUS status = MH_CreateHook(
+        checkForIntersect,
+        reinterpret_cast<void*>(&HookRetailCheckForIntersect),
+        reinterpret_cast<void**>(&g_retailCheckForIntersect));
+    if (status == MH_OK) {
+        g_retailCheckForIntersectTarget = checkForIntersect;
+        status = MH_CreateHook(
+            detectorUpdate,
+            reinterpret_cast<void*>(&HookRetailObjectDetectorUpdate),
+            reinterpret_cast<void**>(&g_retailObjectDetectorUpdate));
+    }
+    if (status == MH_OK) {
+        g_retailObjectDetectorUpdateTarget = detectorUpdate;
+        status = MH_EnableHook(checkForIntersect);
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(detectorUpdate);
+    }
+    if (status != MH_OK) {
+        Report(
+            "ERROR", "interaction_hook_install_failed",
+            MH_StatusToString(status));
+        RemoveInteractionHooks();
+        return false;
+    }
+
+    Report(
+        "INFO", "interaction_hooks_installed",
+        "Activation ray and pickup cone follow the VR weapon pose.");
     return true;
 }
 
@@ -4512,27 +4954,6 @@ void PollControllerInput() noexcept {
     }
     g_controllerRecenterWasDown = recenterDown;
 
-    const bool fireTriggerDown =
-        (input.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
-        input.trigger[FEARVR_HAND_RIGHT] >= 0.55F;
-    if (fireTriggerDown && !g_fireTriggerWasDown &&
-        g_submitHapticRequest != nullptr &&
-        g_controllerHapticsEnabled) {
-        FearVrHapticRequest request{};
-        request.requestId = ++g_hapticRequestId;
-        request.durationNs = 35'000'000;
-        request.amplitude = 0.25F;
-        request.frequency = 0.0F;
-        request.handMask = FEARVR_HAND_MASK_RIGHT;
-        request.flags = FEARVR_HF_VALID;
-        if (g_submitHapticRequest(&request)) {
-            Report(
-                "INFO", "controller_fire_haptic",
-                "Right trigger firing edge requested a short "
-                "haptic pulse.");
-        }
-    }
-    g_fireTriggerWasDown = fireTriggerDown;
 }
 
 void TapMenuKey(int key) noexcept {
@@ -4600,7 +5021,7 @@ void PollControllerMenuInput() noexcept {
     const bool triggerPressed =
         triggerDown && !g_lastMenuTriggerDown;
     const bool menuRequested =
-        (pressed & FEARVR_IB_LEFT_STICK) != 0;
+        (pressed & FEARVR_IB_LEFT_SECONDARY) != 0;
     const bool escapeDown =
         (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     const bool escapePressed = escapeDown && !g_escapeWasDown;
@@ -4641,9 +5062,19 @@ void PollControllerMenuInput() noexcept {
         now - g_lastWeaponManagerUpdateTick <= kPlayingFrameFreshMs;
     const bool menuActivationHeld =
         now < g_menuActivationHoldUntil;
-    const bool menuActive = g_menuFocusKnown
-        ? g_menuFocusActive
-        : (menuActivationHeld || !playingFrameFresh);
+    // Beide Signale muessen gelten, nicht nur das jeweils genauere.
+    //
+    // Der Retail-Fokus kennt ausschliesslich Pausenmenues. Vollbildschirme des
+    // Spiels — das Missionsbriefing etwa — melden keinen Menuefokus, halten
+    // aber genauso den Weapon-Manager an. Wurde der Fokus einmal gelesen,
+    // hat sein "kein Menue" bisher den Frischetest verdraengt: Solche
+    // Bildschirme galten dann als Spiel, ihre Vollbilddarstellung fiel im
+    // Compositor zwischen HUD-Overlay und Flachbild und wurde verworfen. Im
+    // Headset blieb die Welt stehen, waehrend das Desktopfenster das Briefing
+    // zeigte.
+    const bool menuActive =
+        menuActivationHeld || !playingFrameFresh ||
+        (g_menuFocusKnown && g_menuFocusActive);
     if (g_setMenuActive != nullptr) {
         __try {
             g_setMenuActive(menuActive ? TRUE : FALSE);
@@ -4727,6 +5158,7 @@ void __fastcall HookClientShellUpdate(
     PollControllerInput();
     if (!g_disableClientUpdateWork) {
         PrepareWeaponSwitchPulse();
+        PrepareGrenadeAndReloadPulse();
         PollControllerMenuInput();
     }
     if (g_vrSettingsPageActive) {
@@ -4738,25 +5170,8 @@ void __fastcall HookClientShellUpdate(
     if (!g_disableClientUpdateWork) {
         UpdateCrosshairOverride();
     }
-    g_flashlightCommandPulseActive =
-        g_flashlightCommandPulsePending &&
-        (g_currentInput.aimPoseValidHands &
-         FEARVR_HAND_MASK_LEFT) != 0;
     g_semanticBitsInjected = false;
     g_clientShellUpdate(clientShell);
-    if (g_flashlightCommandPulseActive && g_semanticBitsInjected) {
-        g_flashlightCommandPulseActive = false;
-        g_flashlightCommandPulsePending = false;
-        if (InterlockedCompareExchange(
-                &g_flashlightForcedOnLogged, 1, 0) == 0) {
-            Report(
-                "INFO", "flashlight_forced_on",
-                "A one-frame Retail command enabled the battery-free "
-                "left-hand flashlight.");
-        }
-    } else {
-        g_flashlightCommandPulseActive = false;
-    }
 }
 
 bool InstallClientInputHook(void* masterDatabase) noexcept {
@@ -4811,6 +5226,12 @@ bool InstallClientInputHook(void* masterDatabase) noexcept {
             "WARN", "weapon_aim_unavailable",
             "Controller gameplay input remains active, but the "
             "verified Retail weapon hooks could not be installed.");
+    }
+    if (!InstallInteractionHooks()) {
+        Report(
+            "WARN", "interaction_unavailable",
+            "Activation and pickup fall back to the Retail view direction; "
+            "everything else stays active.");
     }
     Report(
         "INFO", "client_input_hook_installed",

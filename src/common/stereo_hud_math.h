@@ -35,48 +35,54 @@ inline bool IsFlatPanelCoverage(std::uint64_t changedPixels,
            changedPixels * 100u > totalPixels * 81u;
 }
 
+// Das HUD wird als Ganzes zur Bildmitte hin gestaucht, damit die Randblöcke
+// im Headset im bequemen Sichtfeld liegen.
+//
+// Frühere Fassungen verschoben stattdessen einzelne Zonen um feste Beträge —
+// links oben um 1/8 Breite, links unten um 1/32, rechts um 1/10, die Mitte gar
+// nicht, dazu ein Zeilensprung bei 3/5 Höhe. Jedes HUD-Element, das eine
+// dieser Grenzen kreuzte, wurde dadurch zerschnitten: eine Hälfte wanderte,
+// die andere blieb stehen. Betroffen waren unter anderem die mittigen
+// Aktivierungshinweise, die genau über der Grenze bei 3/8 Breite liegen.
+//
+// Eine gleichmäßige Skalierung um den Bildmittelpunkt hat diesen Fehler
+// grundsätzlich nicht: Sie ist stetig und monoton, benachbarte Quellpixel
+// bleiben also immer benachbart.
+constexpr std::uint32_t kStereoHudShrinkNumerator = 5;
+constexpr std::uint32_t kStereoHudShrinkDenominator = 4;
+
+// Rechnet eine Ausgabekoordinate auf die Quellkoordinate zurück. Liegt die
+// Quelle außerhalb des Bildes, kommt `extent` als "hier ist kein HUD" zurück —
+// derselbe Wert, den die Aufrufer bereits als ungültig behandeln.
+inline std::uint32_t StereoHudSourceAxis(
+    std::uint32_t outputCoordinate, std::uint32_t extent) noexcept {
+    if (extent == 0) {
+        return outputCoordinate;
+    }
+    const std::int64_t center = static_cast<std::int64_t>(extent) / 2;
+    const std::int64_t offset =
+        static_cast<std::int64_t>(outputCoordinate) - center;
+    const std::int64_t source =
+        center +
+        offset * static_cast<std::int64_t>(kStereoHudShrinkNumerator) /
+            static_cast<std::int64_t>(kStereoHudShrinkDenominator);
+    if (source < 0 || source >= static_cast<std::int64_t>(extent)) {
+        return extent;
+    }
+    return static_cast<std::uint32_t>(source);
+}
+
 inline std::uint32_t StereoHudSourceRow(
     std::uint32_t outputRow, std::uint32_t height) noexcept {
-    if (height == 0 || outputRow < height * 3u / 5u) {
-        return outputRow;
-    }
-    const std::uint32_t raisedRow = outputRow + height / 8u;
-    return raisedRow < height ? raisedRow : height;
+    return StereoHudSourceAxis(outputRow, height);
 }
 
 inline std::uint32_t StereoHudSourceColumn(
     std::uint32_t outputColumn, std::uint32_t outputRow,
     std::uint32_t width, std::uint32_t height) noexcept {
-    if (width == 0 || height == 0) {
-        return outputColumn;
-    }
-
-    // Move the lower-left status block slightly inward.
-    if (outputRow >= height * 3u / 5u &&
-        outputColumn < width / 2u) {
-        const std::uint32_t shift = width / 32u;
-        return outputColumn >= shift
-            ? outputColumn - shift
-            : width;
-    }
-
-    // Weapon-selection elements live at the upper/middle left edge and need
-    // a stronger inward shift to remain comfortable in the headset.
-    if (outputRow < height * 3u / 5u &&
-        outputColumn < width * 3u / 8u) {
-        const std::uint32_t shift = width / 8u;
-        return outputColumn >= shift
-            ? outputColumn - shift
-            : width;
-    }
-
-    // Pull the right-side status block substantially toward the reticle.
-    if (outputColumn >= width * 5u / 8u) {
-        const std::uint32_t shifted =
-            outputColumn + width / 10u;
-        return shifted < width ? shifted : width;
-    }
-    return outputColumn;
+    (void)outputRow;
+    (void)height;
+    return StereoHudSourceAxis(outputColumn, width);
 }
 
 } // namespace fearvr

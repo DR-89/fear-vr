@@ -50,17 +50,38 @@ int main() {
     assert(!fearvr::MapControllerCommand(
                 input, fearvr::FEARVR_CMD_YAW_NEG)
                 .active);
+    // Der rechte Stick springt und duckt erst im Vollausschlag; ein Teilweg
+    // beim Drehen darf beides nicht ausloesen.
+    input.turnY = 0.79F;
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_JUMP)
+                .active);
     input.turnY = 0.8F;
     assert(fearvr::MapControllerCommand(
-               input, fearvr::FEARVR_CMD_NEXT_WEAPON)
+               input, fearvr::FEARVR_CMD_JUMP)
                .active);
     assert(!fearvr::MapControllerCommand(
-                input, fearvr::FEARVR_CMD_PREV_WEAPON)
+                input, fearvr::FEARVR_CMD_DUCK)
                 .active);
     input.turnY = -0.8F;
     assert(fearvr::MapControllerCommand(
-               input, fearvr::FEARVR_CMD_PREV_WEAPON)
+               input, fearvr::FEARVR_CMD_DUCK)
                .active);
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_JUMP)
+                .active);
+    // Waffenwechsel, Nachladen und Granate entstehen als Puls im GameClient
+    // und sind in der zustandslosen Zuordnung deshalb nie aktiv.
+    input.turnY = 0.0F;
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_NEXT_WEAPON)
+                .active);
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_PREV_WEAPON)
+                .active);
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_THROW_GRENADE)
+                .active);
 
     input.trigger[FEARVR_HAND_RIGHT] = 0.54F;
     assert(!fearvr::MapControllerCommand(
@@ -77,6 +98,7 @@ int main() {
         FEARVR_IB_RIGHT_PRIMARY |
         FEARVR_IB_RIGHT_SECONDARY |
         FEARVR_IB_LEFT_PRIMARY |
+        FEARVR_IB_LEFT_SECONDARY |
         FEARVR_IB_LEFT_STICK;
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_RUN)
@@ -84,17 +106,21 @@ int main() {
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_ACTIVATE)
                .active);
-    assert(fearvr::MapControllerCommand(
-               input, fearvr::FEARVR_CMD_JUMP)
-               .active);
-    assert(fearvr::MapControllerCommand(
-               input, fearvr::FEARVR_CMD_DUCK)
-               .active);
-    assert(fearvr::MapControllerCommand(
-               input, fearvr::FEARVR_CMD_RELOAD)
-               .active);
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_JUMP)
+                .active);
+    // Ducken haengt allein am rechten Stick; der linke Stick-Klick ist frei.
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_DUCK)
+                .active);
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_RELOAD)
+                .active);
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_MENU)
+               .active);
+    assert(fearvr::MapControllerCommand(
+               input, fearvr::FEARVR_CMD_SLOWMO)
                .active);
 
     input.squeeze[FEARVR_HAND_LEFT] = 0.0F;
@@ -105,12 +131,11 @@ int main() {
                input, fearvr::FEARVR_CMD_MENU)
                .active);
 
+    // Ohne rechte Hand gibt es weder Springen noch Ducken.
+    input.turnY = -1.0F;
     input.activeHands = FEARVR_HAND_MASK_RIGHT;
-    assert(!fearvr::MapControllerCommand(
-                input, fearvr::FEARVR_CMD_DUCK)
-                .active);
     assert(fearvr::MapControllerCommand(
-               input, fearvr::FEARVR_CMD_RELOAD)
+               input, fearvr::FEARVR_CMD_DUCK)
                .active);
 
     input.activeHands = FEARVR_HAND_MASK_LEFT;
@@ -120,11 +145,8 @@ int main() {
     assert(!fearvr::MapControllerCommand(
                 input, fearvr::FEARVR_CMD_JUMP)
                 .active);
-    assert(fearvr::MapControllerCommand(
-               input, fearvr::FEARVR_CMD_DUCK)
-               .active);
     assert(!fearvr::MapControllerCommand(
-                input, fearvr::FEARVR_CMD_RELOAD)
+                input, fearvr::FEARVR_CMD_DUCK)
                 .active);
 
     // Tilting the left hand sideways leans around corners.

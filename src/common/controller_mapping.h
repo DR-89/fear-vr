@@ -27,6 +27,7 @@ enum FearVrGameCommand : std::uint32_t {
     FEARVR_CMD_FOCUS = 27,
     FEARVR_CMD_PREV_WEAPON = 76,
     FEARVR_CMD_NEXT_WEAPON = 77,
+    FEARVR_CMD_THROW_GRENADE = 81,
     FEARVR_CMD_ACTIVATE = 87,
     FEARVR_CMD_RELOAD = 88,
     FEARVR_CMD_SLOWMO = 106
@@ -73,6 +74,10 @@ inline int LeftHandLeanDirection(
 inline FearVrCommandValue MapControllerCommand(
     const FearVrInputState& input,
     std::uint32_t command) noexcept {
+    // Springen und Ducken liegen auf demselben Stick wie das Drehen. Erst ein
+    // deutlicher Vollausschlag darf sie ausloesen, sonst springt der Spieler
+    // beim schnellen Drehen.
+    constexpr float kVerticalStickThreshold = 0.80F;
     constexpr float kStickDeadzone = 0.22F;
     constexpr float kTriggerThreshold = 0.55F;
     constexpr float kSqueezeThreshold = 0.65F;
@@ -93,10 +98,10 @@ inline FearVrCommandValue MapControllerCommand(
         rightActive
             ? ApplyInputDeadzone(input.turnX, kStickDeadzone)
             : 0.0F;
-    const float turnY =
-        rightActive
-            ? ApplyInputDeadzone(input.turnY, kStickDeadzone)
-            : 0.0F;
+    // Springen und Ducken messen den tatsaechlichen Stickweg. Der
+    // deadzonebereinigte Wert waere gestaucht: 80 Prozent Ausschlag kaemen
+    // dort nur als 74 Prozent an.
+    const float verticalStick = rightActive ? input.turnY : 0.0F;
 
     switch (command) {
     case FEARVR_CMD_FORWARD_AXIS:
@@ -129,10 +134,12 @@ inline FearVrCommandValue MapControllerCommand(
             leftActive &&
                 input.trigger[FEARVR_HAND_LEFT] >=
                     kTriggerThreshold};
+    // Der Waffenwechsel schaltet zyklisch vorwaerts und braucht deshalb keine
+    // Gegenrichtung mehr. Ausgeloest wird er als Tastenflanke im GameClient,
+    // hier steht nur der Ruhezustand.
     case FEARVR_CMD_NEXT_WEAPON:
-        return {1.0F, turnY >= 0.65F};
     case FEARVR_CMD_PREV_WEAPON:
-        return {1.0F, turnY <= -0.65F};
+        return {0.0F, false};
     case FEARVR_CMD_RUN:
         return {
             1.0F,
@@ -146,25 +153,19 @@ inline FearVrCommandValue MapControllerCommand(
                 input.squeeze[FEARVR_HAND_RIGHT] >=
                     kSqueezeThreshold};
     case FEARVR_CMD_JUMP:
-        return {
-            1.0F,
-            rightActive &&
-                (input.buttons & FEARVR_IB_RIGHT_PRIMARY) != 0};
+        return {1.0F, verticalStick >= kVerticalStickThreshold};
     case FEARVR_CMD_DUCK:
-        return {
-            1.0F,
-            leftActive &&
-                (input.buttons & FEARVR_IB_LEFT_PRIMARY) != 0};
+        return {1.0F, verticalStick <= -kVerticalStickThreshold};
+    // Nachladen und Granate teilen sich die rechte Sekundaertaste: kurz laedt
+    // nach, gehalten wirft. Beides entsteht deshalb als Puls im GameClient.
     case FEARVR_CMD_RELOAD:
-        return {
-            1.0F,
-            rightActive &&
-                (input.buttons & FEARVR_IB_RIGHT_SECONDARY) != 0};
+    case FEARVR_CMD_THROW_GRENADE:
+        return {0.0F, false};
     case FEARVR_CMD_SLOWMO:
         return {
             1.0F,
             leftActive &&
-                (input.buttons & FEARVR_IB_LEFT_SECONDARY) != 0};
+                (input.buttons & FEARVR_IB_LEFT_PRIMARY) != 0};
     case FEARVR_CMD_LEAN_LEFT:
         return {1.0F, LeftHandLeanDirection(input) > 0};
     case FEARVR_CMD_LEAN_RIGHT:
@@ -173,7 +174,7 @@ inline FearVrCommandValue MapControllerCommand(
         return {
             1.0F,
             leftActive &&
-                (input.buttons & FEARVR_IB_LEFT_STICK) != 0};
+                (input.buttons & FEARVR_IB_LEFT_SECONDARY) != 0};
     default:
         return {0.0F, false};
     }

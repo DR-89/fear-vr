@@ -398,13 +398,10 @@ M5 ist committed. M6 ist weitgehend umgesetzt (siehe unten).
 
 1. Scope, roten Strahl, Projektilrichtung und die bestätigte natürliche
    Waffenkalibrierung unverändert lassen.
-2. Einen Spieldurchgang mit der neuen Performanceinstrumentierung fahren und
-   `tools\collect-perf-report.ps1` auswerten. Das ist der letzte fehlende
-   M6-Lieferbestandteil.
-3. Offene Live-Regressionen aus `docs/TESTING.md` §2 abarbeiten
+2. Offene Live-Regressionen aus `docs/TESTING.md` §2 abarbeiten
    (Fenstermodus/Vollbild, Alt-Tab, Auflösungswechsel, Save/Load,
    Tod/Respawn, Leiter, Knockdown, Debug-Build).
-4. Weiterhin offen aus M4/M5: der CPU-Readback im Stereo-HUD-Mischer muss
+3. Weiterhin offen aus M4/M5: der CPU-Readback im Stereo-HUD-Mischer muss
    GPU-seitig oder als nativer UI-Layer ersetzt werden, und Translation
    braucht Weltkollision, bevor sie Standard werden darf.
 
@@ -430,6 +427,12 @@ zusätzlich `handles=`.
 Nachgewiesenes M6-Gate: deinstalliert, danach allein aus dem Repo neu gebaut
 und frisch gestaged; Retail unverändert, Spielstände erhalten. Details in
 `docs/TESTING.md` §16.
+
+Gemessen im Lauf `m5-fear-20260725-004241`: XR stabil auf 90 Hz, Spiel rund
+50 fps im Stereo, Renderzeit links Ø 147,5 µs und rechts Ø 81,3 µs,
+Host-Copyzeit Ø 293,7 µs, ein einziger verworfener Frame, Handles ohne Trend
+zwischen 486 und 518. Die 2871 reused frames sind die erwartete Differenz
+zwischen 90 Hz Display und ~50 fps Spiel, kein Fehler.
 
 **Wichtig:** `stage\userdata-*` enthält Spielstände, Profile und
 Screenshots. Diese Verzeichnisse sind Benutzerdaten und werden von der

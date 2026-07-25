@@ -104,12 +104,19 @@ $windows = @(
 
 function Stat($values) {
     if (-not $values -or @($values).Count -eq 0) { return $null }
-    $measured = $values | Measure-Object -Average -Maximum
+    $measured = $values | Measure-Object -Average -Maximum -Minimum
     return [ordered]@{
         average = [math]::Round($measured.Average, 1)
         maximum = [math]::Round($measured.Maximum, 1)
+        minimum = [math]::Round($measured.Minimum, 1)
     }
 }
+
+# Menü, Laden und Komfortbildschirm rendern nur das linke Auge als Mono-Quad.
+# Solche Fenster haben keine Rechtes-Auge-Messung und würden die Mittelwerte
+# für Renderzeit und Game-FPS nach unten ziehen. Die Spielzahlen werden
+# deshalb ausschließlich über Stereofenster gebildet.
+$stereoWindows = @($windows | Where-Object { $_.renderRightAvgUs -gt 0 })
 
 # Die letzte ring_full-Meldung trägt den kumulierten Zähler.
 $dropped = 0
@@ -159,13 +166,17 @@ $report = [ordered]@{
     reusedFrames = ($windows | ForEach-Object { $_.reused } |
         Measure-Object -Sum).Sum
     xrFps = Stat ($windows | ForEach-Object { $_.xrFps })
-    gameFps = Stat ($windows | ForEach-Object { $_.gameFps })
-    renderLeftUs = Stat ($windows | ForEach-Object { $_.renderLeftAvgUs })
-    renderRightUs = Stat ($windows | ForEach-Object { $_.renderRightAvgUs })
-    hostCopyUs = Stat ($windows | ForEach-Object { $_.copyAvgUs })
+    gameFps = Stat ($stereoWindows | ForEach-Object { $_.gameFps })
+    renderLeftUs = Stat ($stereoWindows | ForEach-Object { $_.renderLeftAvgUs })
+    renderRightUs = Stat ($stereoWindows | ForEach-Object { $_.renderRightAvgUs })
+    hostCopyUs = Stat ($stereoWindows | ForEach-Object { $_.copyAvgUs })
+    # host_start misst vor der OpenXR-/D3D-Initialisierung und taugt deshalb
+    # nicht als Leckreferenz. Aussagekräftig ist der eingeschwungene Bereich.
     handlesStart = [int](Field $hostStart 'handles')
     handlesEnd = [int](Field $hostStop 'handles')
+    handlesSteadyState = Stat ($windows | ForEach-Object { $_.handles })
     perfWindows = $windows.Count
+    stereoWindows = $stereoWindows.Count
 }
 
 if ($AsJson) {
@@ -198,12 +209,21 @@ if ($report.perfWindows -eq 0) {
         -ForegroundColor Yellow
     Write-Host '  Build vor der Performanceinstrumentierung.' `
         -ForegroundColor Yellow
+} elseif ($report.stereoWindows -eq 0) {
+    Row 'XR-Displayrate (fps)' "Ø $($report.xrFps.average) / max $($report.xrFps.maximum)"
+    Write-Host '  Kein Stereofenster im Lauf: Es wurde nur Menue/Laden gemessen.' `
+        -ForegroundColor Yellow
 } else {
     Row 'XR-Displayrate (fps)' "Ø $($report.xrFps.average) / max $($report.xrFps.maximum)"
-    Row 'Game-FPS' "Ø $($report.gameFps.average) / max $($report.gameFps.maximum)"
+    Write-Host ("  (Spielzahlen aus {0} von {1} Fenstern mit Stereobild)" -f `
+        $report.stereoWindows, $report.perfWindows)
+    Row 'Game-FPS' "Ø $($report.gameFps.average) / $($report.gameFps.minimum)-$($report.gameFps.maximum)"
     Row 'Renderzeit links (us)' "Ø $($report.renderLeftUs.average) / max $($report.renderLeftUs.maximum)"
     Row 'Renderzeit rechts (us)' "Ø $($report.renderRightUs.average) / max $($report.renderRightUs.maximum)"
     Row 'Host-Copyzeit (us)' "Ø $($report.hostCopyUs.average) / max $($report.hostCopyUs.maximum)"
 }
 Write-Host '  --- Ressourcen ---'
-Row 'Handles Start/Ende' "$($report.handlesStart) / $($report.handlesEnd)"
+Row 'Handles Start/Ende' "$($report.handlesStart) / $($report.handlesEnd) (Start = vor OpenXR-Init)"
+if ($report.handlesSteadyState) {
+    Row 'Handles eingeschwungen' "$($report.handlesSteadyState.minimum)-$($report.handlesSteadyState.maximum)"
+}

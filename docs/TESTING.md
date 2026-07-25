@@ -76,6 +76,11 @@ setzt die Zähler danach zurück. Ein Frame gilt als *reused*, wenn seit der
 letzten Einreichung kein neues Spielbild importiert wurde — das ist regulär,
 sobald die XR-Displayrate über der Spiel-FPS liegt.
 
+Der Bericht bildet Game-FPS, Renderzeiten und Copyzeit **nur über Fenster mit
+Stereobild**. Menü, Ladebildschirm und Komfortmodus rendern lediglich das
+linke Auge als Mono-Quad; würde man sie mitteln, sänken die Werte für das
+rechte Auge und die Game-FPS künstlich.
+
 Läufe **vor** dem 25.07.2026 enthalten noch keine `perf_frame`-Zeilen; der
 Bericht weist das ausdrücklich aus, statt Nullen zu melden.
 
@@ -551,11 +556,52 @@ seither geändert hat.
   Voraussetzungen waren das Repo, die legal installierte F.E.A.R.-Kopie, die
   lokalen Public Tools und die gepinnten Abhängigkeiten.
 
+### Gemessene Performancezahlen, Lauf `m5-fear-20260725-004241`
+
+RTX 3050 Laptop, SteamVR/OpenXR 2.16.7, Quest 3, Swapchains 2×2064x2208
+(Format 29), Shared-Texture 1024x768 B8G8R8A8 über `path=cpu_d3d9ex`.
+Laufzeit 1,1 min, 20 Messfenster, davon 11 mit Stereobild. Die Spielzahlen
+sind ausschließlich über die Stereofenster gebildet; Menü- und Ladefenster
+rendern nur das linke Auge und würden die Mittelwerte verfälschen.
+
+| Kennzahl | Wert |
+|---|---|
+| XR-Displayrate | Ø 88,8 fps, max 90,1 — stabil auf der 90-Hz-Rate |
+| Game-FPS (Stereo) | Ø 49,7, Spanne 15,6–72,3 |
+| Renderzeit links | Ø 147,5 µs, max 162 µs |
+| Renderzeit rechts | Ø 81,3 µs, max 98 µs |
+| Host-Copyzeit | Ø 293,7 µs, max 316 µs (Einzelspitzen bis 2439 µs beim Laden) |
+| eingereichte XR-Frames | 6000 |
+| konsumierte Spielbilder | 2400 |
+| dropped (Ring voll) | 1 |
+| reused | 2871 |
+| Handles eingeschwungen | 486–518 |
+
+Einordnung:
+
+- Die 2871 reused frames sind **kein Fehler**: Der Host läuft mit 90 Hz, das
+  Spiel liefert rund 50 Bilder pro Sekunde. Die Differenz muss zwangsläufig
+  aus wiederholt eingereichten Bildern bestehen. Das Verhältnis passt zu den
+  gemessenen Raten.
+- Genau ein verworfener Frame über den ganzen Lauf. Der Drei-Slot-Ring läuft
+  also praktisch nie voll.
+- Die Host-Copyzeit von rund 0,3 ms liegt deutlich unter dem 11-ms-Budget
+  eines 90-Hz-Frames. Der teure Anteil des `cpu_d3d9ex`-Pfads sitzt auf der
+  x86-Seite im Spielprozess, nicht im Host.
+- Die Handle-Anzahl bleibt über den ganzen Lauf zwischen 486 und 518, ohne
+  Trend. Kein Handle-Leck. Der Wert aus `host_start` (70) ist als Referenz
+  ungeeignet, weil er vor der OpenXR-/D3D-Initialisierung entsteht.
+- Die linke Renderzeit liegt rund 66 µs über der rechten. Das linke Auge wird
+  zuerst gerendert und trägt den Zustandswechsel der Pipeline; in Mono-Phasen
+  ist ohnehin nur das linke Auge aktiv.
+
+Damit ist die Kennzahlenpflicht aus §14 erfüllt.
+
 ### Offen
 
-- Ein Lauf mit der neuen Performanceinstrumentierung. Die Zahlen für
-  Game-FPS, XR-Displayrate, reused frames, Renderzeit je Auge und
-  Host-Copyzeit brauchen einen echten Spieldurchgang mit Headset.
+- Ein Lauf über volle 15 Minuten **mit** Instrumentierung. Der Messlauf war
+  1,1 min lang; das Dauergate selbst wurde bereits in §8 auf Basis des
+  11½-Minuten-Laufs abgenommen.
 - Die in §2 als offen markierten Live-Regressionen (Fenstermodus/Vollbild,
   Alt-Tab, gezielter Auflösungswechsel, Save/Load, Tod/Respawn, Leiter,
   Knockdown, Debug-Build).

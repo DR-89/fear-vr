@@ -7,6 +7,15 @@
     App-ID 21090 auf. Über die offizielle lose archcfg-Schicht wird nur der
     ABI-neutrale GameClient-Loader geladen; Retail bleibt unverändert.
 
+.PARAMETER Runtime
+    Welche OpenXR-Runtime der Host verwenden soll:
+      active   - die systemweit eingestellte (Standard)
+      steamvr  - SteamVR erzwingen
+      vdxr     - VirtualDesktopXR erzwingen
+      <Pfad>   - beliebiges Runtime-Manifest (.json)
+    Erzwungen wird über XR_RUNTIME_JSON, das nur für den Hostprozess gesetzt
+    wird. Die systemweite Einstellung bleibt unverändert.
+
 .PARAMETER Wait
     Wartet auf das Spielende. Der zugehörige Host wird danach beendet.
 #>
@@ -14,6 +23,8 @@
 param(
     [ValidateSet('M2', 'M3', 'M4', 'M5')]
     [string]$Milestone = 'M2',
+
+    [string]$Runtime = 'active',
 
     [switch]$Translation,
 
@@ -31,9 +42,19 @@ $milestoneSlug = $Milestone.ToLowerInvariant()
 $cfg = Get-FearVrConfig
 $retailBefore = Assert-RetailFearExe
 
+# --- OpenXR-Runtime bestimmen -----------------------------------------------
+# Steam bleibt für den Spielstart nötig (offizieller -applaunch-Weg), die
+# VR-Runtime ist davon aber unabhängig.
+$runtimeInfo = Resolve-OpenXrRuntime $Runtime
+$usesSteamVr = $runtimeInfo.Kind -eq 'steamvr'
+
 # SteamVR 2.x legt beim offiziellen Start eines Nicht-VR-Spiels sonst
 # automatisch eine Theaterfläche über die bereits laufende OpenXR-Szene.
-& "$PSScriptRoot\disable-steamvr-theater.ps1" -Quiet
+# Andere Runtimes kennen dieses Verhalten nicht; dort wird die
+# SteamVR-Konfiguration bewusst nicht angefasst.
+if ($usesSteamVr) {
+    & "$PSScriptRoot\disable-steamvr-theater.ps1" -Quiet
+}
 
 $manifestPath = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot (
@@ -103,10 +124,21 @@ $hostArguments = @(
     '--exit-on-game-disconnect',
     '--log-dir', "`"$runLogDirectory`""
 )
-$hostProcess = Start-Process -FilePath $hostExe `
-    -ArgumentList $hostArguments `
-    -WorkingDirectory (Split-Path -Parent $hostExe) `
-    -PassThru
+# XR_RUNTIME_JSON wirkt nur auf den erzeugten Kindprozess. Der Wert wird
+# danach wieder auf den Ausgangszustand gesetzt, damit die aufrufende Shell
+# unverändert bleibt.
+$previousRuntimeJson = $env:XR_RUNTIME_JSON
+try {
+    if ($runtimeInfo.Override) {
+        $env:XR_RUNTIME_JSON = $runtimeInfo.Path
+    }
+    $hostProcess = Start-Process -FilePath $hostExe `
+        -ArgumentList $hostArguments `
+        -WorkingDirectory (Split-Path -Parent $hostExe) `
+        -PassThru
+} finally {
+    $env:XR_RUNTIME_JSON = $previousRuntimeJson
+}
 
 $hostLog = $null
 $ready = $false
@@ -157,6 +189,12 @@ Write-Host "=== F.E.A.R. VR $milestoneLabel ===" -ForegroundColor Cyan
 Write-Host "Session: $sessionText"
 Write-Host "Stage:   $($manifest.moduleDirectory)"
 Write-Host "Logs:    $runLogDirectory"
+$runtimeSource = if ($runtimeInfo.Override) {
+    'erzwungen über XR_RUNTIME_JSON'
+} else {
+    'systemweit aktiv'
+}
+Write-Host "Runtime: $($runtimeInfo.Name) ($runtimeSource)"
 Start-Process -FilePath $manifest.steamExe `
     -ArgumentList $steamArguments `
     -WorkingDirectory (Split-Path -Parent $manifest.steamExe) |
@@ -187,24 +225,27 @@ if ($null -eq $fear) {
     throw 'Steam startete innerhalb von 25 Sekunden keine FEAR.exe.'
 }
 
-$theaterGuardScript = Assert-UnderProjectRoot (
-    Join-Path $cfg.ProjectRoot 'tools\hide-steamvr-theater.ps1'
-)
-$theaterGuardLog = Assert-UnderProjectRoot (
-    Join-Path $runLogDirectory 'steamvr-theater-guard.log'
-)
-$theaterGuardArguments = @(
-    '-NoProfile',
-    '-ExecutionPolicy', 'Bypass',
-    '-File', "`"$theaterGuardScript`"",
-    '-GamePid', $fear.Id,
-    '-LogPath', "`"$theaterGuardLog`""
-)
-$theaterGuard = Start-Process `
-    -FilePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
-    -ArgumentList $theaterGuardArguments `
-    -WindowStyle Hidden `
-    -PassThru
+# Der Theaterwächter ist reine SteamVR-Kosmetik und wird nur dort gebraucht.
+if ($usesSteamVr) {
+    $theaterGuardScript = Assert-UnderProjectRoot (
+        Join-Path $cfg.ProjectRoot 'tools\hide-steamvr-theater.ps1'
+    )
+    $theaterGuardLog = Assert-UnderProjectRoot (
+        Join-Path $runLogDirectory 'steamvr-theater-guard.log'
+    )
+    $theaterGuardArguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$theaterGuardScript`"",
+        '-GamePid', $fear.Id,
+        '-LogPath', "`"$theaterGuardLog`""
+    )
+    $theaterGuard = Start-Process `
+        -FilePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+        -ArgumentList $theaterGuardArguments `
+        -WindowStyle Hidden `
+        -PassThru
+}
 
 $expectedModules = @{
     'GameClient.dll' = Join-Path $manifest.moduleDirectory 'GameClient.dll'

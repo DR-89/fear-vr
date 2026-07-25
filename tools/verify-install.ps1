@@ -47,10 +47,23 @@ if (Test-Path -LiteralPath $exe) {
 }
 
 # --- OpenXR-Runtime (x64 aktiv, WOW6432Node fehlt erwartungsgemäß) ---
-try {
-    $rt = (Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\OpenXR\1' -ErrorAction Stop).ActiveRuntime
-    Line 'OpenXR x64 ActiveRuntime' $rt ([bool]$rt)
-} catch { Line 'OpenXR x64 ActiveRuntime' 'fehlt' $false }
+$active = Get-ActiveOpenXrRuntime
+if ($active) {
+    Line 'OpenXR x64 ActiveRuntime' "$($active.Name) [$($active.Kind)]" $true
+    Info 'Runtime-Manifest' $active.Path
+} else {
+    Line 'OpenXR x64 ActiveRuntime' 'fehlt' $false
+}
+
+# Der Host ist runtime-unabhängig. Beide bekannten Runtimes werden gemeldet,
+# damit klar ist, was -Runtime steamvr bzw. -Runtime vdxr erzwingen kann.
+foreach ($candidate in @(
+    @{ Label = 'SteamVR verfügbar'; Path = $cfg.SteamVrManifest },
+    @{ Label = 'VirtualDesktopXR verfügbar'; Path = $cfg.VdxrManifest }
+)) {
+    $name = Get-OpenXrRuntimeName $candidate.Path
+    Info $candidate.Label $(if ($name) { $name } else { 'nicht installiert' })
+}
 
 $wow = $null
 try { $wow = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Khronos\OpenXR\1' -ErrorAction Stop).ActiveRuntime } catch {}

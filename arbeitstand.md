@@ -407,7 +407,27 @@ M5 ist committed. M6 ist weitgehend umgesetzt (siehe unten).
 
 ## M6: Stand vom 25.07.2026
 
-Neue Werkzeuge:
+### Runtime-Unabhängigkeit
+
+Der Mod läuft mit **SteamVR und Virtual Desktop (VDXR)**. Umgeschaltet wird
+mit `-Runtime active|steamvr|vdxr|<Manifestpfad>` an den Launchern; gesetzt
+wird dabei `XR_RUNTIME_JSON` nur für den Hostprozess. Die systemweite
+Einstellung unter `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` wird
+bewusst nicht angefasst.
+
+Die SteamVR-Sonderbehandlung (`autoShowGameTheater`, Theaterwächter) läuft
+nur noch, wenn die effektive Runtime als SteamVR erkannt wird.
+
+Steam bleibt als **Store** nötig (`-applaunch 21090`); SteamVR selbst nicht.
+
+Nebenbefund: Virtual Desktop registriert auch eine **32-Bit**-OpenXR-Runtime
+(`virtualdesktop-openxr-32.json`). Die Prämisse von AD-001 — kein
+32-Bit-Runtime-Eintrag vorhanden — gilt damit nicht mehr uneingeschränkt. Die
+Zwei-Prozess-Architektur bleibt trotzdem richtig, weil sie runtime-unabhängig
+ist und dem ABI-empfindlichen VC7.1-Client keinen modernen OpenXR-Loader in
+denselben Prozess lädt.
+
+### Neue Werkzeuge:
 
 - `tools\build-all.ps1` — prüft Abhängigkeiten, baut x86 und x64, führt beide
   Testsuiten aus, schreibt `stage\build-manifest.json`. Der Generator ist auf

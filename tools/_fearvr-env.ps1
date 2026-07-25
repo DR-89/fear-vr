@@ -15,6 +15,7 @@ $script:FearVr = [ordered]@{
     SdkInstallerSize = 671441087
     SdkInstallerSha256 = '11AAA4128528403F7BC9EA5119C68051C62B92A99E6411DFD749AF55E9B19DF8'
     SteamVrManifest = 'C:\Program Files (x86)\Steam\steamapps\common\SteamVR\steamxr_win64.json'
+    VdxrManifest    = 'C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json'
     UserDataRel     = 'stage\userdata'
 }
 
@@ -45,6 +46,94 @@ function Assert-UnderProjectRoot([string]$Path) {
         throw "SICHERHEITSABBRUCH: '$full' liegt nicht unter der Projektwurzel '$rootFull'."
     }
     return $full
+}
+
+# --- OpenXR-Runtime-Auswahl --------------------------------------------------
+# Der Mod ist an keine bestimmte Runtime gebunden: Der x64-Host spricht nur
+# OpenXR. SteamVR und VirtualDesktopXR (VDXR) funktionieren beide.
+#
+# Umgeschaltet wird NICHT über HKLM\...\Khronos\OpenXR\1\ActiveRuntime — das
+# ist eine systemweite Einstellung. Stattdessen wird XR_RUNTIME_JSON nur für
+# den gestarteten Hostprozess gesetzt. Das wirkt ausschließlich auf diesen
+# Prozess und lässt die Systemeinstellung unangetastet.
+
+# Liest den Namen aus einem OpenXR-Runtime-Manifest.
+function Get-OpenXrRuntimeName([string]$ManifestPath) {
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        return $null
+    }
+    try {
+        return ([IO.File]::ReadAllText($ManifestPath) |
+            ConvertFrom-Json).runtime.name
+    } catch {
+        return $null
+    }
+}
+
+# steamvr | vdxr | other
+function Get-OpenXrRuntimeKind([string]$ManifestPath) {
+    $name = Get-OpenXrRuntimeName $ManifestPath
+    if ($null -eq $name) { return 'other' }
+    if ($name -match 'SteamVR') { return 'steamvr' }
+    if ($name -match 'VirtualDesktop') { return 'vdxr' }
+    return 'other'
+}
+
+# Die systemweit aktive Runtime, rein lesend.
+function Get-ActiveOpenXrRuntime {
+    $path = $null
+    try {
+        $path = (Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\OpenXR\1' `
+            -ErrorAction Stop).ActiveRuntime
+    } catch {
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+    return [pscustomobject]@{
+        Path = $path
+        Name = Get-OpenXrRuntimeName $path
+        Kind = Get-OpenXrRuntimeKind $path
+    }
+}
+
+# Löst die -Runtime-Auswahl eines Launchers auf.
+#   active            -> keine Überschreibung, Systemeinstellung gilt
+#   steamvr | vdxr    -> bekanntes Manifest
+#   <Pfad zur .json>  -> beliebiges Manifest
+# Rückgabe: Objekt mit Path (oder $null bei 'active'), Name, Kind und
+# Override (bool).
+function Resolve-OpenXrRuntime([string]$Runtime) {
+    $cfg = Get-FearVrConfig
+    $active = Get-ActiveOpenXrRuntime
+
+    if ([string]::IsNullOrWhiteSpace($Runtime) -or $Runtime -eq 'active') {
+        if ($null -eq $active) {
+            throw @'
+Keine aktive OpenXR-Runtime gefunden.
+SteamVR oder den Virtual Desktop Streamer starten und dort als OpenXR-Runtime
+setzen, oder den Launcher mit -Runtime steamvr bzw. -Runtime vdxr aufrufen.
+'@
+        }
+        return [pscustomobject]@{
+            Path = $null; Name = $active.Name
+            Kind = $active.Kind; Override = $false
+        }
+    }
+
+    $manifest = switch ($Runtime) {
+        'steamvr' { $cfg.SteamVrManifest }
+        'vdxr'    { $cfg.VdxrManifest }
+        default   { $Runtime }
+    }
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "OpenXR-Runtime-Manifest nicht gefunden: $manifest"
+    }
+    return [pscustomobject]@{
+        Path = [IO.Path]::GetFullPath($manifest)
+        Name = Get-OpenXrRuntimeName $manifest
+        Kind = Get-OpenXrRuntimeKind $manifest
+        Override = $true
+    }
 }
 
 # Verifiziert die Retail-FEAR.exe gegen Version + SHA-256. Wirft bei Abweichung.

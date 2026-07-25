@@ -142,6 +142,32 @@ pwsh -File tools\prepare-m5-stage.ps1
 pwsh -File tools\launch-m5-fear.ps1
 ```
 
+## VR-Runtime: SteamVR oder Virtual Desktop
+
+Der Mod ist an keine bestimmte Runtime gebunden — der x64-Host spricht nur
+OpenXR. Bestätigt sind **SteamVR** und **VirtualDesktopXR (VDXR)**.
+
+```powershell
+pwsh -File tools\launch-m5-fear.ps1                    # aktive Runtime
+pwsh -File tools\launch-m5-fear.ps1 -Runtime vdxr      # Virtual Desktop
+pwsh -File tools\launch-m5-fear.ps1 -Runtime steamvr   # SteamVR
+```
+
+`-Runtime` setzt `XR_RUNTIME_JSON` **nur für den Hostprozess**. Die
+systemweite Einstellung unter
+`HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` wird nicht verändert; wer sie
+dauerhaft umstellen will, tut das im Virtual Desktop Streamer
+beziehungsweise in SteamVR. `tools\verify-install.ps1` zeigt die aktive
+Runtime und welche installiert sind.
+
+Nur bei SteamVR werden die SteamVR-spezifischen Schritte ausgeführt
+(`autoShowGameTheater` abschalten, Theaterwächter). Unter VDXR unterbleiben
+sie vollständig, und es wird keine SteamVR-Datei angefasst.
+
+**Steam bleibt trotzdem nötig** — aber nur als Store: F.E.A.R. wird offiziell
+über `steam.exe -applaunch 21090` gestartet. Das ist unabhängig davon, welche
+VR-Runtime rendert. SteamVR selbst muss unter VDXR nicht laufen.
+
 Belegung: linker Stick bewegt, linker Grip rennt, linker Stick-Klick öffnet
 die Pause. Rechter Stick dreht, hoch/runter wechselt die Waffe, Stick-Klick
 zentriert die Blickrichtung. A springt, B lädt nach, X duckt, Y schaltet

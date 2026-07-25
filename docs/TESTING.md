@@ -597,6 +597,23 @@ Einordnung:
 
 Damit ist die Kennzahlenpflicht aus §14 erfüllt.
 
+### Runtime-Unabhängigkeit, geprüft am 25.07.2026
+
+| Prüfung | Ergebnis |
+|---|---|
+| `--validate-only` unter VDXR | `VirtualDesktopXR 1.0.10`, `Meta Quest 3`, Adapter-LUID `0x0:D57B`, Swapchains 2×`2688x2880`, Exitcode 0 |
+| `--validate-only` unter SteamVR | `SteamVR/OpenXR 2.16.7`, Swapchains 2×`2064x2208` |
+| Spielstart `-Runtime vdxr` | `logs\m5-fear-20260725-005345`: Runtime VDXR, Bridge verbunden, `ipc_frame` importiert |
+| SteamVR-Schritte unter VDXR | unterbleiben — keine `steamvr-theater-guard.log`, `steamvr.vrsettings` unverändert |
+
+VDXR liefert mit `2688x2880` je Auge eine deutlich höhere Swapchain-Auflösung
+als SteamVR. Das Spielbild bleibt davon unberührt: Es kommt weiterhin als
+1024x768-Textur über die Bridge und wird im Host hochskaliert.
+
+Umgeschaltet wird über `-Runtime`, das `XR_RUNTIME_JSON` nur für den
+Hostprozess setzt. Die systemweite Runtime-Einstellung wird nicht verändert
+(AD-018).
+
 ### Offen
 
 - Ein Lauf über volle 15 Minuten **mit** Instrumentierung. Der Messlauf war

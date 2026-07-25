@@ -41,6 +41,13 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Bekannte Nachteile:** Prozess-/Bitness-Grenze, IPC-Komplexität,
   Shared-Texture-Interop.
 - **Rückfallpfad:** Flat-Screen ohne Host bleibt jederzeit möglich.
+- **Nachtrag 25.07.2026:** Die Prämisse gilt nicht mehr uneingeschränkt. Der
+  Virtual Desktop Streamer registriert zusätzlich eine 32-Bit-Runtime
+  (`virtualdesktop-openxr-32.json`), sodass OpenXR in `FEAR.exe` technisch
+  möglich wäre. Die Zwei-Prozess-Architektur bleibt trotzdem: Sie ist
+  runtime-unabhängig, funktioniert auch mit SteamVR, und der ABI-empfindliche
+  VC7.1-Client bekäme sonst einen modernen OpenXR-Loader in denselben Prozess.
+  Siehe AD-018.
 
 ### AD-002 — Statischer OpenXR-Loader mit festem SDK-Pin
 
@@ -388,6 +395,37 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Rückfallpfad:** Die getrennten CMake-Aufrufe bleiben dokumentiert und
   funktionsfähig.
 - **Details:** `README.md`, `docs/TESTING.md` §16.
+
+### AD-018 — Runtime-unabhängiger Betrieb, Umschaltung per XR_RUNTIME_JSON
+
+- **Problem:** Der Mod soll auch über Virtual Desktop laufen und dabei nicht
+  von SteamVR abhängen. Der Host war bereits reines OpenXR, die Startskripte
+  führten aber unbedingt SteamVR-spezifische Schritte aus: `autoShowGameTheater`
+  abschalten und den Theaterwächter starten.
+- **Messung/Beleg:** Mit `ActiveRuntime` auf VDXR meldete
+  `fearvr-host.exe --validate-only` am 25.07.2026 `VirtualDesktopXR 1.0.10`,
+  erkannte `Meta Quest 3`, wählte dieselbe Adapter-LUID `0x0:D57B` und
+  erzeugte zwei Swapchains mit `2688x2880` — gegenüber `2064x2208` unter
+  SteamVR. Exitcode 0. Ein vollständiger Spielstart mit `-Runtime vdxr` lief
+  ohne SteamVR; im Laufverzeichnis entstand keine
+  `steamvr-theater-guard.log`.
+- **Getestete Optionen:** (a) `HKLM\...\Khronos\OpenXR\1\ActiveRuntime`
+  umschreiben — verworfen, das ist eine systemweite Einstellung und erfordert
+  Administratorrechte; (b) `XR_RUNTIME_JSON` nur für den Hostprozess setzen.
+- **Gewählte Lösung:** `-Runtime active|steamvr|vdxr|<Manifestpfad>` an den
+  Launchern. Die Auflösung sitzt in `Resolve-OpenXrRuntime`
+  (`tools\_fearvr-env.ps1`); die Umgebungsvariable wird nur um den
+  `Start-Process`-Aufruf herum gesetzt und danach zurückgestellt. Die
+  SteamVR-Schritte laufen ausschließlich, wenn die effektive Runtime als
+  `steamvr` erkannt wurde.
+- **Bekannte Nachteile:** Die Erkennung liest den `name` aus dem
+  Runtime-Manifest; benennt ein Hersteller seine Runtime um, greift der
+  SteamVR-Zweig nicht mehr. Das ist harmlos — er ist reine Kosmetik.
+- **Abgrenzung:** Steam bleibt als **Store** nötig, weil F.E.A.R. offiziell
+  über `steam.exe -applaunch 21090` startet. Das ist unabhängig von der
+  VR-Runtime; SteamVR selbst muss nicht laufen.
+- **Rückfallpfad:** Ohne `-Runtime` gilt unverändert die systemweite
+  Einstellung.
 
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 

@@ -228,6 +228,7 @@ bool g_seenStrafeAxisBinding = false;
 bool g_controllerCommandActive[128]{};
 bool g_injectedCommandActive[128]{};
 ULONGLONG g_weaponSwitchHoldStartTick = 0;
+ULONGLONG g_weaponSwitchNextRepeatTick = 0;
 int g_weaponSwitchDirection = 0;
 bool g_weaponSwitchTriggered = false;
 std::uint32_t g_weaponSwitchPulseCommand = 0;
@@ -2268,8 +2269,9 @@ RegressionCommandLog g_regressionCommands[] = {
 };
 
 void PrepareWeaponSwitchPulse() noexcept {
-    constexpr float kWeaponSwitchThreshold = 0.72F;
+    constexpr float kWeaponSwitchThreshold = 0.80F;
     constexpr ULONGLONG kWeaponSwitchHoldMs = 300;
+    constexpr ULONGLONG kWeaponSwitchRepeatMs = 450;
     const float vertical = g_currentInput.turnY;
     const int direction =
         vertical >= kWeaponSwitchThreshold
@@ -2279,6 +2281,7 @@ void PrepareWeaponSwitchPulse() noexcept {
     if (direction == 0) {
         g_weaponSwitchDirection = 0;
         g_weaponSwitchHoldStartTick = 0;
+        g_weaponSwitchNextRepeatTick = 0;
         g_weaponSwitchTriggered = false;
         return;
     }
@@ -2286,16 +2289,25 @@ void PrepareWeaponSwitchPulse() noexcept {
     if (direction != g_weaponSwitchDirection) {
         g_weaponSwitchDirection = direction;
         g_weaponSwitchHoldStartTick = now;
+        g_weaponSwitchNextRepeatTick = 0;
         g_weaponSwitchTriggered = false;
         return;
     }
-    if (!g_weaponSwitchTriggered &&
-        now - g_weaponSwitchHoldStartTick >= kWeaponSwitchHoldMs) {
+    const bool initialTrigger =
+        !g_weaponSwitchTriggered &&
+        now - g_weaponSwitchHoldStartTick >= kWeaponSwitchHoldMs;
+    const bool repeatTrigger =
+        g_weaponSwitchTriggered && g_weaponSwitchNextRepeatTick != 0 &&
+        now >= g_weaponSwitchNextRepeatTick;
+    if (initialTrigger || repeatTrigger) {
         g_weaponSwitchPulseCommand =
             direction > 0 ? FEARVR_CMD_NEXT_WEAPON
                           : FEARVR_CMD_PREV_WEAPON;
         g_weaponSwitchTriggered = true;
-        Report("INFO", "weapon_switch_gesture", "Weapon switch triggered after a deliberate 300 ms stick hold.");
+        g_weaponSwitchNextRepeatTick = now + kWeaponSwitchRepeatMs;
+        Report("INFO", "weapon_switch_gesture", initialTrigger
+            ? "Weapon switch triggered after an 80 percent, 300 ms stick hold."
+            : "Weapon switch repeated while the stick remains held.");
     }
 }
 
@@ -3955,6 +3967,7 @@ void RemoveWeaponAimHooks() noexcept {
     g_flashlightEnabled = true;
     g_leftTriggerWasDown = false;
     g_weaponSwitchHoldStartTick = 0;
+    g_weaponSwitchNextRepeatTick = 0;
     g_weaponSwitchDirection = 0;
     g_weaponSwitchTriggered = false;
     g_weaponSwitchPulseCommand = 0;

@@ -269,6 +269,10 @@ HLOCALOBJ g_leftFlashlightLight = nullptr;
 const void* g_leftFlashlightWeapon = nullptr;
 LTRigidTransform g_flashlightCameraRecovery;
 bool g_flashlightCameraOverridePending = false;
+// Genau das Objekt, dessen Transform wir entfuehrt haben. Eine
+// Zwischensequenz kann die Spielkamera austauschen; dann darf der gemerkte
+// Transform nicht in ein fremdes oder totes Objekt zurueckgeschrieben werden.
+HLOCALOBJ g_flashlightOverrideObject = nullptr;
 bool g_flashlightCommandPulsePending = false;
 bool g_flashlightCommandPulseActive = false;
 bool g_flashlightEnabled = true;
@@ -289,6 +293,10 @@ struct HandOrientationCalibration {
 HandOrientationCalibration g_rightHandOrientation;
 HandOrientationCalibration g_leftHandOrientation;
 ULONGLONG g_lastWeaponManagerUpdateTick = 0;
+// Laeuft das Weapon-Manager-Update, ist ein normaler Spielframe aktiv.
+// Zwischensequenzen, Ladebildschirme und Menues halten es an.
+constexpr ULONGLONG kPlayingFrameFreshMilliseconds = 500;
+LONG g_commandInjectionSuspendedLogged = 0;
 bool g_autoStereoActivationAttempted = false;
 bool g_crosshairOverrideApplied = false;
 bool g_crosshairOriginalKnown = false;
@@ -300,6 +308,30 @@ bool g_weaponAimGuideEnabled = true;
 bool g_controllerHapticsEnabled = true;
 bool g_headBobEnabled = false;
 bool g_forceHeadBobDisabled = false;
+// Diagnoseschalter zum Eingrenzen des Absturzes an einer bestimmten
+// Zwischensequenz. Jeder schaltet genau eine Gruppe unserer Schreibzugriffe
+// auf Retail-Weltobjekte ab. -fearvr-safe schaltet alle vier zusammen.
+bool g_disableFlashlight = false;
+bool g_disableHandNodes = false;
+bool g_disableWeaponTransform = false;
+bool g_disableBodyPieceHiding = false;
+// Schaltet den Stereo-Doppelrender ab. Damit laeuft der Weltrender wieder
+// genau einmal pro Frame, wie in Retail. Pruefschalter fuer die Frage, ob der
+// zweite Durchlauf mehr als nur Geometrie erneut ausloest.
+bool g_disableStereoRender = false;
+// Laesst den Client-Input-Hook installiert, schreibt aber keine Kommandobits
+// mehr in Retails CBindMgr. Trennt "Schreibzugriff auf den Bind-Manager" von
+// "Hook auf die Bindungsabfrage und synthetische Tastendruecke".
+bool g_disableCommandInjection = false;
+// Laesst den Bindungs-Hook weg. Zusammen mit -fearvr-no-inject trennt das
+// "Eingabe erreicht das Spiel" von "IClientShell::Update-Arbeit pro Frame".
+bool g_disableBindingHook = false;
+// Laesst die Arbeit im IClientShell::Update-Hook weg: Menueabfrage,
+// synthetische Tastendruecke, Fadenkreuz-Override, Waffenwechsel.
+bool g_disableClientUpdateWork = false;
+// Laesst Weapon-Manager-, AimAt- und Fire-Vector-Hook ungesetzt. Diese Gruppe
+// war in jedem abgestuerzten Lauf aktiv und im einzigen ueberlebenden nicht.
+bool g_disableAimHooks = false;
 bool g_stableWeaponMotionConfigured = false;
 bool g_headBobOriginalKnown = false;
 float g_headBobOriginalScale = 1.0F;
@@ -746,6 +778,50 @@ void ConfigureComfortOptions() noexcept {
     // may still opt into camera motion; weapon bob remains disabled separately.
     g_forceHeadBobDisabled =
         CommandLineContains(L"-fearvr-no-headbob");
+    const bool safeMode = CommandLineContains(L"-fearvr-safe");
+    g_disableFlashlight =
+        safeMode || CommandLineContains(L"-fearvr-no-flashlight");
+    g_disableHandNodes =
+        safeMode || CommandLineContains(L"-fearvr-no-handnodes");
+    g_disableWeaponTransform =
+        safeMode || CommandLineContains(L"-fearvr-no-weapon-transform");
+    g_disableBodyPieceHiding =
+        safeMode || CommandLineContains(L"-fearvr-no-body-hide");
+    g_disableStereoRender =
+        CommandLineContains(L"-fearvr-no-stereo");
+    g_disableCommandInjection =
+        CommandLineContains(L"-fearvr-no-inject");
+    // Der Bindungs-Hook ist als Absturzursache ausgeschlossen: Ohne ihn ist
+    // das Spiel an derselben Stelle weiterhin abgestuerzt. Er bleibt aktiv,
+    // zumal die Kommando-Injektion aus ihm heraus aufgerufen wird und ohne
+    // ihn gar keine Controllereingabe mehr ankaeme.
+    g_disableBindingHook =
+        CommandLineContains(L"-fearvr-no-binding-hook");
+    g_disableClientUpdateWork =
+        CommandLineContains(L"-fearvr-no-client-update");
+    g_disableAimHooks =
+        CommandLineContains(L"-fearvr-no-aim-hooks");
+    if (g_disableFlashlight || g_disableHandNodes ||
+        g_disableWeaponTransform || g_disableBodyPieceHiding ||
+        g_disableStereoRender || g_disableCommandInjection ||
+        g_disableBindingHook || g_disableClientUpdateWork ||
+        g_disableAimHooks) {
+        char message[288];
+        _snprintf_s(
+            message, sizeof(message), _TRUNCATE,
+            "flashlight=%d hand_nodes=%d weapon_transform=%d body_hide=%d "
+            "stereo=%d inject=%d binding_hook=%d client_update=%d "
+            "aim_hooks=%d",
+            g_disableFlashlight ? 0 : 1, g_disableHandNodes ? 0 : 1,
+            g_disableWeaponTransform ? 0 : 1,
+            g_disableBodyPieceHiding ? 0 : 1,
+            g_disableStereoRender ? 0 : 1,
+            g_disableCommandInjection ? 0 : 1,
+            g_disableBindingHook ? 0 : 1,
+            g_disableClientUpdateWork ? 0 : 1,
+            g_disableAimHooks ? 0 : 1);
+        Report("WARN", "vr_features_disabled", message);
+    }
     g_headBobEnabled = false;
     g_stableWeaponMotionConfigured = false;
     CaptureHeadBobOriginals();
@@ -1931,6 +2007,11 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             renderer, camera, techniqueOverride);
     }
     g_stereoStep = "query_stereo_enabled";
+    if (g_disableStereoRender) {
+        g_stereoStep = "stereo_disabled_by_switch";
+        return g_renderCameraWithOverride(
+            renderer, camera, techniqueOverride);
+    }
     if (!g_isStereoEnabled()) {
         return g_renderCameraWithOverride(
             renderer, camera, techniqueOverride);
@@ -2139,23 +2220,64 @@ LTRESULT InvokeStereoProtected(
         renderer, camera, techniqueOverride);
 }
 
+// Verwirft alle zwischengespeicherten Weltobjekt- und Node-Handles, ohne die
+// Engine damit noch einmal aufzurufen. Nach einem Levelwechsel oder einer
+// Sequenzuebernahme sind sie zerstoert; jeder weitere Zugriff schriebe in
+// fremden Speicher. Alles wird auf dem naechsten gueltigen Frame neu
+// eingerichtet.
+void ForgetWorldObjectsAfterLevelChange() noexcept {
+    const bool hadState =
+        g_playerBodyObject != nullptr ||
+        g_leftFlashlightModel != nullptr ||
+        g_leftFlashlightLight != nullptr ||
+        g_rightHandControl.installed || g_leftHandControl.installed;
+
+    g_flashlightCameraOverridePending = false;
+    g_flashlightOverrideObject = nullptr;
+    g_leftFlashlightModel = nullptr;
+    g_leftFlashlightLight = nullptr;
+    g_leftFlashlightWeapon = nullptr;
+    g_playerBodyObject = nullptr;
+    g_rightHandControl = HandNodeControlState{};
+    g_leftHandControl = HandNodeControlState{};
+    g_weaponAim.muzzleWeapon = nullptr;
+    g_weaponAim.muzzleValid = false;
+    g_weaponAim.muzzleDirectionValid = false;
+    g_weaponAim.muzzleLocalValid = false;
+
+    if (hadState) {
+        Report(
+            "INFO", "world_objects_forgotten",
+            "Level change or cutscene detected; cached body, hand-node and "
+            "flashlight handles were dropped before reuse.");
+    }
+}
+
 void RestoreFlashlightCameraOverride() noexcept {
-    if (g_flashlightCameraOverridePending &&
-        g_playerCameraObject != nullptr && g_client != nullptr) {
-        __try {
-            g_client->SetObjectTransform(
-                g_playerCameraObject, g_flashlightCameraRecovery);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-        g_flashlightCameraOverridePending = false;
+    if (!g_flashlightCameraOverridePending) {
+        return;
+    }
+    // Zuerst den Zustand loeschen, damit ein Fehlschlag den Override nicht
+    // dauerhaft offen laesst.
+    HLOCALOBJ const target = g_flashlightOverrideObject;
+    g_flashlightCameraOverridePending = false;
+    g_flashlightOverrideObject = nullptr;
+    if (target == nullptr || g_client == nullptr) {
+        return;
+    }
+    // Nur das entfuehrte Objekt zuruecksetzen. Zeigt g_playerCameraObject
+    // inzwischen woanders hin, hat eine Zwischensequenz die Kamera getauscht.
+    __try {
+        g_client->SetObjectTransform(target, g_flashlightCameraRecovery);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
 void RemoveLeftFlashlightModel() noexcept;
 
 void UpdateLeftFlashlightModel(const void* activeWeapon) noexcept {
-    if (g_client == nullptr || !g_weaponAim.leftGripValid ||
-        !g_weaponAim.leftAimValid) {
+    if (g_disableFlashlight || g_client == nullptr ||
+        !g_weaponAim.leftGripValid || !g_weaponAim.leftAimValid) {
         return;
     }
 
@@ -2250,7 +2372,12 @@ void RemoveLeftFlashlightModel() noexcept {
     g_leftFlashlightModel = nullptr;
     g_leftFlashlightWeapon = nullptr;
     if (g_leftFlashlightLight != nullptr && g_client != nullptr) {
-        g_client->RemoveObject(g_leftFlashlightLight);
+        // Ohne SEH wie beim Modell darueber: Ein Weltwechsel kann das Objekt
+        // bereits zerstoert haben.
+        __try {
+            g_client->RemoveObject(g_leftFlashlightLight);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
     }
     g_leftFlashlightLight = nullptr;
 }
@@ -2437,10 +2564,42 @@ void LogRegressionCommandTransition(
 
 void InjectSemanticCommandBits(
     const void* bindManager) noexcept {
-    if (g_semanticBitsInjected || bindManager == nullptr) {
+    if (g_semanticBitsInjected || bindManager == nullptr ||
+        g_disableCommandInjection) {
         return;
     }
     g_semanticBitsInjected = true;
+
+    // Waehrend Zwischensequenzen, Ladebildschirmen und Menues steht das
+    // Weapon-Manager-Update still; Retail verarbeitet Spielkommandos dann
+    // nicht im normalen Ablauf. Weiter Bits in den CBindMgr zu schreiben hat
+    // das Spiel an einer geskripteten Szene reproduzierbar zum Absturz
+    // gebracht: Das gehaltene Benutzen-Kommando feuerte in die gerade
+    // ablaufende Szene hinein. Nachgewiesen dadurch, dass die Szene ohne den
+    // Client-Input-Hook durchlaeuft und mit ihm nicht.
+    //
+    // Die Menuenavigation braucht diesen Pfad nicht: Sie laeuft ueber
+    // synthetische Tastendruecke, nicht ueber die Kommandobits.
+    const ULONGLONG nowTick = GetTickCount64();
+    const bool playingFrameFresh =
+        g_lastWeaponManagerUpdateTick != 0 &&
+        nowTick - g_lastWeaponManagerUpdateTick <=
+            kPlayingFrameFreshMilliseconds;
+    if (!playingFrameFresh) {
+        // Gehaltene Kommandos gelten als losgelassen, damit beim naechsten
+        // Spielframe kein Tastendruck vorgetaeuscht wird, der nie endete.
+        for (bool& active : g_injectedCommandActive) {
+            active = false;
+        }
+        if (InterlockedCompareExchange(
+                &g_commandInjectionSuspendedLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "command_injection_suspended",
+                "No playing frame: controller commands are no longer written "
+                "into the Retail bind manager until gameplay resumes.");
+        }
+        return;
+    }
 
     // Retail 1.08's verified VC7.1 vector<bool> layout stores the bit count
     // at CBindMgr+0x10 and its uint32 word array at CBindMgr+0x18.
@@ -2975,6 +3134,13 @@ int __fastcall HookRetailWeaponManagerUpdate(
     const LTRotation& baseRotation,
     const LTVector& basePosition) {
     (void)ignoredEdx;
+    // Wachhund: Sollte der Renderhook seit dem letzten Update nicht gelaufen
+    // sein — etwa weil eine Zwischensequenz den Renderpfad uebernommen hat —
+    // waere die Kamera bis hierher entfuehrt geblieben. Spaetestens jetzt
+    // zuruecksetzen, damit der Override nie laenger als einen Updatezyklus
+    // offen steht.
+    RestoreFlashlightCameraOverride();
+
     const ULONGLONG now = GetTickCount64();
     const bool enteringPlayingState =
         g_lastWeaponManagerUpdateTick == 0 ||
@@ -2982,8 +3148,18 @@ int __fastcall HookRetailWeaponManagerUpdate(
     g_lastWeaponManagerUpdateTick = now;
     if (enteringPlayingState) {
         g_flashlightCommandPulsePending = true;
+        // Eine Pause im Weapon-Manager-Update bedeutet Ladebildschirm,
+        // Levelwechsel oder eine Sequenz, die den Spielerpfad uebernommen hat.
+        // Danach ist die Welt neu aufgebaut und jeder zwischengespeicherte
+        // Objektzeiger zeigt auf ein zerstoertes Objekt. Bisher haben wir
+        // trotzdem weiter darauf geschrieben.
+        //
+        // Bewusst nur vergessen, nicht aufraeumen: RemoveObject auf einem
+        // toten Handle waere genau der Fehler, den wir vermeiden wollen. Die
+        // Engine hat die Objekte beim Weltwechsel bereits selbst zerstoert.
+        ForgetWorldObjectsAfterLevelChange();
     }
-    if (!g_autoStereoActivationAttempted &&
+    if (!g_autoStereoActivationAttempted && !g_disableStereoRender &&
         g_isStereoAvailable != nullptr &&
         g_isStereoEnabled != nullptr &&
         g_setStereoEnabled != nullptr) {
@@ -3099,8 +3275,8 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // after Retail updates it and keep both visually locked together.
     void* const weapon = CurrentRetailWeapon(weaponManager);
     UpdateLeftFlashlightModel(weapon);
-    if (weapon != nullptr && g_weaponAim.valid &&
-        g_weaponAim.gripValid &&
+    if (weapon != nullptr && !g_disableWeaponTransform &&
+        g_weaponAim.valid && g_weaponAim.gripValid &&
         g_retailSetWeaponTransform != nullptr) {
         const LTTransform synchronizedTransform(
             g_weaponAim.gripTransform.m_vPos,
@@ -3146,7 +3322,20 @@ int __fastcall HookRetailWeaponManagerUpdate(
             stereoEnabled = false;
         }
     }
-    if (stereoEnabled && g_hookInstalled &&
+    // Waehrend Zwischensequenzen und Komfortpanel gehoert die Kamera der
+    // Engine. Sie dann zu entfuehren hat das Spiel reproduzierbar zum Absturz
+    // gebracht; ein Handscheinwerfer waere in einer geskripteten Szene ohnehin
+    // falsch.
+    bool flatPanelActive = false;
+    if (g_isFlatPanelActive != nullptr) {
+        __try {
+            flatPanelActive = g_isFlatPanelActive() != FALSE;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            flatPanelActive = true;
+        }
+    }
+    if (stereoEnabled && g_hookInstalled && !flatPanelActive &&
+        !g_disableFlashlight &&
         g_playerCameraObject != nullptr &&
         g_weaponAim.leftAimValid && g_weaponAim.leftGripValid &&
         g_client != nullptr) {
@@ -3159,6 +3348,7 @@ int __fastcall HookRetailWeaponManagerUpdate(
                     g_weaponAim.leftAimTransform.m_rRot);
                 if (g_client->SetObjectTransform(
                         g_playerCameraObject, flashlightPose) == LT_OK) {
+                    g_flashlightOverrideObject = g_playerCameraObject;
                     g_flashlightCameraOverridePending = true;
                     if (InterlockedCompareExchange(
                             &g_leftHandFlashlightActiveLogged,
@@ -3172,6 +3362,7 @@ int __fastcall HookRetailWeaponManagerUpdate(
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             g_flashlightCameraOverridePending = false;
+            g_flashlightOverrideObject = nullptr;
         }
     }
     return state;
@@ -3733,6 +3924,9 @@ void LogRetailPlayerBodyGeometry(
 void ApplyPlayerBodyPieceMask(
     ILTModel* model, HOBJECT playerBody,
     std::uint32_t pieceCount) noexcept {
+    if (g_disableBodyPieceHiding) {
+        return;
+    }
     // SetPieceHideStatus only covers the first 32 pieces of a model.
     const std::uint32_t supportedCount = (std::min)(pieceCount, 32U);
     for (std::uint32_t index = 0; index < supportedCount; ++index) {
@@ -3906,6 +4100,9 @@ void ConfigureRetailArmPieceVisibility(
 }
 
 void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
+    if (g_disableHandNodes) {
+        return;
+    }
     if (playerBody == nullptr || g_client == nullptr) {
         return;
     }
@@ -4066,6 +4263,13 @@ void RemoveWeaponAimHooks() noexcept {
 }
 
 bool InstallWeaponAimHooks() noexcept {
+    if (g_disableAimHooks) {
+        Report(
+            "WARN", "weapon_aim_hooks_skipped",
+            "Diagnostic switch: weapon manager, AimAt tracker and fire-vector "
+            "hooks were not installed.");
+        return true;
+    }
     void* update = nullptr;
     void* setTransform = nullptr;
     void* setVisible = nullptr;
@@ -4158,6 +4362,13 @@ void RemoveSemanticInputHook() noexcept {
 
 bool InstallSemanticInputHook(
     const void* clientUpdateTarget) noexcept {
+    if (g_disableBindingHook) {
+        Report(
+            "WARN", "controller_binding_hook_skipped",
+            "Diagnostic switch: the Retail binding-value hook was not "
+            "installed.");
+        return true;
+    }
     const unsigned char* const getBindingValue =
         FindRetailGetBindingValue(clientUpdateTarget);
     if (!IsExecutableAddress(getBindingValue)) {
@@ -4480,15 +4691,19 @@ void __fastcall HookClientShellUpdate(
         ApplyHeadBobEnabled(false);
     }
     PollControllerInput();
-    PrepareWeaponSwitchPulse();
-    PollControllerMenuInput();
+    if (!g_disableClientUpdateWork) {
+        PrepareWeaponSwitchPulse();
+        PollControllerMenuInput();
+    }
     if (g_vrSettingsPageActive) {
         // Tastatur, Maus und Controller navigieren alle direkt über
         // CLTGUIListCtrl::NextSelection. Der Listenanfang muss deshalb hier
         // festgehalten werden, nicht nur wenn der Hook selbst auswählt.
         ResetRetailVrMenuScroll();
     }
-    UpdateCrosshairOverride();
+    if (!g_disableClientUpdateWork) {
+        UpdateCrosshairOverride();
+    }
     g_flashlightCommandPulseActive =
         g_flashlightCommandPulsePending &&
         (g_currentInput.aimPoseValidHands &
@@ -4674,10 +4889,135 @@ Function Resolve(HMODULE module, const char* name) noexcept {
 
 } // namespace
 
+// --- Absturzmelder -----------------------------------------------------------
+// Ohne Debugger und ohne aufbewahrte WER-Dumps ist ein Absturz sonst nicht
+// zuzuordnen. Der Filter laeuft nur bei einer unbehandelten Ausnahme, schreibt
+// Code und Adresse, ordnet die Adresse unseren Modulen zu und sucht im Stack
+// nach Ruecksprungadressen in unserem Code. Damit ist beantwortbar, ob der
+// Absturz aus dem VR-Loader kommt oder aus Retail.
+LPTOP_LEVEL_EXCEPTION_FILTER g_previousExceptionFilter = nullptr;
+HMODULE g_loaderModule = nullptr;
+HMODULE g_bridgeModule = nullptr;
+
+// Ein HMODULE ist die Basisadresse des Abbilds. Die Groesse steht im
+// PE-Header, deshalb kommt das ohne psapi aus.
+bool ModuleRange(HMODULE module, std::uintptr_t& base,
+                 std::uintptr_t& end) noexcept {
+    if (module == nullptr) {
+        return false;
+    }
+    base = reinterpret_cast<std::uintptr_t>(module);
+    __try {
+        const auto* const dos =
+            reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+            return false;
+        }
+        const auto* const nt =
+            reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                reinterpret_cast<const unsigned char*>(module) +
+                dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) {
+            return false;
+        }
+        end = base + nt->OptionalHeader.SizeOfImage;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+const char* ModuleNameForAddress(std::uintptr_t address) noexcept {
+    std::uintptr_t base = 0;
+    std::uintptr_t end = 0;
+    if (ModuleRange(g_loaderModule, base, end) &&
+        address >= base && address < end) {
+        return "GameClient.dll(VR-Loader)";
+    }
+    if (ModuleRange(g_bridgeModule, base, end) &&
+        address >= base && address < end) {
+        return "fearvr-d3d9.dll";
+    }
+    return nullptr;
+}
+
+LONG WINAPI FearVrCrashFilter(EXCEPTION_POINTERS* info) noexcept {
+    if (info != nullptr && info->ExceptionRecord != nullptr) {
+        const auto address = reinterpret_cast<std::uintptr_t>(
+            info->ExceptionRecord->ExceptionAddress);
+        const char* owner = ModuleNameForAddress(address);
+        char message[512];
+        _snprintf_s(
+            message, sizeof(message), _TRUNCATE,
+            "code=0x%08lX address=0x%08zX module=%s step=%s "
+            "menu_known=%d menu_active=%d vr_page=%d",
+            static_cast<unsigned long>(
+                info->ExceptionRecord->ExceptionCode),
+            static_cast<std::size_t>(address),
+            owner != nullptr ? owner : "retail_or_system",
+            g_stereoStep != nullptr ? g_stereoStep : "-",
+            g_menuFocusKnown ? 1 : 0, g_menuFocusActive ? 1 : 0,
+            g_vrSettingsPageActive ? 1 : 0);
+        Report("ERROR", "crash_caught", message);
+
+        // Ruecksprungadressen im Stack, die in unseren Modulen liegen.
+        // Beantwortet, ob unser Code im Aufrufpfad war.
+        if (info->ContextRecord != nullptr) {
+            const auto stackPointer =
+                static_cast<std::uintptr_t>(info->ContextRecord->Esp);
+            int found = 0;
+            for (std::size_t offset = 0;
+                 offset < 512 && found < 6; ++offset) {
+                const auto slot =
+                    reinterpret_cast<std::uintptr_t*>(
+                        stackPointer + offset * sizeof(std::uintptr_t));
+                std::uintptr_t value = 0;
+                __try {
+                    value = *slot;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    break;
+                }
+                const char* frameOwner = ModuleNameForAddress(value);
+                if (frameOwner == nullptr) {
+                    continue;
+                }
+                std::uintptr_t base = 0;
+                std::uintptr_t end = 0;
+                ModuleRange(
+                    frameOwner[0] == 'G' ? g_loaderModule : g_bridgeModule,
+                    base, end);
+                char frame[160];
+                _snprintf_s(
+                    frame, sizeof(frame), _TRUNCATE,
+                    "frame=%d module=%s rva=0x%08zX", found, frameOwner,
+                    static_cast<std::size_t>(value - base));
+                Report("ERROR", "crash_frame", frame);
+                ++found;
+            }
+            if (found == 0) {
+                Report(
+                    "ERROR", "crash_frame",
+                    "Keine Ruecksprungadresse aus dem VR-Loader im Stack.");
+            }
+        }
+    }
+    return g_previousExceptionFilter != nullptr
+               ? g_previousExceptionFilter(info)
+               : EXCEPTION_CONTINUE_SEARCH;
+}
+
 bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     if (masterDatabase == nullptr || bridge == nullptr) {
         return false;
     }
+
+    g_bridgeModule = bridge;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&FearVrCrashFilter), &g_loaderModule);
+    g_previousExceptionFilter =
+        SetUnhandledExceptionFilter(&FearVrCrashFilter);
 
     g_isHostConnected =
         Resolve<IsHostConnectedFunction>(

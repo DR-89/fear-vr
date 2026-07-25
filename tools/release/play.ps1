@@ -24,6 +24,37 @@ param(
 
     [switch]$NoHeadBob,
 
+    # Diagnose: schaltet Gruppen unserer Schreibzugriffe auf Retail-Objekte ab,
+    # um den Absturz an einer bestimmten Stelle einzugrenzen.
+    [switch]$Safe,
+
+    [switch]$NoFlashlight,
+
+    [switch]$NoHandNodes,
+
+    [switch]$NoWeaponTransform,
+
+    [switch]$NoBodyHide,
+
+    # Schaltet den Stereo-Doppelrender ab: Weltrender laeuft einmal pro Frame.
+    [switch]$NoStereo,
+
+    # Laesst den kompletten Client-Input-Hook weg: keine Controllersteuerung
+    # und keine Kommando-Injektion. Spielbar bleibt es mit Maus und Tastatur.
+    [switch]$NoInput,
+
+    # Input-Hook bleibt installiert, schreibt aber keine Kommandobits mehr.
+    [switch]$NoInject,
+
+    # Laesst den Hook auf die Retail-Bindungsabfrage weg.
+    [switch]$NoBindingHook,
+
+    # Laesst die Arbeit im IClientShell::Update-Hook weg.
+    [switch]$NoClientUpdate,
+
+    # Laesst Weapon-Manager-, AimAt- und Fire-Vector-Hook ungesetzt.
+    [switch]$NoAimHooks,
+
     [switch]$Wait
 )
 
@@ -170,12 +201,22 @@ $steamArguments = @(
     '-fearvr-logdir', "`"$runLogDirectory`"",
     '-archcfg', "`"$($deployment.archiveConfig)`"",
     '-userdirectory', "`"$($deployment.userDirectory)`"",
-    '-fearvr-stereo-toggle',
-    '-fearvr-input'
+    '-fearvr-stereo-toggle'
 )
+if (-not $NoInput) { $steamArguments += '-fearvr-input' }
 if ($Translation) { $steamArguments += '-fearvr-translation' }
 if (-not $NoStereoHud) { $steamArguments += '-fearvr-stereo-hud' }
 if ($NoHeadBob) { $steamArguments += '-fearvr-no-headbob' }
+if ($Safe) { $steamArguments += '-fearvr-safe' }
+if ($NoFlashlight) { $steamArguments += '-fearvr-no-flashlight' }
+if ($NoHandNodes) { $steamArguments += '-fearvr-no-handnodes' }
+if ($NoWeaponTransform) { $steamArguments += '-fearvr-no-weapon-transform' }
+if ($NoBodyHide) { $steamArguments += '-fearvr-no-body-hide' }
+if ($NoStereo) { $steamArguments += '-fearvr-no-stereo' }
+if ($NoInject) { $steamArguments += '-fearvr-no-inject' }
+if ($NoBindingHook) { $steamArguments += '-fearvr-no-binding-hook' }
+if ($NoClientUpdate) { $steamArguments += '-fearvr-no-client-update' }
+if ($NoAimHooks) { $steamArguments += '-fearvr-no-aim-hooks' }
 
 Start-Process -FilePath $steamExe -ArgumentList ($steamArguments -join ' ') `
     -WorkingDirectory (Split-Path -Parent $steamExe) | Out-Null

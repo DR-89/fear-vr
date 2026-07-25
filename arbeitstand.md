@@ -252,6 +252,127 @@ Kurze Tracking-Lücken der Handpose werden bis 150 ms aus dem letzten gültigen
 Pose-Cache überbrückt. Das allein hat den Treppen-Sprung nicht gelöst, ist aber
 als Schutz gegen einzelne ungültige Frames weiterhin aktiv.
 
+## Offen: Absturz an einer geskripteten Zwischensequenz
+
+Benutzermeldung am 25.07.2026: Das Spiel stürzt reproduzierbar an **einer
+bestimmten** Zwischensequenz ab. Andere Sequenzen laufen in 3D durch. Pures
+Retail mit denselben Spielständen läuft an derselben Stelle sauber.
+
+### Zwei Signaturen auseinanderhalten
+
+| Signatur | Bedeutung |
+|---|---|
+| `unknown` + Offset `0x00000000` | **die Zwischensequenz** — Sprung auf Adresse 0 |
+| `FEAR.exe` + Offset `0x0004abd6` | Absturz beim **Beenden** des Spiels, eigenes Thema |
+
+Wer das verwechselt, hält einen erfolgreichen Lauf für einen Absturz. Genau
+das ist während der Fehlersuche einmal passiert.
+
+### Absturzmelder
+
+Der Loader installiert einen `SetUnhandledExceptionFilter`. Er schreibt
+`crash_caught` mit Ausnahmecode, Adresse, Modulzuordnung, aktuellem
+Renderschritt und Menüzustand, dazu `crash_frame` je Rücksprungadresse, die im
+Stack in unseren Modulen liegt. Das Modulabbild wird über den PE-Header
+vermessen, damit keine Abhängigkeit auf `psapi` entsteht.
+
+Befund über alle Läufe: `code=0xC0000005 address=0x00000000
+module=retail_or_system`, und **keine** Rücksprungadresse aus dem VR-Loader im
+Stack. Der Schaden entsteht also früher als der Absturz.
+
+### Diagnoseschalter
+
+`tools\release\play.ps1` reicht sie durch; im Log erscheint
+`vr_features_disabled` mit dem Stand aller Schalter.
+
+| Schalter | schaltet ab |
+|---|---|
+| `-NoFlashlight` | Taschenlampenmodell, Lichtobjekt, Kamera-Override |
+| `-NoHandNodes` | Node-Controls auf Arm- und Handknochen |
+| `-NoWeaponTransform` | Überschreiben der Waffentransformation |
+| `-NoBodyHide` | Ausblenden der Körper-Pieces |
+| `-Safe` | die vier oben zusammen |
+| `-NoStereo` | Stereo-Doppelrender |
+| `-NoInject` | Schreiben der Kommandobits in `CBindMgr` |
+| `-NoBindingHook` | Hook auf `CBindMgr::GetBindingValue` |
+| `-NoClientUpdate` | Arbeit im `IClientShell::Update`-Hook |
+| `-NoInput` | den kompletten Client-Input-Hook |
+
+### Gemessen ausgeschlossen
+
+1. **Zeitversatz Waffe/Render** — 79 von 79 Messungen `drift_units=0.00`.
+2. **Retail-Waffen-Bob und -Lag** — `headbob_disabled` bestätigt.
+3. **Taschenlampen-Kamera-Override** — Absturz mit `flashlight=0`.
+4. **Node-Controls, Waffentransform, Piece-Hiding** — Absturz mit `-Safe`.
+5. **Stale Handles nach Levelwechsel** — `world_objects_forgotten` erscheint an
+   dieser Stelle nie, das Weapon-Manager-Update pausiert dort nicht.
+6. **Stereo-Doppelrender** — Absturz mit `stereo=0`.
+7. **Modulkombination** — mit geladenen Modulen, aber ohne VR-Flags läuft die
+   Szene durch. Loader, `GameOrig.dll` und `d3d9`-Proxy sind unbedenklich.
+8. **Kommando-Injektion** — Absturz mit `inject=0`.
+9. **Bindungs-Hook** — Absturz mit `binding_hook=0`.
+
+### Wo es steht
+
+Einziger bekannter Unterschied zwischen „läuft durch" und „stürzt ab":
+
+- `-NoInput`: `InstallClientInputHook` kehrt sofort zurück → Szene läuft durch.
+- Jeder andere Lauf: Absturz.
+
+**Achtung, hier wurde zwischenzeitlich falsch geschlossen.** `-NoInput` lässt
+nicht nur den `IClientShell::Update`-Hook weg: An diesem Pfad hängt auch
+`InstallWeaponAimHooks`. Im überlebenden Lauf fehlt `weapon_aim_hooks_installed`
+im Log, in jedem abgestürzten ist es vorhanden.
+
+Damit ist die **Waffen-/AimAt-Hookgruppe** der verbleibende Verdächtige:
+
+- `HookRetailWeaponManagerUpdate`
+- `HookRetailSetTrackedTarget` — überschreibt das AimAt-Ziel des Spielerkörpers
+- `HookRetailGetFireVectors`
+- `SetWeaponVisible`
+
+Diese Gruppe war auch im `-Safe`-Lauf aktiv, in dem Node-Controls,
+Waffentransform, Taschenlampe und Piece-Hiding abgeschaltet waren. Sie ist
+also unabhängig von jenen vier.
+
+Dazu passt die Benutzerbeobachtung zur Szene: Es wird ein Audio abgespielt,
+**ein NPC spawnt und bewegt Objekte**. `SetTrackedTarget` ist genau der
+Charakter-Node-Tracker.
+
+Zwei Details, die dabei auffielen und einer Prüfung wert sind:
+
+- `EnsureHandNodeControls(trackerPlayerBody)` wird in
+  `HookRetailSetTrackedTarget` **unbedingt** aufgerufen, auch für fremde
+  Kontexte mit `nullptr`.
+- `IsStaticPlayerBodyTrackerContext` erkennt den Spielerkörper daran, dass der
+  Kontext im statischen Datenbereich von `GameOrig.dll` liegt
+  (`0x002D0000`–`0x002E9900`). NPCs sind Heap-Objekte und fallen korrekt durch;
+  eine Verwechslung ist damit unwahrscheinlich, aber nicht gemessen.
+
+Nächster Schritt: `-NoAimHooks` an derselben Stelle testen. Läuft es durch, ist
+die Gruppe bestätigt und es geht einzeln weiter, beginnend mit
+`SetTrackedTarget`.
+
+**Vom Benutzer am 25.07.2026 zurückgestellt.** An dem Hook hängt die gesamte
+VR-Controllerunterstützung; ihn zu entfernen hieße, das Feature zu entfernen.
+
+### Umweg für den Alltag
+
+Zwei Desktop-Verknüpfungen:
+
+- **F.E.A.R. VR** — normal, voller Mod
+- **F.E.A.R. VR (Problemszene, Maus+Tastatur)** — `-NoInput`
+
+Die zweite überlebt die Szene nachweislich. Ablauf: normal beenden, mit der
+zweiten starten, Szene mit Maus und Tastatur durchspielen, speichern, wieder
+normal weiter. Kopftracking und 3D laufen dabei durchgehend.
+
+### Nicht erneut versuchen
+
+- Den Bindungs-Hook abschalten, ohne die Kommando-Injektion umzuhängen: Sie
+  wird **aus ihm heraus** aufgerufen. Ohne ihn kommt gar keine
+  Controllereingabe mehr an, und die Steuerung ist tot.
+
 ## Offen: Mündungsfeuer und Leuchtspur versetzt beim Strafen
 
 Benutzermeldung am 25.07.2026: Beim schnellen Strafen mit Dauerfeuer sitzen

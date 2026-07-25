@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <sstream>
 #include <utility>
@@ -330,6 +331,8 @@ bool IpcBridge::ConsumeLatestPair() {
         return false;
     }
 
+    const auto copyStart = std::chrono::steady_clock::now();
+
     bool valid = true;
     for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
         if (!ValidateAndOpenSource(eye, slotIndex) ||
@@ -371,6 +374,17 @@ bool IpcBridge::ConsumeLatestPair() {
     pending_->generation = generation;
     context_->End(pending_->completion.Get());
     context_->Flush();
+
+    const auto copyMicroseconds =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - copyStart)
+                .count());
+    ++copyStats_.samples;
+    copyStats_.totalMicroseconds += copyMicroseconds;
+    copyStats_.maxMicroseconds =
+        (std::max)(copyStats_.maxMicroseconds, copyMicroseconds);
+
     latestFrameId_ = frameId;
     ++consumedFrames_;
     if (consumedFrames_ == 1 || consumedFrames_ % 300 == 0) {
@@ -566,6 +580,12 @@ ID3D11ShaderResourceView* IpcBridge::ImageView(
 
 std::uint64_t IpcBridge::LatestFrameId() const noexcept {
     return latestFrameId_;
+}
+
+BridgeCopyStats IpcBridge::TakeCopyStats() noexcept {
+    const BridgeCopyStats snapshot = copyStats_;
+    copyStats_ = BridgeCopyStats{};
+    return snapshot;
 }
 
 void IpcBridge::LogHresult(const char* event, HRESULT result) {

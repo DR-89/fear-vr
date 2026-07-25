@@ -15,6 +15,15 @@ using IpcLogFunction =
     std::function<void(const char* level, const char* event,
                        const std::string& message)>;
 
+// Rohdaten für die in ANWEISUNG.md §14 geforderte Host-Copyzeit. Gemessen
+// wird das Öffnen der Shared-Textures und das Kopieren beider Augen in die
+// privaten D3D11-Zieltexturen, ohne das anschließende Warten auf die Query.
+struct BridgeCopyStats {
+    std::uint64_t samples{0};
+    std::uint64_t totalMicroseconds{0};
+    std::uint64_t maxMicroseconds{0};
+};
+
 class IpcBridge {
 public:
     IpcBridge(std::uint64_t sessionId, ID3D11Device* device,
@@ -39,6 +48,10 @@ public:
     [[nodiscard]] ID3D11ShaderResourceView* ImageView(
         std::uint32_t eye) const noexcept;
     [[nodiscard]] std::uint64_t LatestFrameId() const noexcept;
+
+    // Liefert die seit dem letzten Aufruf gesammelten Copyzeiten und setzt
+    // die Zähler zurück.
+    [[nodiscard]] BridgeCopyStats TakeCopyStats() noexcept;
 
 private:
     struct PrivateEye;
@@ -78,6 +91,7 @@ private:
     std::uint64_t latestFrameId_{0};
     std::uint64_t lastHapticRequestId_{0};
     std::uint64_t consumedFrames_{0};
+    BridgeCopyStats copyStats_{};
     std::uint32_t consecutiveOpenFailures_{0};
     bool gameConnected_{false};
     bool gameWasConnected_{false};

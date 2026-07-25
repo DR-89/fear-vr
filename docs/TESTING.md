@@ -25,34 +25,62 @@ Als CMake/CTest-Ziele unter `tests/` (baubar ohne Headset):
 
 ## 2. Live-Testmatrix
 
-| Achse | Varianten |
-|---|---|
-| SteamVR | aus / an |
-| Headset | aktiv / Standby / Trackingverlust |
-| Startreihenfolge | Host vor Spiel / Host nach Spiel |
-| Host-Abbruch | während des Spiels beendet |
-| Fenster | Fenstermodus / Vollbild |
-| Alt-Tab | dreimal |
-| Auflösung | Wechsel / D3D9 Reset |
-| Spielzustände | Hauptmenü, neues Spiel, Save/Load, Tod/Respawn |
-| Effekte | Slow-Mo, viele Partikel |
-| Szenen | Leiter, Lean, Knockdown, erste Zwischensequenz |
-| Dauer | mind. ein 15-Minuten-Lauf |
-| Build | Debug **und** RelWithDebInfo |
+Stand 25.07.2026. „synthetisch" heißt: über `tools\test-m2-bridge.ps1` oder
+einen Unit-Test nachgewiesen, nicht im laufenden Retail-Spiel.
+
+| Achse | Varianten | Stand |
+|---|---|---|
+| SteamVR | aus / an | **erfüllt** — ohne Runtime klare Diagnose, Exitcode 10 (§6) |
+| Headset | aktiv / Standby / Trackingverlust | **erfüllt** — Standby §6, vollständiger Controller-Trackingverlust §10 |
+| Startreihenfolge | Host vor Spiel / Host nach Spiel | **erfüllt** — der Launcher startet den Host zuerst; späte Hooks §7 |
+| Host-Abbruch | während des Spiels beendet | **synthetisch** — Producer lief fail-open weiter (§7) |
+| Fenster | Fenstermodus / Vollbild | **offen** im Retail-Spiel |
+| Alt-Tab | dreimal | **offen** im Retail-Spiel |
+| Auflösung | Wechsel / D3D9 Reset | **teilweise** — echte Device-Resets in §8 überlebt, gezielter Auflösungswechsel offen |
+| Spielzustände | Hauptmenü, neues Spiel, Save/Load, Tod/Respawn | **teilweise** — Menü, neues Spiel und Ladezustände bestätigt; Save/Load und Tod/Respawn nicht gezielt geprüft |
+| Effekte | Slow-Mo, viele Partikel | **erfüllt** — Slow-Mo protokolliert (§13), Partikel im Spielverlauf |
+| Szenen | Leiter, Lean, Knockdown, erste Zwischensequenz | **teilweise** — Lean bestätigt (§13), Zwischensequenz über Komfortbildschirm (§9); Leiter und Knockdown offen |
+| Dauer | mind. ein 15-Minuten-Lauf | **akzeptiert** — 11½ min mit ≥24.900 Stereo-Frames, vom Benutzer als bestanden gewertet (§8) |
+| Build | Debug **und** RelWithDebInfo | **teilweise** — alle Läufe in RelWithDebInfo; Debug nicht live geprüft |
+
+Die offenen Punkte sind allesamt Regressionstests am laufenden Spiel und
+brauchen Headset und Benutzer; sie blockieren keinen Codepfad.
 
 ## 3. Pro Live-Test zu erfassen (§14)
 
-- Host-/Proxy-/GameClient-Version
-- EXE-Hash
-- GPU und Adapter-LUIDs
-- OpenXR-Runtime-Name/-Version
-- Swapchainformat und -größe
-- Game-FPS und XR-Displayrate
-- dropped / reused frames
-- Renderzeit links/rechts und Host-Copyzeit
-- Ressourcen-/Handle-Anzahl am Anfang und Ende
+Alle Kennzahlen stehen in den JSON-Logs eines Laufs und werden mit einem
+Aufruf zusammengefasst:
 
-Logs: `logs/host-YYYYMMDD-HHMMSS.log` (Host) und entsprechende Proxy-Logs.
+```powershell
+pwsh -File tools\collect-perf-report.ps1            # jüngster Lauf
+pwsh -File tools\collect-perf-report.ps1 -Run m5-fear-20260725-000655
+pwsh -File tools\collect-perf-report.ps1 -AsJson
+```
+
+| Kennzahl | Quelle |
+|---|---|
+| Host-/Proxy-/GameClient-Version | `host_start`, `proxy_start` (mit Git-Hash) |
+| EXE-Hash | `stage\<milestone>-deployment.json`, Feld `runtimeSha256` |
+| GPU und Adapter-LUIDs | `d3d11_adapter` |
+| OpenXR-Runtime-Name/-Version | `runtime` |
+| Swapchainformat und -größe | `swapchains`, dazu `shared_resources` im Proxy |
+| Game-FPS und XR-Displayrate | `perf_frame`: `game_fps`, `xr_fps` |
+| dropped frames | `ring_full`: `dropped` (Proxy, kumuliert) |
+| reused frames | `perf_frame`: `reused` |
+| Renderzeit links/rechts | `perf_frame`: `render_left_*`, `render_right_*` |
+| Host-Copyzeit | `perf_frame`: `copy_avg_us`, `copy_max_us` |
+| Handle-Anzahl Anfang/Ende | `host_start` und `host_stop`, Feld `handles` |
+
+`perf_frame` fasst je 300 eingereichte Frames zu einer Zeile zusammen und
+setzt die Zähler danach zurück. Ein Frame gilt als *reused*, wenn seit der
+letzten Einreichung kein neues Spielbild importiert wurde — das ist regulär,
+sobald die XR-Displayrate über der Spiel-FPS liegt.
+
+Läufe **vor** dem 25.07.2026 enthalten noch keine `perf_frame`-Zeilen; der
+Bericht weist das ausdrücklich aus, statt Nullen zu melden.
+
+Logs: `logs/<milestone>-fear-YYYYMMDD-HHMMSS/` mit je einem Host- und
+Proxylog.
 
 ## 4. Gate-Checklisten (§13)
 
@@ -469,3 +497,65 @@ Unverändert aus M4 übernommene Grenzen:
 - Translation bleibt ohne Weltkollision opt-in;
 - der Stereo-HUD-Mischer benötigt im klassischen D3D9-Pfad weiterhin ein
   CPU-Readback und muss vor M6 ersetzt werden.
+
+## 16. M6 — Verpackung, Deinstallation und Regression
+
+### Ein-Schritt-Build
+
+`tools\build-all.ps1` prüft die gepinnten Abhängigkeiten, konfiguriert und
+baut x86 und x64, führt beide CTest-Suiten aus und schreibt
+`stage\build-manifest.json`. Verifiziert am 25.07.2026: beide Architekturen
+mit `/W4 /WX`, je 7/7 Tests grün.
+
+Die Artefakte sind **prozessreproduzierbar, nicht bitgleich**. Im
+Kontrollversuch wurde `build\x86` zweimal gelöscht und auf demselben Commit
+neu gebaut; `GameClient.dll` und `fearvr-d3d9.dll` hatten danach jeweils
+unterschiedliche SHA-256-Summen, weil MSVC Zeitstempel und PDB-GUIDs
+einbettet. Das Manifest hält deshalb den Git-Commit fest und markiert einen
+unsauberen Arbeitsbaum ausdrücklich (AD-017).
+
+### Deinstallation
+
+`tools\uninstall-fearvr.ps1` ist ohne `-Apply` ein reiner Trockenlauf.
+
+Außerhalb der Projektwurzel schreibt der Mod genau einen Wert:
+`steamvr.autoShowGameTheater`. Beide Rückstellzweige wurden gegen eine Kopie
+der echten Konfiguration getestet:
+
+- Schlüssel war ursprünglich **nicht vorhanden** → die eingefügte Zeile wird
+  entfernt, die Datei parst danach weiterhin als JSON;
+- Schlüssel war ursprünglich **vorhanden** → der ursprüngliche Wert wird
+  wiederhergestellt (Testsicherung mit `true`, Ergebnis `true`).
+
+Zurückgesetzt wird gezielt dieser eine Schlüssel. Die ganze Sicherung
+zurückzukopieren würde alle SteamVR-Einstellungen verwerfen, die der Benutzer
+seither geändert hat.
+
+### M6-Gate, nachgewiesen am 25.07.2026
+
+- **Deinstallation entfernt nur Projekt-/Moddateien.** Lauf mit
+  `-Scope ProjectOnly -KeepLogs -Apply`: `stage\m0-stock-module-backup`,
+  `stage\m2-game` bis `stage\m5-game`, alle Stage-Manifeste und `build\`
+  entfernt; die Public-Tools-Stockmodule wurden vorher aus dem Backup
+  zurückgestellt.
+- **Spielstände bleiben erhalten.** `stage\userdata-*` enthält Saves, Profile
+  und Screenshots — das sind Benutzerdaten, keine Moddateien. Alle zehn
+  `userdata-*`-Verzeichnisse blieben unangetastet, `fearvr.ini` inklusive
+  `HiddenBodyPieces=2` ebenfalls. Entfernt wird das nur mit
+  `-IncludeUserData`.
+- **Retail unverändert.** Der SHA-256 der `FEAR.exe` wird vor und nach jedem
+  Lauf geprüft; eine Steam-Dateiprüfung ist nicht nötig.
+- **Frische Stage allein aus Repo erzeugbar.** Direkt nach der Deinstallation:
+  `build-all.ps1` baute beide Architekturen neu (je 7/7 Tests grün),
+  `prepare-m5-stage.ps1` erzeugte `stage\m5-game` neu. Die einzigen
+  Voraussetzungen waren das Repo, die legal installierte F.E.A.R.-Kopie, die
+  lokalen Public Tools und die gepinnten Abhängigkeiten.
+
+### Offen
+
+- Ein Lauf mit der neuen Performanceinstrumentierung. Die Zahlen für
+  Game-FPS, XR-Displayrate, reused frames, Renderzeit je Auge und
+  Host-Copyzeit brauchen einen echten Spieldurchgang mit Headset.
+- Die in §2 als offen markierten Live-Regressionen (Fenstermodus/Vollbild,
+  Alt-Tab, gezielter Auflösungswechsel, Save/Load, Tod/Respawn, Leiter,
+  Knockdown, Debug-Build).

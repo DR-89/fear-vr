@@ -284,7 +284,8 @@ public:
         logger_.Write("INFO", "host_start",
                       std::string("version=") + FEARVR_VERSION_STRING +
                           " git=" + FEARVR_GIT_HASH +
-                          " log=" + logger_.Path().u8string());
+                          " log=" + logger_.Path().u8string() +
+                          " handles=" + std::to_string(CurrentHandleCount()));
     }
 
     ~Host() {
@@ -338,7 +339,9 @@ public:
                 }
             } while (restartSession);
 
-            logger_.Write("INFO", "host_stop", "OpenXR-Host sauber beendet.");
+            logger_.Write("INFO", "host_stop",
+                          "OpenXR-Host sauber beendet. handles=" +
+                              std::to_string(CurrentHandleCount()));
             return 0;
         } catch (const std::exception& error) {
             logger_.Write("ERROR", "host_failure", error.what());
@@ -1092,6 +1095,17 @@ private:
                     }
                 }
                 layerCount = 1;
+                // Ein Frame gilt als wiederverwendet, wenn seit der letzten
+                // Einreichung kein neues Spielbild importiert wurde. Das
+                // passiert regulär, sobald die XR-Displayrate über der
+                // Spiel-FPS liegt.
+                const std::uint64_t imageFrameId =
+                    ipcBridge_ ? ipcBridge_->LatestFrameId() : 0;
+                if (imageFrameId != 0 &&
+                    imageFrameId == lastSubmittedImageFrameId_) {
+                    ++reusedFrames_;
+                }
+                lastSubmittedImageFrameId_ = imageFrameId;
                 ++submittedFrames_;
             } else {
                 logger_.Write("WARN", "tracking_invalid",
@@ -1109,12 +1123,88 @@ private:
         if (submittedFrames_ != 0 && submittedFrames_ % 300 == 0) {
             logger_.Write("INFO", "frame_progress",
                           "submitted=" + std::to_string(submittedFrames_));
+            LogPerformanceWindow();
         }
         return options_.maxFrames != 0 &&
                submittedFrames_ >= options_.maxFrames;
     }
 
+    // Fasst ein Messfenster zu genau einer Zeile zusammen (ANWEISUNG.md §14:
+    // Game-FPS/XR-Displayrate, reused frames, Renderzeit links/rechts und
+    // Host-Copyzeit). Alle Zähler werden danach zurückgesetzt, damit die
+    // Zeilen unabhängig voneinander auswertbar bleiben.
+    void LogPerformanceWindow() {
+        const auto now = std::chrono::steady_clock::now();
+        const auto windowMicroseconds =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                now - perfWindowStart_)
+                .count();
+        perfWindowStart_ = now;
+        if (windowMicroseconds <= 0) {
+            return;
+        }
+
+        const auto average = [](const std::uint64_t total,
+                                const std::uint64_t samples) {
+            return samples == 0 ? 0ULL : total / samples;
+        };
+
+        const BridgeCopyStats copy =
+            ipcBridge_ ? ipcBridge_->TakeCopyStats() : BridgeCopyStats{};
+        const EyeStats left = eyeStats_[FEARVR_EYE_LEFT];
+        const EyeStats right = eyeStats_[FEARVR_EYE_RIGHT];
+        eyeStats_ = {};
+
+        const double windowSeconds =
+            static_cast<double>(windowMicroseconds) / 1'000'000.0;
+        const double xrFps = 300.0 / windowSeconds;
+        const double gameFps =
+            static_cast<double>(copy.samples) / windowSeconds;
+
+        std::ostringstream message;
+        message.setf(std::ios::fixed);
+        message.precision(1);
+        message << "window_frames=300"
+                << " xr_fps=" << xrFps
+                << " game_fps=" << gameFps
+                << " reused=" << reusedFrames_
+                << " render_left_avg_us="
+                << average(left.totalMicroseconds, left.samples)
+                << " render_left_max_us=" << left.maxMicroseconds
+                << " render_right_avg_us="
+                << average(right.totalMicroseconds, right.samples)
+                << " render_right_max_us=" << right.maxMicroseconds
+                << " copy_avg_us="
+                << average(copy.totalMicroseconds, copy.samples)
+                << " copy_max_us=" << copy.maxMicroseconds
+                << " handles=" << CurrentHandleCount();
+        logger_.Write("INFO", "perf_frame", message.str());
+        reusedFrames_ = 0;
+    }
+
+    static std::uint32_t CurrentHandleCount() noexcept {
+        DWORD handles = 0;
+        if (GetProcessHandleCount(GetCurrentProcess(), &handles) == 0) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(handles);
+    }
+
     void RenderEye(std::uint32_t eye) {
+        const auto renderStart = std::chrono::steady_clock::now();
+        RenderEyeInner(eye);
+        const auto microseconds =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - renderStart)
+                    .count());
+        EyeStats& stats = eyeStats_.at(eye);
+        ++stats.samples;
+        stats.totalMicroseconds += microseconds;
+        stats.maxMicroseconds = (std::max)(stats.maxMicroseconds, microseconds);
+    }
+
+    void RenderEyeInner(std::uint32_t eye) {
         Swapchain& swapchain = swapchains_.at(eye);
         XrSwapchainImageAcquireInfo acquireInfo{
             XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -1256,9 +1346,22 @@ private:
     std::vector<XrView> locatedViews_;
     std::vector<XrCompositionLayerProjectionView> projectionViews_;
     std::vector<Swapchain> swapchains_;
+    // Renderzeit je Auge (ANWEISUNG.md §14), zwischen zwei perf_frame-
+    // Meldungen gesammelt und danach zurückgesetzt.
+    struct EyeStats {
+        std::uint64_t samples{0};
+        std::uint64_t totalMicroseconds{0};
+        std::uint64_t maxMicroseconds{0};
+    };
+
     std::array<RenderPoseSample, kRenderPoseHistorySize>
         renderPoseHistory_{};
     XrSessionStateMachine lifecycle_;
+    std::array<EyeStats, FEARVR_EYE_COUNT> eyeStats_{};
+    std::chrono::steady_clock::time_point perfWindowStart_{
+        std::chrono::steady_clock::now()};
+    std::uint64_t reusedFrames_{0};
+    std::uint64_t lastSubmittedImageFrameId_{0};
     std::uint64_t submittedFrames_{0};
     std::uint64_t requestFrameId_{0};
     bool symmetricStereoLogged_{false};

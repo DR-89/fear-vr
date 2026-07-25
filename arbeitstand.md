@@ -394,17 +394,57 @@ Alle vom Benutzer angeforderten Spielprüfungen sind bestätigt: Arme
 ausgeblendet, VR-Menü sauber, Lehnen angenehm. Der Treppen-Sprung der Waffe ist
 ausdrücklich zurückgestellt.
 
-Die Doku ist angeglichen (`README.md`, `docs/ARCHITECTURE.md` mit AD-014 und
-AD-015, `docs/TESTING.md` §11 und §14 sowie die neue M5-Abnahme in §15), und
-M5 ist committed.
+M5 ist committed. M6 ist weitgehend umgesetzt (siehe unten).
 
 1. Scope, roten Strahl, Projektilrichtung und die bestätigte natürliche
    Waffenkalibrierung unverändert lassen.
-2. M6 laut `ANWEISUNG.md`: Deinstallation, reproduzierbare Stage aus Repo plus
-   legaler Kopie.
-3. Vor M6 offen aus M4/M5: der CPU-Readback im Stereo-HUD-Mischer muss
+2. Einen Spieldurchgang mit der neuen Performanceinstrumentierung fahren und
+   `tools\collect-perf-report.ps1` auswerten. Das ist der letzte fehlende
+   M6-Lieferbestandteil.
+3. Offene Live-Regressionen aus `docs/TESTING.md` §2 abarbeiten
+   (Fenstermodus/Vollbild, Alt-Tab, Auflösungswechsel, Save/Load,
+   Tod/Respawn, Leiter, Knockdown, Debug-Build).
+4. Weiterhin offen aus M4/M5: der CPU-Readback im Stereo-HUD-Mischer muss
    GPU-seitig oder als nativer UI-Layer ersetzt werden, und Translation
    braucht Weltkollision, bevor sie Standard werden darf.
+
+## M6: Stand vom 25.07.2026
+
+Neue Werkzeuge:
+
+- `tools\build-all.ps1` — prüft Abhängigkeiten, baut x86 und x64, führt beide
+  Testsuiten aus, schreibt `stage\build-manifest.json`. Der Generator ist auf
+  `Visual Studio 17 2022` festgenagelt; ein mit fremdem Generator angelegter
+  Buildbaum wird erkannt und neu erzeugt.
+- `tools\uninstall-fearvr.ps1` — Trockenlauf als Standard, `-Apply` führt aus.
+  `-Scope All|SteamVrOnly|ProjectOnly`, `-KeepLogs`, `-IncludeVendor`,
+  `-IncludeUserData`.
+- `tools\collect-perf-report.ps1` — wertet ein Laufverzeichnis zu den in
+  §14 geforderten Kennzahlen aus, optional `-AsJson`.
+
+Neue Instrumentierung im Host (`perf_frame`, je 300 eingereichte Frames):
+XR-Displayrate, Game-FPS, reused frames, Renderzeit links/rechts,
+Host-Copyzeit und Handle-Anzahl. `host_start` und `host_stop` tragen
+zusätzlich `handles=`.
+
+Nachgewiesenes M6-Gate: deinstalliert, danach allein aus dem Repo neu gebaut
+und frisch gestaged; Retail unverändert, Spielstände erhalten. Details in
+`docs/TESTING.md` §16.
+
+**Wichtig:** `stage\userdata-*` enthält Spielstände, Profile und
+Screenshots. Diese Verzeichnisse sind Benutzerdaten und werden von der
+Deinstallation nur mit `-IncludeUserData` entfernt. Nicht versehentlich
+pauschal `stage\` löschen.
+
+Zwei Fallen, die dabei aufgefallen sind:
+
+- Neue PowerShell-Skripte brauchen eine **UTF-8-BOM**. Ohne sie liest
+  PowerShell 5.1 die Datei als ANSI; ein Gedankenstrich zerfällt dann in ein
+  typografisches Anführungszeichen, das PowerShell als Stringbegrenzer
+  akzeptiert, und das Skript ist nicht mehr parsebar.
+- `$LASTEXITCODE` wird von `&` auf ein `.ps1` **nicht** gesetzt und steht noch
+  auf dem Ergebnis des letzten nativen Aufrufs. Gerufene Skripte werfen
+  selbst; kein Exitcode-Test.
 
 ## Einordnung eines früheren Absturzes
 

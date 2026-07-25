@@ -345,6 +345,50 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   löst sich bei Trackingverlust, statt hängen zu bleiben.
 - **Details:** `docs/OPENXR-INPUT.md`, `docs/TESTING.md` §13.
 
+### AD-016 — Deinstallation entfernt Moddateien, keine Benutzerdaten
+
+- **Problem:** Das M6-Gate verlangt, dass eine Deinstallation nur Projekt- und
+  Moddateien entfernt. Der naheliegende Weg — `stage\` komplett löschen — wäre
+  falsch.
+- **Messung/Beleg:** `stage\userdata-*` ist das `-userdirectory`, das der
+  Launcher an `FEAR.exe` übergibt. Eine Bestandsaufnahme am 25.07.2026 fand
+  dort Spielstände (`Quick.sav`, `Reload.sav`), `Profile000.gdb`, Screenshots
+  und `fearvr.ini` — zusammen rund 310 MB über zehn Verzeichnisse.
+- **Gewählte Lösung:** `stage\` wird eintragsweise geleert;
+  `userdata-*`-Verzeichnisse bleiben erhalten und verschwinden nur mit
+  `-IncludeUserData`. Ohne `-Apply` ist der Lauf ein Trockenlauf.
+- **Externe Änderungen:** Außerhalb der Projektwurzel schreibt der Mod genau
+  `steamvr.autoShowGameTheater`. Zurückgesetzt wird gezielt dieser Schlüssel
+  aus der ältesten Sicherung, nicht die ganze Datei — sonst gingen alle
+  SteamVR-Einstellungen verloren, die seither entstanden sind. War der
+  Schlüssel ursprünglich nicht vorhanden, wird die eingefügte Zeile entfernt.
+  Es gibt keine Registry-Änderung und keinen Retail-Schreibzugriff.
+- **Bekannte Nachteile:** Läuft SteamVR noch, überschreibt es seine
+  Konfiguration beim Beenden. Das Skript warnt und bietet
+  `-Scope ProjectOnly` für genau diesen Fall.
+- **Rückfallpfad:** Der Trockenlauf ist der Standard; jeder Schritt ist einzeln
+  über `-Scope`, `-KeepLogs`, `-IncludeVendor` und `-IncludeUserData` steuerbar.
+- **Details:** `docs/TESTING.md` §16.
+
+### AD-017 — Prozessreproduzierbarer Build statt bitgleicher Artefakte
+
+- **Problem:** §13 fordert für M6 „reproduzierbare x86-/x64-Artefakte“.
+- **Messung/Beleg:** Kontrollversuch am 25.07.2026: `build\x86` zweimal
+  vollständig gelöscht, neu konfiguriert und gebaut, beide Male auf demselben
+  Commit und mit identischen Quellen. `GameClient.dll` ergab `9AD461AE…` und
+  `4FF34D75…`, `fearvr-d3d9.dll` `FAD56D7E…` und `91DB685B…`. MSVC bettet
+  Zeitstempel und PDB-GUIDs ein; `/Brepro` ist für diese Toolchain und den
+  v141-/VC7.1-Mischbetrieb nicht durchgängig verfügbar.
+- **Gewählte Lösung:** `tools\build-all.ps1` als einziger Einstiegspunkt.
+  Reproduzierbar sind Vorgang und Eingangsgrößen, nicht die Bytes: Das
+  Manifest hält Git-Commit, Konfiguration, CMake-Version, Retail-Hash und die
+  Hashes der erzeugten Dateien fest und meldet einen unsauberen Arbeitsbaum.
+- **Bekannter Nachteil:** Ein Artefakt lässt sich nicht allein über seinen Hash
+  einem Commit zuordnen; dafür ist das Manifest nötig.
+- **Rückfallpfad:** Die getrennten CMake-Aufrufe bleiben dokumentiert und
+  funktionsfähig.
+- **Details:** `README.md`, `docs/TESTING.md` §16.
+
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 
 - [x] ob und wie `RenderCamera` zweimal **sicher** aufgerufen wird → `STEREO-RESEARCH.md`

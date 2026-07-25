@@ -3,7 +3,8 @@
 Quelloffener, lokal baubarer VR-Mod für die **Singleplayer-Basisversion von
 F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
-> **Status:** M5 — nativer Stereo-Weltrender, relatives HMD-Headtracking,
+> **Status:** M6 (Verpackung und Regression). M5 ist abgeschlossen und im Spiel
+> bestätigt: nativer Stereo-Weltrender, relatives HMD-Headtracking,
 > F9-Recenter, lesbares raumfestes Menü und Stereo-HUD sind mit dem echten
 > F.E.A.R. auf Quest 3/SteamVR bestätigt. Die OpenXR-Controller steuern das
 > Spiel vollständig: Bewegen, Drehen, Waffenwahl, Springen, Nachladen, Ducken,
@@ -79,7 +80,16 @@ vorhandene Build-Tools und meldet fehlende Komponenten — ohne etwas zu ändern
 
 ## Build
 
-x86 (Proxy) und x64 (Host) werden **getrennt** gebaut:
+Ein Aufruf prüft die gepinnten Abhängigkeiten, baut x86 und x64, führt beide
+Testsuiten aus und schreibt `stage\build-manifest.json` mit den SHA-256-Summen
+aller Artefakte:
+
+```powershell
+pwsh -File tools\build-all.ps1
+```
+
+Einzeln geht es weiterhin; x86 (Proxy) und x64 (Host) werden **getrennt**
+gebaut:
 
 ```powershell
 pwsh -File tools\prepare-dependencies.ps1
@@ -90,6 +100,16 @@ cmake --build build\x86 --config RelWithDebInfo
 cmake -S . -B build\x64 -A x64 -DFEARVR_BUILD_PROXY=OFF -DFEARVR_BUILD_HOST=ON
 cmake --build build\x64 --config RelWithDebInfo
 ```
+
+`-G "Visual Studio 17 2022"` gehört dazu: Ohne `-G` wählt CMake das neueste
+installierte Visual Studio, und die x86-Module müssen v141-/VC7.1-kompatibel
+bleiben. `build-all.ps1` erkennt einen mit fremdem Generator angelegten
+Buildbaum und erzeugt ihn neu.
+
+Die Artefakte sind **prozessreproduzierbar, nicht bitgleich**: MSVC bettet
+Zeitstempel und PDB-GUIDs ein, sodass zwei Builds derselben Quellen
+unterschiedliche Hashes ergeben. Das Manifest hält den Git-Stand fest und
+warnt, wenn der Arbeitsbaum nicht sauber ist.
 
 M1-Host gegen die aktive OpenXR-Runtime prüfen:
 
@@ -156,6 +176,54 @@ Komfortbildschirm bleiben in `fearvr.ini` einstellbar, ohne die native
 Menüliste zu überfüllen. Die Auswahl wird unter
 `stage/userdata-m5/fearvr.ini` gespeichert. Stick navigiert, A oder Trigger
 bestätigt und B geht zurück.
+
+## Deinstallation
+
+Der Mod schreibt außerhalb der Projektwurzel genau **eine** Datei:
+`steamvr.vrsettings`, und dort ausschließlich den Schlüssel
+`steamvr.autoShowGameTheater`. Es gibt keine Registry-Änderung, keinen
+Schreibzugriff auf die Retail-Installation und keine Datei außerhalb des
+Projektordners.
+
+```powershell
+pwsh -File tools\uninstall-fearvr.ps1          # Trockenlauf, ändert nichts
+pwsh -File tools\uninstall-fearvr.ps1 -Apply   # tatsächlich entfernen
+```
+
+Entfernt werden `stage\`, `build\`, `dist\`, `local-runtime\` und `logs\`.
+Zuvor wird `autoShowGameTheater` aus der ältesten Sicherung gezielt
+zurückgesetzt — nur dieser eine Schlüssel, damit spätere eigene
+SteamVR-Einstellungen erhalten bleiben.
+
+**Nicht entfernt werden Spielstände.** `stage\userdata-*` ist das
+`-userdirectory` des Spiels und enthält Saves, Profile und Screenshots. Das
+sind Benutzerdaten, keine Moddateien; sie verschwinden nur mit
+`-IncludeUserData`. Weitere Schalter: `-KeepLogs`, `-IncludeVendor` und
+`-Scope SteamVrOnly|ProjectOnly`.
+
+Eine Steam-Dateiprüfung ist nicht nötig, weil Retail nie beschrieben wurde.
+Das Skript prüft den SHA-256 der `FEAR.exe` vor und nach dem Lauf.
+
+SteamVR sollte dabei geschlossen sein: Es schreibt seine Konfiguration beim
+Beenden neu und würde die Rückstellung sonst überschreiben. Das Skript warnt,
+wenn es SteamVR laufen sieht.
+
+## Bekannte Grenzen
+
+- Der klassische D3D9-Pfad braucht ein CPU-Readback pro Frame
+  (`FEARVR_BF_CPU_FALLBACK`), ebenso der Stereo-HUD-Mischer. Beides ist als
+  Techniknachweis markiert und kein Release-Performancepfad.
+- HMD-Translation hat keine Weltkollision und bleibt deshalb opt-in
+  (`-Translation`).
+- Die versionsabhängigen Hooks gelten für **F.E.A.R. 1.08.282.0**. Bei
+  abweichendem Hash oder abweichender Signatur bleiben sie deaktiviert und das
+  Spiel läuft flach weiter.
+- Die linke System-/Menütaste ist nicht belegbar: SteamVR fängt sie für sein
+  eigenes Systemmenü ab.
+- Der Waffen-Sprung beim Treppensteigen ist nicht abschließend geklärt und
+  bewusst zurückgestellt.
+- „Motion-Controlled Aiming" ist über Zielstrahl und Trefferpunkt belegt; eine
+  allgemeine „6DoF-Waffe" wird nicht behauptet.
 
 ## Lizenz
 

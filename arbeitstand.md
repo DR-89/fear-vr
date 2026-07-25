@@ -1,7 +1,8 @@
 # Arbeitsstand F.E.A.R.-VR
 
 Stand: 25.07.2026  
-Letzter Commit: `1a27d0a Complete M4 head tracking and comfort`
+Letzter Commit: `92a782a M5: OpenXR-Motion-Controls, natives VR-Menü und
+Handdarstellung`
 
 Diese Datei ist die aktuelle Übergabe für den nächsten Agenten. Die ältere Datei
 `arbeitsstand.md` beschreibt überwiegend M4 und ist für den jetzigen Stand nicht
@@ -9,14 +10,10 @@ maßgeblich.
 
 ## Wichtig vor dem Weiterarbeiten
 
-- M4 ist abgeschlossen und committed.
-- M5 ist in Arbeit und vollständig **uncommitted**.
-- Der Arbeitsbaum enthält viele zusammengehörige M5-Änderungen. Nichts davon
-  verwerfen, zurücksetzen oder pauschal überschreiben.
+- M4 und **M5 sind abgeschlossen und committed**. Der Arbeitsbaum ist sauber.
 - Die Retail-Installation wird nicht verändert. Gebaut und getestet wird über
   `stage\m5-game` und `stage\userdata-m5`.
-- Kein Commit wurde für M5 angelegt. Erst nach erneutem Spieltest und nur auf
-  ausdrücklichen Wunsch committen.
+- Nur auf ausdrücklichen Wunsch committen.
 
 ## Aktuell vom Benutzer bestätigter Zustand
 
@@ -397,12 +394,17 @@ Alle vom Benutzer angeforderten Spielprüfungen sind bestätigt: Arme
 ausgeblendet, VR-Menü sauber, Lehnen angenehm. Der Treppen-Sprung der Waffe ist
 ausdrücklich zurückgestellt.
 
-1. `README.md`, `docs/ARCHITECTURE.md` und `docs/TESTING.md` an das verkürzte
-   VR-Menü und die endgültige Tastenbelegung angleichen.
-2. Scope, roten Strahl, Projektilrichtung und die bestätigte natürliche
+Die Doku ist angeglichen (`README.md`, `docs/ARCHITECTURE.md` mit AD-014 und
+AD-015, `docs/TESTING.md` §11 und §14 sowie die neue M5-Abnahme in §15), und
+M5 ist committed.
+
+1. Scope, roten Strahl, Projektilrichtung und die bestätigte natürliche
    Waffenkalibrierung unverändert lassen.
-3. M5 erst nach Benutzerfreigabe als abgeschlossen markieren und nur auf
-   ausdrücklichen Wunsch committen. Funktional ist M5 damit fertig.
+2. M6 laut `ANWEISUNG.md`: Deinstallation, reproduzierbare Stage aus Repo plus
+   legaler Kopie.
+3. Vor M6 offen aus M4/M5: der CPU-Readback im Stereo-HUD-Mischer muss
+   GPU-seitig oder als nativer UI-Layer ersetzt werden, und Translation
+   braucht Weltkollision, bevor sie Standard werden darf.
 
 ## Einordnung eines früheren Absturzes
 

@@ -252,6 +252,34 @@ Kurze Tracking-Lücken der Handpose werden bis 150 ms aus dem letzten gültigen
 Pose-Cache überbrückt. Das allein hat den Treppen-Sprung nicht gelöst, ist aber
 als Schutz gegen einzelne ungültige Frames weiterhin aktiv.
 
+## Offen: Mündungsfeuer und Leuchtspur versetzt beim Strafen
+
+Benutzermeldung am 25.07.2026: Beim schnellen Strafen mit Dauerfeuer sitzen
+Mündungsfeuer und Leuchtspur neben der Waffe. **Die Waffe selbst sitzt
+richtig, Zielstrahl und Trefferpunkt stimmen.** Der Fehler ist rein
+kosmetisch.
+
+Zwei Hypothesen wurden gemessen und **widerlegt**:
+
+1. *Zeitlicher Versatz zwischen Waffensetzen und Rendern.* Eine temporäre
+   Diagnose verglich die Kameraposition im Weapon-Manager-Update mit der zur
+   Renderzeit: 79 von 79 Messungen `drift_units=0.00` bei `age_ms=0`. Es gibt
+   keinen Versatz. Die Diagnose wurde wieder entfernt.
+2. *Retail-Waffen-Bob und Waffen-Lag.* Nach der Korrektur des
+   Maskierungsfehlers meldet der Lauf `headbob_disabled`, also sind alle zwölf
+   Variablen samt `HeadBobWeapon*Amp` und `WeaponLagEnabled` gesetzt. Der
+   Versatz bleibt trotzdem.
+
+Verbleibende Erklärung: Die Mündung hängt an einem Knoten **innerhalb** des
+Waffenmodells. Wir sperren das Waffen*objekt* auf die Controllerpose, die
+Modellanimation bewegt den Mündungsknoten aber weiterhin relativ dazu. Die
+Effekte hängen an diesem Knoten.
+
+Ein Fix müsste eine Node-Control auf den Mündungsknoten des Waffenmodells
+legen, analog zu `EnsureHandNodeControls` für Ober-, Unterarm und Hand. Vom
+Benutzer am 25.07.2026 bewusst zurückgestellt: Der Eingriff träfe genau das
+bestätigt funktionierende Waffen- und Zielsystem, der Fehler ist kosmetisch.
+
 Relevante Nodes/Sockets:
 
 - rechts: `Right_armu`, `Right_arml`, `Right_hand`, Socket `RightHand`

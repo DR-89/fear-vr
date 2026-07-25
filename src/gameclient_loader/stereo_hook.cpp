@@ -247,6 +247,11 @@ struct WeaponAimState {
     LTRigidTransform leftGripTransform;
     LTRigidTransform muzzleTransform;
     LTVector muzzleForwardInWeapon;
+    // Mündung als starrer Versatz im Waffenraum. Damit lässt sich der
+    // Schussursprung aus unserer eigenen Waffentransformation rekonstruieren,
+    // statt aus der Welt-Sockettransformation der Engine.
+    LTVector muzzleOffsetInWeapon;
+    LTRotation muzzleRotationInWeapon;
     const void* muzzleWeapon{nullptr};
     bool valid{false};
     bool gripValid{false};
@@ -254,6 +259,7 @@ struct WeaponAimState {
     bool leftGripValid{false};
     bool muzzleValid{false};
     bool muzzleDirectionValid{false};
+    bool muzzleLocalValid{false};
     bool muzzleDiagnosticLogged{false};
 };
 thread_local WeaponAimState g_weaponAim;
@@ -644,42 +650,54 @@ bool CaptureHeadBobOriginals() noexcept {
     return true;
 }
 
+// Setzt eine Retail-Konsolenvariable und merkt sich den ersten Fehlschlag.
+// Ohne den Namen ist im Log nicht erkennbar, welche Variable fehlte.
+void SetRetailFloatVariable(
+    const char* name, float value, bool& configured,
+    const char*& firstFailure) noexcept {
+    if (g_client->SetConsoleVariableFloat(name, value) != LT_OK) {
+        configured = false;
+        if (firstFailure == nullptr) {
+            firstFailure = name;
+        }
+    }
+}
+
 bool ApplyHeadBobEnabled(bool enabled) noexcept {
     const bool originalsKnown = CaptureHeadBobOriginals();
     if (enabled && !originalsKnown) {
         return false;
     }
     bool configured = true;
+    const char* firstFailure = nullptr;
     __try {
         // Retail's Walk/Run profiles come from the client database. Their
         // amplitudes ignore the debug CVars unless HeadBobDebugMode is active,
         // but every profile is multiplied by this global HeadBob scale.
-        configured =
-            g_client->SetConsoleVariableFloat(
-                "HeadBob",
-                enabled ? g_headBobOriginalScale : 0.0F) == LT_OK;
+        SetRetailFloatVariable(
+            "HeadBob", enabled ? g_headBobOriginalScale : 0.0F,
+            configured, firstFailure);
         // WeaponLagEnabled adds another artificial node rotation derived from
         // camera motion. The OpenXR controller is already the authoritative
         // weapon pose, so the Retail lag must never be layered on top.
-        configured =
-            g_client->SetConsoleVariableFloat(
-                "WeaponLagEnabled", 0.0F) == LT_OK &&
-            configured;
+        SetRetailFloatVariable(
+            "WeaponLagEnabled", 0.0F, configured, firstFailure);
         // The VR flashlight is permanently available and follows the left
         // controller, so Retail battery drain and locomotion-driven waver are
         // not useful here.
-        configured =
-            g_client->SetConsoleVariableFloat(
-                "FlashlightBattery", 0.0F) == LT_OK &&
-            configured;
-        configured =
-            g_client->SetConsoleVariableFloat(
-                "FlashlightWaverSpeedScale", 0.0F) == LT_OK &&
-            configured;
-        configured =
-            g_client->SetConsoleVariableFloat(
-                "HeadBobDebugMode",
-                enabled ? g_headBobOriginalDebugMode : 1.0F) == LT_OK;
+        SetRetailFloatVariable(
+            "FlashlightBattery", 0.0F, configured, firstFailure);
+        SetRetailFloatVariable(
+            "FlashlightWaverSpeedScale", 0.0F, configured, firstFailure);
+        // Frueher ueberschrieb diese Zuweisung `configured`, statt sie zu
+        // verknuepfen. Ein fehlgeschlagenes WeaponLagEnabled=0 blieb dadurch
+        // unbemerkt: Die Funktion meldete Erfolg, setzte
+        // g_stableWeaponMotionConfigured und versuchte es nie wieder. Die
+        // Retail-Waffenverzoegerung blieb dann die ganze Sitzung aktiv.
+        SetRetailFloatVariable(
+            "HeadBobDebugMode",
+            enabled ? g_headBobOriginalDebugMode : 1.0F,
+            configured, firstFailure);
         for (std::size_t index = 0;
              index < std::size(kHeadBobAmplitudeVariables);
              ++index) {
@@ -689,13 +707,12 @@ bool ApplyHeadBobEnabled(bool enabled) noexcept {
             // optional, but weapon offsets and rotations are always suppressed.
             const bool restoreCameraAmplitude =
                 enabled && index < kHeadBobCameraAmplitudeCount;
-            configured =
-                g_client->SetConsoleVariableFloat(
-                    kHeadBobAmplitudeVariables[index],
-                    restoreCameraAmplitude
-                        ? g_headBobOriginalAmplitudes[index]
-                        : 0.0F) == LT_OK &&
-                configured;
+            SetRetailFloatVariable(
+                kHeadBobAmplitudeVariables[index],
+                restoreCameraAmplitude
+                    ? g_headBobOriginalAmplitudes[index]
+                    : 0.0F,
+                configured, firstFailure);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         configured = false;
@@ -704,18 +721,23 @@ bool ApplyHeadBobEnabled(bool enabled) noexcept {
         g_headBobEnabled = enabled;
         g_stableWeaponMotionConfigured = true;
     }
-    Report(
-        configured ? "INFO" : "WARN",
-        configured
-            ? (enabled ? "headbob_enabled" : "headbob_disabled")
-            : "headbob_configuration_failed",
-        configured
-            ? (enabled
-                   ? "Retail camera head bob was restored; weapon head bob "
-                     "remains disabled for stable VR aiming."
-                   : "Retail Walk/Run head bob and weapon lag are disabled; "
-                     "the OpenXR controller is the sole weapon motion source.")
-            : "The Retail head-bob variables could not be changed.");
+    if (configured) {
+        Report(
+            "INFO", enabled ? "headbob_enabled" : "headbob_disabled",
+            enabled
+                ? "Retail camera head bob was restored; weapon head bob "
+                  "remains disabled for stable VR aiming."
+                : "Retail Walk/Run head bob and weapon lag are disabled; "
+                  "the OpenXR controller is the sole weapon motion source.");
+    } else {
+        char message[160];
+        _snprintf_s(
+            message, sizeof(message), _TRUNCATE,
+            "The Retail head-bob variables could not be changed; "
+            "first rejected variable: %s",
+            firstFailure != nullptr ? firstFailure : "<unknown>");
+        Report("WARN", "headbob_configuration_failed", message);
+    }
     return configured;
 }
 
@@ -1623,6 +1645,35 @@ void UpdateCrosshairOverride() noexcept {
     }
 }
 
+// Liefert die Mündung in Weltkoordinaten.
+//
+// Bevorzugt wird die Rekonstruktion aus derselben Transformation, mit der auch
+// die sichtbare Waffe gesetzt wird: {gripTransform.m_vPos,
+// fireTransform.m_rRot} plus dem starren Sockelversatz im Waffenraum. Die
+// Welt-Sockettransformation der Engine trägt dagegen noch den animierten
+// Retail-Waffen-Sway und weicht beim schnellen Strafen seitlich ab.
+//
+// Zielstrahl und Projektil müssen denselben Ursprung verwenden, sonst driften
+// sie genau in dieser Situation auseinander.
+bool ResolveMuzzleWorldTransform(LTRigidTransform& muzzle) noexcept {
+    if (g_weaponAim.muzzleLocalValid && g_weaponAim.gripValid) {
+        muzzle.m_rRot =
+            g_weaponAim.fireTransform.m_rRot *
+            g_weaponAim.muzzleRotationInWeapon;
+        muzzle.m_vPos =
+            g_weaponAim.gripTransform.m_vPos +
+            g_weaponAim.fireTransform.m_rRot.RotateVector(
+                g_weaponAim.muzzleOffsetInWeapon);
+        return true;
+    }
+    if (g_weaponAim.muzzleValid) {
+        muzzle = g_weaponAim.muzzleTransform;
+        return true;
+    }
+    muzzle = g_weaponAim.fireTransform;
+    return false;
+}
+
 bool TraceWeaponAim(
     LTVector& rayStart, LTVector& rayEnd) noexcept {
     if (g_client == nullptr || !g_weaponAim.valid) {
@@ -1632,13 +1683,10 @@ bool TraceWeaponAim(
     LTVector right;
     LTVector up;
     LTVector forward;
-    const LTRigidTransform& rayTransform = g_weaponAim.muzzleValid
-        ? g_weaponAim.muzzleTransform
-        : g_weaponAim.fireTransform;
-    rayTransform.m_rRot.GetVectors(right, up, forward);
-    rayStart = g_weaponAim.muzzleValid
-        ? g_weaponAim.muzzleTransform.m_vPos
-        : g_weaponAim.fireTransform.m_vPos;
+    LTRigidTransform muzzle;
+    ResolveMuzzleWorldTransform(muzzle);
+    muzzle.m_rRot.GetVectors(right, up, forward);
+    rayStart = muzzle.m_vPos;
     rayEnd = rayStart + forward * 10000.0F;
 
     IntersectQuery query;
@@ -2720,6 +2768,7 @@ bool UpdateRetailMuzzlePosition(const void* weapon) noexcept {
         g_weaponAim.muzzleWeapon = weapon;
         g_weaponAim.muzzleValid = false;
         g_weaponAim.muzzleDirectionValid = false;
+        g_weaponAim.muzzleLocalValid = false;
         g_weaponAim.muzzleDiagnosticLogged = false;
     }
     if (weapon == nullptr) {
@@ -2779,13 +2828,25 @@ bool UpdateRetailMuzzlePosition(const void* weapon) noexcept {
 
     g_weaponAim.muzzleTransform.m_vPos = muzzleTransform.m_vPos;
     g_weaponAim.muzzleTransform.m_rRot = muzzleTransform.m_rRot;
+    const LTRotation weaponRotationInverse =
+        weaponTransform.m_rRot.Conjugate();
     g_weaponAim.muzzleForwardInWeapon =
-        weaponTransform.m_rRot.Conjugate().RotateVector(
+        weaponRotationInverse.RotateVector(
             muzzleTransform.m_rRot.Forward());
     if (g_weaponAim.muzzleForwardInWeapon.MagSqr() > 0.0001F) {
         g_weaponAim.muzzleForwardInWeapon.Normalize();
         g_weaponAim.muzzleDirectionValid = true;
     }
+    // Starrer Sockelversatz im Waffenraum. Er ist unabhängig davon, ob die
+    // Engine gerade die animierte Retail-Pose oder unsere Controllerpose auf
+    // dem Waffenobjekt stehen hat, weil beide Werte im selben Moment gelesen
+    // werden.
+    g_weaponAim.muzzleOffsetInWeapon =
+        weaponRotationInverse.RotateVector(
+            muzzleTransform.m_vPos - weaponTransform.m_vPos);
+    g_weaponAim.muzzleRotationInWeapon =
+        weaponRotationInverse * muzzleTransform.m_rRot;
+    g_weaponAim.muzzleLocalValid = true;
     g_weaponAim.muzzleValid = true;
     if (!g_weaponAim.muzzleDiagnosticLogged) {
         LTVector aimForward =
@@ -3946,13 +4007,13 @@ bool __fastcall HookRetailGetFireVectors(
     }
     g_weaponAim.fireTransform.m_rRot.GetVectors(right, up, forward);
     UpdateRetailMuzzlePosition(weapon);
-    if (g_weaponAim.muzzleValid) {
-        g_weaponAim.muzzleTransform.m_rRot.GetVectors(
-            right, up, forward);
-    }
-    firePosition = g_weaponAim.muzzleValid
-        ? g_weaponAim.muzzleTransform.m_vPos
-        : g_weaponAim.fireTransform.m_vPos;
+
+    // Projektil und Zielstrahl teilen sich denselben Ursprung, siehe
+    // ResolveMuzzleWorldTransform.
+    LTRigidTransform muzzle;
+    ResolveMuzzleWorldTransform(muzzle);
+    muzzle.m_rRot.GetVectors(right, up, forward);
+    firePosition = muzzle.m_vPos;
     return true;
 }
 
@@ -3987,6 +4048,7 @@ void RemoveWeaponAimHooks() noexcept {
     g_weaponAim.leftGripValid = false;
     g_weaponAim.muzzleValid = false;
     g_weaponAim.muzzleDirectionValid = false;
+    g_weaponAim.muzzleLocalValid = false;
     g_weaponAim.muzzleDiagnosticLogged = false;
     g_weaponAim.muzzleWeapon = nullptr;
     g_rightHandOrientation = HandOrientationCalibration{};

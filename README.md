@@ -1,177 +1,179 @@
 # F.E.A.R. VR
 
-Quelloffener, lokal baubarer VR-Mod für die **Singleplayer-Basisversion von
+Open-source, locally buildable VR mod for the **single-player base version of
 F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
-> **Status:** M6 (Verpackung und Regression). M5 ist abgeschlossen und im Spiel
-> bestätigt: nativer Stereo-Weltrender, relatives HMD-Headtracking,
-> F9-Recenter, lesbares raumfestes Menü und Stereo-HUD sind mit dem echten
-> F.E.A.R. auf Quest 3/SteamVR bestätigt. Die OpenXR-Controller steuern das
-> Spiel vollständig: Bewegen, Drehen, Waffenwahl, Springen, Nachladen, Ducken,
-> Zeitlupe, Rennen, Benutzen, Zielen/Feuern, Recenter und Pausenmenü; Lehnen
-> läuft über die Neigung der linken Hand. Im Ego-Blick sind nur Hände und Waffe
-> sichtbar, und das ESC-Menü enthält eine native VR-Einstellungsseite. Der
-> klassische D3D9-Pfad verwendet weiterhin einen markierten
-> CPU-Kompatibilitätspfad; Translation bleibt ohne Weltkollision opt-in.
-> Details: `docs/TESTING.md`.
+> **Note:**
+> This repo was created entirely with AI assistance. I've been a software
+> developer for 11 years, but something like this is beyond me without AI.
+> I guided the AI to the best of my knowledge. Nevertheless, the AI will
+> certainly have made mistakes. PRs are welcome — help improve the mod!
 
-## Funktionsumfang
+> **Status:** M6 (Packaging and regression). M5 is complete and confirmed
+> in-game: native stereo world rendering, relative HMD headtracking,
+> F9 recenter, readable world-locked menu and stereo HUD are all confirmed
+> with real F.E.A.R. on Quest 3/SteamVR. OpenXR controllers fully drive the
+> game: movement, turning, weapon selection, jumping, reloading, crouching,
+> slow-mo, sprinting, use, aim/fire, recenter and pause menu; leaning uses
+> left-hand tilt. First-person view shows only hands and weapon, and the
+> ESC menu includes a native VR settings page. The classic D3D9 path still
+> uses a flagged CPU compatibility fallback; translation remains opt-in
+> without world collision. Details: `docs/TESTING.md`.
 
-Alles hier Aufgeführte ist implementiert und im echten Spiel gelaufen. Wo
-etwas gebaut, aber noch nicht im Spiel abgenommen ist, steht es dabei.
+## Features
 
-### Darstellung
+Everything listed here is implemented and has run in the actual game. Where
+something is built but not yet verified in-game, it's noted.
 
-- **Nativer Stereo-Weltrender.** Die LithTech-Kamera rendert zweimal pro
-  Frame mit eigener Augenmatrix — kein nachträgliches Verdoppeln eines
-  Monobildes. Startet nach dem Laden automatisch; F8 schaltet jederzeit um.
-- **Relatives Headtracking.** Die HMD-Rotation dreht die Spielkamera relativ
-  zur Neutralpose; Nick und Roll bleiben erhalten. F9 oder rechter Stick-Klick
-  setzt die aktuelle Blickrichtung als Neutralpose.
-- **Optionale HMD-Translation** bis 25 cm (`-Translation`). Ohne
-  Weltkollision, deshalb bewusst opt-in.
-- **Stereo-HUD.** Munition, Gesundheit und Hinweise werden als Overlay in
-  beide Augen gehoben statt flach über das linke Bild gelegt. Das HUD wird
-  dabei gleichmäßig zur Bildmitte gestaucht (5/4), damit die Randblöcke im
-  bequemen Sichtfeld liegen.
-- **Flachbildmodus für Vollbild-UI.** Menüs, Ladebildschirme, Movies und das
-  Missionsbriefing erscheinen als raumfestes 2,4 × 1,8 m großes Panel in 2 m
-  Abstand. Erkannt wird das am Retail-Spielzustand
-  `CInterfaceMgr::m_eGameState`, nicht an Pixelheuristiken. Rechter
-  Stick-Klick verankert das Panel neu in Blickrichtung.
-- **Komfortbildschirm (F10).** Raumfeste Darstellung für Camera-Shakes und
-  Zwischensequenzen, damit erzwungene Kamerabewegung nicht am Kopf zerrt.
-- **Ruhige Kamera.** Waffen-Bob und Kamera-Rückstoß sind abgeschaltet;
-  Head-Bob ist standardmäßig aus und nur über `fearvr.ini` zuschaltbar.
-- **Ego-Körper korrigiert.** Ober- und Unterarme sind ausgeblendet, Hände und
-  Waffe bleiben sichtbar. Das klassische Fadenkreuz ist aus, weil der rote
-  Zielstrahl seine Aufgabe übernimmt.
+### Rendering
+
+- **Native stereo world rendering.** The LithTech camera renders twice per
+  frame with its own per-eye matrix — not a duplicated mono image. Activates
+  automatically after loading; F8 toggles at any time.
+- **Relative headtracking.** HMD rotation rotates the game camera relative
+  to the neutral pose; pitch and roll are preserved. F9 or right stick click
+  sets the current gaze direction as the neutral pose.
+- **Optional HMD translation** up to 25 cm (`-Translation`). Without world
+  collision, deliberately opt-in.
+- **Stereo HUD.** Ammo, health and hints are overlaid into both eyes instead
+  of flat over the left image. The HUD is evenly compressed toward the screen
+  center (5/4) so edge elements stay within the comfortable field of view.
+- **Flat-screen mode for fullscreen UI.** Menus, loading screens, movies and
+  the mission briefing appear as a world-locked 2.4 × 1.8 m panel at 2 m
+  distance. Detection is based on the retail game state
+  `CInterfaceMgr::m_eGameState`, not pixel heuristics. Right stick click
+  re-anchors the panel to the current gaze direction.
+- **Comfort screen (F10).** World-locked rendering for camera shakes and
+  cutscenes, so forced camera movement doesn't pull at the head.
+- **Quiet camera.** Weapon bob and camera recoil are disabled; head bob is
+  off by default and only toggleable via `fearvr.ini`.
+- **First-person body corrected.** Upper and lower arms are hidden; hands
+  and weapon remain visible. The classic crosshair is off, since the red
+  aim laser takes over its role.
 
 ### Motion Controls
 
-- **Vollständige Spielsteuerung über OpenXR-Controller** — Bewegen, Drehen,
-  Springen, Ducken, Rennen, Waffenwechsel, Nachladen, Granate, Zeitlupe,
-  Benutzen, Zielen, Feuern, Pause und Recenter. Maus, Tastatur und Gamepad
-  bleiben parallel nutzbar.
-- **Waffe folgt der rechten Hand.** Schussursprung und Fire-Vectors kommen
-  aus der Mündungstransformation, nicht aus der Blickrichtung.
-- **Roter Zielstrahl** aus der Mündung, ein- und ausschaltbar.
-- **Zeigen statt hinsehen.** Aktivieren und Aufsammeln folgen dem
-  Waffenstrahl mit rund 1,5 m Reichweite, statt der Kopfrichtung.
-- **Handlampe in der linken Hand.** Sie folgt Position und Zielrichtung der
-  Hand und schaltet mit einem Klick auf den linken Trigger. Die zweite,
-  nicht schaltbare Retail-Taschenlampe ist entfernt.
-- **Lehnen über die Handneigung.** Die linke Hand seitlich neigen lehnt um
-  die Ecke; umgedrehte und hängende Hände sind abgefangen.
-- **Haptik pro Schuss**, auch im Dauerfeuer — ausgelöst am Retail-Schuss,
-  nicht an der Triggerflanke. Bei leerem Magazin vibriert nichts.
+- **Full game control via OpenXR controllers** — move, turn, jump, crouch,
+  sprint, weapon switch, reload, grenade, slow-mo, use, aim, fire, pause and
+  recenter. Mouse, keyboard and gamepad remain usable in parallel.
+- **Weapon follows the right hand.** Shot origin and fire vectors come from
+  the muzzle transform, not from gaze direction.
+- **Red aim laser** from the muzzle, toggleable on/off.
+- **Point instead of look.** Activate and pick-up follow the weapon laser
+  with approx. 1.5 m range, instead of head direction.
+- **Hand flashlight in the left hand.** It follows the hand's position and aim
+  direction and toggles with a click on the left trigger. The second,
+  non-toggleable retail flashlight is removed.
+- **Leaning via hand tilt.** Tilting the left hand sideways leans around
+  corners; inverted and hanging hands are handled.
+- **Haptics per shot**, including full-auto — triggered on the retail shot,
+  not on the trigger edge. Empty magazine = no vibration.
 
-### Menü und Einstellungen
+### Menu and Settings
 
-- **Native VR-Einstellungsseite** im ESC-Menü („VR SETTINGS"), mit dem
-  Controller bedienbar: Stereo rendering, Stereo HUD, Turn speed, Red aim
+- **Native VR settings page** in the ESC menu ("VR SETTINGS"), usable with
+  the controller: Stereo rendering, Stereo HUD, Turn speed, Red aim
   guide, Controller vibration, Recenter view, Reset VR defaults.
-- **Persistenz in `fearvr.ini`**, inklusive der nicht im Menü sichtbaren
-  Einstellungen HMD-Translation, Head-Bob und Komfortbildschirm.
-- **F11-Kalibrierung** für die Player-Body-Pieces, falls der Standard für das
-  Arm-Piece einmal nicht passt. Das Ergebnis wird sofort gespeichert.
+- **Persistence in `fearvr.ini`**, including settings not exposed in the menu:
+  HMD translation, head bob and comfort screen.
+- **F11 calibration** for player body pieces, in case the default arm piece
+  doesn't fit. The result is saved immediately.
 
-### Betrieb
+### Operation
 
-- **Zwei Prozesse nach Bitness:** x64-OpenXR-Host und x86-D3D9-Bridge über
-  ein versioniertes Shared-Memory-Protokoll mit Frame-Ring und
-  Heartbeat-Überwachung. Fällt der Host aus, läuft das Spiel flach weiter.
-- **Runtime-Wahl zur Laufzeit:** SteamVR und VirtualDesktopXR sind bestätigt;
-  `-Runtime` setzt `XR_RUNTIME_JSON` nur für den Hostprozess.
-- **SteamVR-Desktop-Theater** wird automatisch abgeschaltet und überwacht,
-  unter VDXR unterbleibt das vollständig.
-- **Strukturierte JSON-Logs** für Host und Bridge samt Perf-Zählern; jeder
-  Lauf schreibt in ein eigenes Verzeichnis unter `logs\`.
-- **Versionsbindung mit Notausstieg.** Alle Retail-Hooks prüfen Zeitstempel,
-  Abbildgröße und die erwarteten Bytefolgen. Passt etwas nicht, bleibt der
-  jeweilige Hook aus und das Spiel läuft weiter. Zusätzlich gibt es
-  Diagnoseschalter wie `-fearvr-safe`, `-fearvr-no-interaction` oder
-  `-fearvr-no-gamestate`.
-- **Weitergebbares Paket** (`tools\make-release.ps1`) mit Installer,
-  Desktop-Verknüpfung und Deinstallation. Es enthält ausschließlich eigene,
-  MIT-lizenzierte Binaries; die proprietären Module holt der Installer aus
-  der lokalen Public-Tools-Installation.
+- **Two processes by bitness:** x64 OpenXR host and x86 D3D9 bridge over a
+  versioned shared-memory protocol with frame ring and heartbeat monitoring.
+  If the host crashes, the game continues flat.
+- **Runtime selection at launch:** SteamVR and VirtualDesktopXR are confirmed;
+  `-Runtime` sets `XR_RUNTIME_JSON` only for the host process.
+- **SteamVR Desktop Theater** is automatically disabled and monitored; under
+  VDXR this is skipped entirely.
+- **Structured JSON logs** for host and bridge with perf counters; each run
+  writes to its own directory under `logs\`.
+- **Version-bound with fail-safe.** All retail hooks check timestamp, image
+  size and expected byte patterns. If something doesn't match, the hook stays
+  disabled and the game continues. Diagnostic switches like `-fearvr-safe`,
+  `-fearvr-no-interaction` or `-fearvr-no-gamestate` are available.
+- **Distributable package** (`tools\make-release.ps1`) with installer, desktop
+  shortcut and uninstaller. It contains only our own MIT-licensed binaries;
+  the proprietary modules are pulled from the local Public Tools installation.
 
-## Grundprinzipien
+## Core Principles
 
-- **Retail bleibt unangetastet.** Es wird nichts in die Steam-Installation
-  geschrieben und keine originale EXE/DLL/Archivdatei überschrieben. Gearbeitet
-  wird ausschließlich in einer isolierten Stage unter der Projektwurzel
-  (`stage/`) mit eigenem `-userdirectory`.
-- **Keine Retail-/SDK-/Asset-Dateien in Git.** Siehe `.gitignore`.
-- **Getrennte Prozesse nach Bitness:** ein x64-OpenXR-Host besitzt die
-  OpenXR-Session; die x86-`FEAR.exe` rendert über eine `d3d9.dll`-Bridge und ein
-  lokal neu gebautes GameClient-Modul. Grund: Der 32-Bit-OpenXR-Runtime-Eintrag
-  fehlt auf diesem Rechner (siehe `docs/ENVIRONMENT.md`).
+- **Retail stays untouched.** Nothing is written into the Steam installation
+  and no original EXE/DLL/archive file is overwritten. All work happens in an
+  isolated stage under the project root (`stage/`) with its own
+  `-userdirectory`.
+- **No retail/SDK/asset files in Git.** See `.gitignore`.
+- **Separate processes by bitness:** an x64 OpenXR host owns the OpenXR
+  session; the x86 `FEAR.exe` renders via a `d3d9.dll` bridge and a locally
+  rebuilt GameClient module. Reason: the 32-bit OpenXR runtime registry entry
+  is missing on this machine (see `docs/ENVIRONMENT.md`).
 
-## Architektur (Kurzform)
+## Architecture (Overview)
 
 ```text
 SteamVR / OpenXR (x64)
    ^  OpenXR + XR_KHR_D3D11_enable
 fearvr-host.exe (x64, D3D11)
-   ^  versioniertes IPC (Posen, FOV, Shared-Texture-Handles)
-FEAR.exe (x86, D3D9) + d3d9.dll-Bridge + GameClient-Modul (x86)
-   v  LithTech RenderCamera, zweimal pro Frame
+   ^  versioned IPC (poses, FOV, shared texture handles)
+FEAR.exe (x86, D3D9) + d3d9.dll bridge + GameClient module (x86)
+   v  LithTech RenderCamera, twice per frame
 ```
 
 Details: `docs/ARCHITECTURE.md`.
 
-## Repository-Struktur
+## Repository Structure
 
-| Pfad | Inhalt |
+| Path | Contents |
 |---|---|
-| `docs/` | Umgebung, Architektur, Koordinaten, Stereo-Research, Tests |
-| `src/common/` | geteilter IPC-Vertrag (`protocol.h`) + Mathe |
-| `src/host64/` | x64-OpenXR-Host (`fearvr-host.exe`) |
-| `src/proxy32/` | x86-D3D9-Proxy/Bridge |
-| `src/gameclient_loader/` | ABI-neutraler Loader für die echte `archcfg`-Stage |
-| `src/launcher/` | Launcher (startet Host, dann isolierte `FEAR.exe`) |
-| `game-source-overlay/` | nur **neu geschriebene** GameClient-Projektdateien |
-| `patches/` | minimale, lizenzgeprüfte Diffs / Transformationsskripte |
-| `shaders/` | Host-Fullscreen-/Composite-Shader |
-| `tests/` | automatisierte Tests (Protokoll, Mathe, State-Machine …) |
+| `docs/` | Environment, architecture, coordinates, stereo research, tests |
+| `src/common/` | shared IPC contract (`protocol.h`) + math |
+| `src/host64/` | x64 OpenXR host (`fearvr-host.exe`) |
+| `src/proxy32/` | x86 D3D9 proxy/bridge |
+| `src/gameclient_loader/` | ABI-neutral loader for the real `archcfg` stage |
+| `src/launcher/` | Launcher (starts host, then isolated `FEAR.exe`) |
+| `game-source-overlay/` | only **newly written** GameClient project files |
+| `patches/` | minimal, license-checked diffs / transform scripts |
+| `shaders/` | host fullscreen/composite shaders |
+| `tests/` | automated tests (protocol, math, state machine …) |
 | `tools/` | `verify-install.ps1`, `prepare-m5-stage.ps1`, `launch-m5-fear.ps1` … |
-| `vendor-local/`, `build/`, `stage/`, `logs/` | lokal, **nicht** in Git |
+| `vendor-local/`, `build/`, `stage/`, `logs/` | local, **not** in Git |
 
-## Voraussetzungen
+## Prerequisites
 
-Siehe `docs/ENVIRONMENT.md` für den geprüften Ist-Zustand und die noch
-fehlenden Komponenten. Kurz:
+See `docs/ENVIRONMENT.md` for the verified current state and still-missing
+components. In short:
 
-- F.E.A.R. 1.08 (Ultimate Shooter Edition), legal installiert
-- Visual Studio 2022 mit „Desktopentwicklung mit C++" (+ Toolset v141 für
-  Compile-/Quellanalyse; laufzeitfähige Public-Tools-Module benötigen VC7.1)
+- F.E.A.R. 1.08 (Ultimate Shooter Edition), legally installed
+- Visual Studio 2022 with "Desktop Development with C++" (+ v141 toolset for
+  compile/source analysis; runtime Public Tools modules need VC7.1)
 - CMake, Git
-- SteamVR als aktive OpenXR-Runtime + Headset
-- lokaler offizieller Public-Tools-Installer 1.08
+- SteamVR as active OpenXR runtime + headset
+- Local official Public Tools installer 1.08
 
-## Schnellstart (Environment prüfen)
+## Quick Start (Verify Environment)
 
 ```bash
 pwsh -File tools/verify-install.ps1
 ```
 
-Prüft Retail-Pfad, `FEAR.exe`-Hash/-Version, OpenXR-Runtime, Registry und
-vorhandene Build-Tools und meldet fehlende Komponenten — ohne etwas zu ändern.
+Checks retail path, `FEAR.exe` hash/version, OpenXR runtime, registry and
+available build tools, and reports missing components — without changing
+anything.
 
 ## Build
 
-Ein Aufruf prüft die gepinnten Abhängigkeiten, baut x86 und x64, führt beide
-Testsuiten aus und schreibt `stage\build-manifest.json` mit den SHA-256-Summen
-aller Artefakte:
+One command checks pinned dependencies, builds x86 and x64, runs both test
+suites and writes `stage\build-manifest.json` with SHA-256 sums of all
+artifacts:
 
 ```powershell
 pwsh -File tools\build-all.ps1
 ```
 
-Einzeln geht es weiterhin; x86 (Proxy) und x64 (Host) werden **getrennt**
-gebaut:
+Individual builds are still possible; x86 (proxy) and x64 (host) are built
+**separately**:
 
 ```powershell
 pwsh -File tools\prepare-dependencies.ps1
@@ -183,24 +185,24 @@ cmake -S . -B build\x64 -A x64 -DFEARVR_BUILD_PROXY=OFF -DFEARVR_BUILD_HOST=ON
 cmake --build build\x64 --config RelWithDebInfo
 ```
 
-`-G "Visual Studio 17 2022"` gehört dazu: Ohne `-G` wählt CMake das neueste
-installierte Visual Studio, und die x86-Module müssen v141-/VC7.1-kompatibel
-bleiben. `build-all.ps1` erkennt einen mit fremdem Generator angelegten
-Buildbaum und erzeugt ihn neu.
+`-G "Visual Studio 17 2022"` is part of this: without `-G`, CMake picks the
+newest installed Visual Studio, and the x86 modules must remain v141/VC7.1
+compatible. `build-all.ps1` detects a build tree created with a foreign
+generator and recreates it.
 
-Die Artefakte sind **prozessreproduzierbar, nicht bitgleich**: MSVC bettet
-Zeitstempel und PDB-GUIDs ein, sodass zwei Builds derselben Quellen
-unterschiedliche Hashes ergeben. Das Manifest hält den Git-Stand fest und
-warnt, wenn der Arbeitsbaum nicht sauber ist.
+The artifacts are **process-reproducible, not bit-identical**: MSVC embeds
+timestamps and PDB GUIDs, so two builds of the same sources produce different
+hashes. The manifest records the Git state and warns if the working tree is
+dirty.
 
-M1-Host gegen die aktive OpenXR-Runtime prüfen:
+Verify M1 host against the active OpenXR runtime:
 
 ```powershell
 build\x64\src\host64\RelWithDebInfo\fearvr-host.exe --validate-only
 build\x64\src\host64\RelWithDebInfo\fearvr-host.exe --max-frames 120
 ```
 
-M2-Brücke und echte Stage:
+M2 bridge and real stage:
 
 ```powershell
 pwsh -File tools\test-m2-bridge.ps1
@@ -210,144 +212,139 @@ pwsh -File tools\prepare-m2-stage.ps1
 pwsh -File tools\launch-m2-fear.ps1
 ```
 
-Spielbarer M4-Stand:
+Playable M4 build:
 
 ```powershell
 pwsh -File tools\prepare-m4-stage.ps1
 pwsh -File tools\launch-m4-fear.ps1
 ```
 
-M5 mit Motion Controls:
+M5 with Motion Controls:
 
 ```powershell
 pwsh -File tools\prepare-m5-stage.ps1
 pwsh -File tools\launch-m5-fear.ps1
 ```
 
-## VR-Runtime: SteamVR oder Virtual Desktop
+## VR Runtime: SteamVR or Virtual Desktop
 
-Der Mod ist an keine bestimmte Runtime gebunden — der x64-Host spricht nur
-OpenXR. Bestätigt sind **SteamVR** und **VirtualDesktopXR (VDXR)**.
+The mod is not bound to any specific runtime — the x64 host only speaks
+OpenXR. **SteamVR** and **VirtualDesktopXR (VDXR)** are confirmed.
 
 ```powershell
-pwsh -File tools\launch-m5-fear.ps1                    # aktive Runtime
+pwsh -File tools\launch-m5-fear.ps1                    # active runtime
 pwsh -File tools\launch-m5-fear.ps1 -Runtime vdxr      # Virtual Desktop
 pwsh -File tools\launch-m5-fear.ps1 -Runtime steamvr   # SteamVR
 ```
 
-`-Runtime` setzt `XR_RUNTIME_JSON` **nur für den Hostprozess**. Die
-systemweite Einstellung unter
-`HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` wird nicht verändert; wer sie
-dauerhaft umstellen will, tut das im Virtual Desktop Streamer
-beziehungsweise in SteamVR. `tools\verify-install.ps1` zeigt die aktive
-Runtime und welche installiert sind.
+`-Runtime` sets `XR_RUNTIME_JSON` **only for the host process**. The
+system-wide setting under
+`HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` is not changed; to change it
+permanently, do so in the Virtual Desktop Streamer or SteamVR respectively.
+`tools\verify-install.ps1` shows the active runtime and which ones are
+installed.
 
-Nur bei SteamVR werden die SteamVR-spezifischen Schritte ausgeführt
-(`autoShowGameTheater` abschalten, Theaterwächter). Unter VDXR unterbleiben
-sie vollständig, und es wird keine SteamVR-Datei angefasst.
+Only under SteamVR are SteamVR-specific steps executed (disable
+`autoShowGameTheater`, theater watchdog). Under VDXR they are skipped
+entirely, and no SteamVR file is touched.
 
-**Steam bleibt trotzdem nötig** — aber nur als Store: F.E.A.R. wird offiziell
-über `steam.exe -applaunch 21090` gestartet. Das ist unabhängig davon, welche
-VR-Runtime rendert. SteamVR selbst muss unter VDXR nicht laufen.
+**Steam is still required** — but only as the store: F.E.A.R. is officially
+launched via `steam.exe -applaunch 21090`. This is independent of which VR
+runtime renders. SteamVR itself does not need to run under VDXR.
 
-Belegung: linker Stick bewegt, linker Grip rennt; der linke Stick-Klick ist
-frei. Rechter Stick dreht; ab 80 % Ausschlag springt er nach oben und duckt
-nach unten, Stick-Klick zentriert die Blickrichtung. A wechselt die Waffe, B lädt
-kurz gedrückt nach und wirft gehalten eine Granate, X schaltet Zeitlupe,
-Y öffnet die Pause. Rechter Grip benutzt, die Trigger zielen und feuern. Die linke Hand
-seitlich zu neigen lehnt um die Ecke. Die Taschenlampe sitzt in der linken
-Hand, folgt deren Position und Zielrichtung und wird mit einem Klick auf den
-linken Trigger geschaltet. Jeder Schuss vibriert. Maus, Tastatur und
-Gamepad bleiben parallel nutzbar. Details: `docs/OPENXR-INPUT.md`.
+Bindings: left stick moves, left grip sprints; left stick click is free.
+Right stick turns; at 80% deflection it jumps up and crouches down, stick
+click recenters the view. A switches weapons, B reloads (short press) or
+throws a grenade (hold), X toggles slow-mo, Y opens pause. Right grip uses,
+triggers aim and fire. Tilting the left hand sideways leans around corners.
+The flashlight is in the left hand, follows its position and aim direction,
+and toggles with a click on the left trigger. Every shot vibrates. Mouse,
+keyboard and gamepad remain usable in parallel. Details:
+`docs/OPENXR-INPUT.md`.
 
-Im Ego-Blick sind nur Hände und Waffe zu sehen; Ober- und Unterarm sind
-ausgeblendet.
+In first-person view, only hands and weapon are visible; upper and lower arms
+are hidden.
 
-Der M5-Start aktiviert das bestätigte Stereo-HUD standardmäßig und schließt
-SteamVRs verzögertes F.E.A.R.-Desktop-Theater automatisch. Optionen:
+The M5 launch enables the confirmed stereo HUD by default and closes SteamVR's
+delayed F.E.A.R. Desktop Theater automatically. Options:
 
-- `-Translation`: begrenzte HMD-Translation bis 25 cm, ohne Weltkollision;
-- Head-Bob ist standardmäßig aus; `HeadBob=1` in `fearvr.ini` aktiviert nur
-  die Kamerabewegung, während die Waffe zum stabilen Zielen ruhig bleibt;
-- `-NoHeadBob`: erzwingt Head-Bob aus, auch wenn die INI ihn aktiviert;
-- `-NoStereoHud`: nur für Vergleich/Fehlersuche.
+- `-Translation`: limited HMD translation up to 25 cm, without world
+  collision;
+- Head bob is off by default; `HeadBob=1` in `fearvr.ini` enables only the
+  camera movement while the weapon stays steady for stable aiming;
+- `-NoHeadBob`: forces head bob off, even if the INI enables it;
+- `-NoStereoHud`: for comparison/troubleshooting only.
 
-Tasten im Spiel:
+Keys in-game:
 
-- F8: nativen Stereo-Weltrender ein-/ausschalten;
-- F9: aktuelle HMD-Ausrichtung zentrieren;
-- F10: raumfesten Komfortbildschirm für Camera-Shakes und Zwischensequenzen
-  ein-/ausschalten;
-- F11: Player-Body-Pieces einzeln isolieren, um das Arm-Piece neu zu
-  kalibrieren. Nur nötig, wenn der Standard einmal nicht passt.
+- F8: toggle native stereo world rendering on/off;
+- F9: recenter current HMD orientation;
+- F10: toggle world-locked comfort screen for camera shakes and cutscenes;
+- F11: isolate player body pieces one by one to recalibrate the arm piece.
+  Only needed if the default doesn't fit.
 
-Das ESC-Menü enthält in M5 direkt hinter „Optionen“ den englisch beschrifteten
-Eintrag „VR SETTINGS“. Die Seite ist bewusst kurz und einseitig: Stereo
+The ESC menu in M5 contains the English-labeled entry "VR SETTINGS" directly
+after "Options". The page is deliberately short and single-page: Stereo
 rendering, Stereo HUD, Turn speed, Red aim guide, Controller vibration,
-Recenter view, Reset VR defaults und BACK. HMD-Translation, Head-Bob und
-Komfortbildschirm bleiben in `fearvr.ini` einstellbar, ohne die native
-Menüliste zu überfüllen. Die Auswahl wird unter
-`stage/userdata-m5/fearvr.ini` gespeichert. Stick navigiert, A oder Trigger
-bestätigt und B geht zurück.
+Recenter view, Reset VR defaults and BACK. HMD translation, head bob and
+comfort screen remain configurable in `fearvr.ini` without cluttering the
+native menu. Selection is saved to `stage/userdata-m5/fearvr.ini`. Stick
+navigates, A or trigger confirms and B goes back.
 
-## Deinstallation
+## Uninstall
 
-Der Mod schreibt außerhalb der Projektwurzel genau **eine** Datei:
-`steamvr.vrsettings`, und dort ausschließlich den Schlüssel
-`steamvr.autoShowGameTheater`. Es gibt keine Registry-Änderung, keinen
-Schreibzugriff auf die Retail-Installation und keine Datei außerhalb des
-Projektordners.
+Outside the project root, the mod writes exactly **one** file:
+`steamvr.vrsettings`, and there only the key
+`steamvr.autoShowGameTheater`. There is no registry change, no write to the
+retail installation, and no file outside the project folder.
 
 ```powershell
-pwsh -File tools\uninstall-fearvr.ps1          # Trockenlauf, ändert nichts
-pwsh -File tools\uninstall-fearvr.ps1 -Apply   # tatsächlich entfernen
+pwsh -File tools\uninstall-fearvr.ps1          # dry run, changes nothing
+pwsh -File tools\uninstall-fearvr.ps1 -Apply   # actually remove
 ```
 
-Entfernt werden `stage\`, `build\`, `dist\`, `local-runtime\` und `logs\`.
-Zuvor wird `autoShowGameTheater` aus der ältesten Sicherung gezielt
-zurückgesetzt — nur dieser eine Schlüssel, damit spätere eigene
-SteamVR-Einstellungen erhalten bleiben.
+Removes `stage\`, `build\`, `dist\`, `local-runtime\` and `logs\`.
+Beforehand, `autoShowGameTheater` is specifically restored from the oldest
+backup — only that one key, so later custom SteamVR settings are preserved.
 
-**Nicht entfernt werden Spielstände.** `stage\userdata-*` ist das
-`-userdirectory` des Spiels und enthält Saves, Profile und Screenshots. Das
-sind Benutzerdaten, keine Moddateien; sie verschwinden nur mit
-`-IncludeUserData`. Weitere Schalter: `-KeepLogs`, `-IncludeVendor` und
+**Save games are not removed.** `stage\userdata-*` is the game's
+`-userdirectory` and contains saves, profiles and screenshots. Those are user
+data, not mod files; they are only removed with `-IncludeUserData`.
+Additional switches: `-KeepLogs`, `-IncludeVendor` and
 `-Scope SteamVrOnly|ProjectOnly`.
 
-Eine Steam-Dateiprüfung ist nicht nötig, weil Retail nie beschrieben wurde.
-Das Skript prüft den SHA-256 der `FEAR.exe` vor und nach dem Lauf.
+A Steam file integrity check is not needed, because retail was never written
+to. The script verifies the SHA-256 of `FEAR.exe` before and after.
 
-SteamVR sollte dabei geschlossen sein: Es schreibt seine Konfiguration beim
-Beenden neu und würde die Rückstellung sonst überschreiben. Das Skript warnt,
-wenn es SteamVR laufen sieht.
+SteamVR should be closed during uninstall: it rewrites its configuration on
+shutdown and would otherwise overwrite the restoration. The script warns if
+it sees SteamVR running.
 
-## Bekannte Grenzen
+## Known Limitations
 
-- Der klassische D3D9-Pfad braucht ein CPU-Readback pro Frame
-  (`FEARVR_BF_CPU_FALLBACK`), ebenso der Stereo-HUD-Mischer. Beides ist als
-  Techniknachweis markiert und kein Release-Performancepfad.
-- HMD-Translation hat keine Weltkollision und bleibt deshalb opt-in
+- The classic D3D9 path requires a CPU readback per frame
+  (`FEARVR_BF_CPU_FALLBACK`), as does the stereo HUD compositor. Both are
+  flagged as proof-of-concept and are not a release performance path.
+- HMD translation has no world collision and therefore remains opt-in
   (`-Translation`).
-- Die versionsabhängigen Hooks gelten für **F.E.A.R. 1.08.282.0**. Bei
-  abweichendem Hash oder abweichender Signatur bleiben sie deaktiviert und das
-  Spiel läuft flach weiter.
-- Die linke System-/Menütaste ist nicht belegbar: SteamVR fängt sie für sein
-  eigenes Systemmenü ab.
-- Der Waffen-Sprung beim Treppensteigen ist nicht abschließend geklärt und
-  bewusst zurückgestellt.
-- „Motion-Controlled Aiming" ist über Zielstrahl und Trefferpunkt belegt; eine
-  allgemeine „6DoF-Waffe" wird nicht behauptet.
+- The version-dependent hooks apply to **F.E.A.R. 1.08.282.0**. On mismatched
+  hash or signature they stay disabled and the game continues flat.
+- The left system/menu button cannot be bound: SteamVR captures it for its
+  own system menu.
+- The weapon jump when climbing stairs is not conclusively solved and
+  deliberately deferred.
+- "Motion-controlled aiming" is verified via aim laser and hit point; a
+  general "6DoF weapon" is not claimed.
 
-## Lizenz
+## License
 
-Die selbst geschriebenen Bestandteile stehen unter der **MIT-Lizenz** (siehe
-`LICENSE`). Für die Lizenzgrenzen der Abhängigkeiten und der offiziellen
-F.E.A.R.-Client- und Public-Tools-Bestandteile gilt `THIRD_PARTY_NOTICES.md`.
+The self-written components are under the **MIT License** (see `LICENSE`).
+For the license boundaries of dependencies and the official F.E.A.R. Client
+and Public Tools components, see `THIRD_PARTY_NOTICES.md`.
 
-## Rechtlicher Hinweis
+## Legal Notice
 
-Dieser Mod enthält **keine** Retail-Dateien, keine proprietären SDK-Quellen und
-keine extrahierten Assets. Zum Bauen und Betreiben ist eine eigene, legal
-erworbene F.E.A.R.-Installation sowie der offizielle Public-Tools-Installer
-erforderlich. „VR spielbar" wird frühestens ab M4 behauptet, „Motion Controls"
-ab M5.
+This mod contains **no** retail files, no proprietary SDK source code and no
+extracted assets. Building and running it requires your own, legally purchased
+F.E.A.R. installation and the official Public Tools installer. "VR playable"
+is claimed earliest from M4, "Motion Controls" from M5.

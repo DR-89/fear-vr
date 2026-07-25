@@ -15,6 +15,88 @@ F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 > CPU-Kompatibilitätspfad; Translation bleibt ohne Weltkollision opt-in.
 > Details: `docs/TESTING.md`.
 
+## Funktionsumfang
+
+Alles hier Aufgeführte ist implementiert und im echten Spiel gelaufen. Wo
+etwas gebaut, aber noch nicht im Spiel abgenommen ist, steht es dabei.
+
+### Darstellung
+
+- **Nativer Stereo-Weltrender.** Die LithTech-Kamera rendert zweimal pro
+  Frame mit eigener Augenmatrix — kein nachträgliches Verdoppeln eines
+  Monobildes. Startet nach dem Laden automatisch; F8 schaltet jederzeit um.
+- **Relatives Headtracking.** Die HMD-Rotation dreht die Spielkamera relativ
+  zur Neutralpose; Nick und Roll bleiben erhalten. F9 oder rechter Stick-Klick
+  setzt die aktuelle Blickrichtung als Neutralpose.
+- **Optionale HMD-Translation** bis 25 cm (`-Translation`). Ohne
+  Weltkollision, deshalb bewusst opt-in.
+- **Stereo-HUD.** Munition, Gesundheit und Hinweise werden als Overlay in
+  beide Augen gehoben statt flach über das linke Bild gelegt. Das HUD wird
+  dabei gleichmäßig zur Bildmitte gestaucht (5/4), damit die Randblöcke im
+  bequemen Sichtfeld liegen.
+- **Flachbildmodus für Vollbild-UI.** Menüs, Ladebildschirme, Movies und das
+  Missionsbriefing erscheinen als raumfestes 2,4 × 1,8 m großes Panel in 2 m
+  Abstand. Erkannt wird das am Retail-Spielzustand
+  `CInterfaceMgr::m_eGameState`, nicht an Pixelheuristiken. Rechter
+  Stick-Klick verankert das Panel neu in Blickrichtung.
+- **Komfortbildschirm (F10).** Raumfeste Darstellung für Camera-Shakes und
+  Zwischensequenzen, damit erzwungene Kamerabewegung nicht am Kopf zerrt.
+- **Ruhige Kamera.** Waffen-Bob und Kamera-Rückstoß sind abgeschaltet;
+  Head-Bob ist standardmäßig aus und nur über `fearvr.ini` zuschaltbar.
+- **Ego-Körper korrigiert.** Ober- und Unterarme sind ausgeblendet, Hände und
+  Waffe bleiben sichtbar. Das klassische Fadenkreuz ist aus, weil der rote
+  Zielstrahl seine Aufgabe übernimmt.
+
+### Motion Controls
+
+- **Vollständige Spielsteuerung über OpenXR-Controller** — Bewegen, Drehen,
+  Springen, Ducken, Rennen, Waffenwechsel, Nachladen, Granate, Zeitlupe,
+  Benutzen, Zielen, Feuern, Pause und Recenter. Maus, Tastatur und Gamepad
+  bleiben parallel nutzbar.
+- **Waffe folgt der rechten Hand.** Schussursprung und Fire-Vectors kommen
+  aus der Mündungstransformation, nicht aus der Blickrichtung.
+- **Roter Zielstrahl** aus der Mündung, ein- und ausschaltbar.
+- **Zeigen statt hinsehen.** Aktivieren und Aufsammeln folgen dem
+  Waffenstrahl mit rund 1,5 m Reichweite, statt der Kopfrichtung.
+- **Handlampe in der linken Hand.** Sie folgt Position und Zielrichtung der
+  Hand und schaltet mit einem Klick auf den linken Trigger. Die zweite,
+  nicht schaltbare Retail-Taschenlampe ist entfernt.
+- **Lehnen über die Handneigung.** Die linke Hand seitlich neigen lehnt um
+  die Ecke; umgedrehte und hängende Hände sind abgefangen.
+- **Haptik pro Schuss**, auch im Dauerfeuer — ausgelöst am Retail-Schuss,
+  nicht an der Triggerflanke. Bei leerem Magazin vibriert nichts.
+
+### Menü und Einstellungen
+
+- **Native VR-Einstellungsseite** im ESC-Menü („VR SETTINGS"), mit dem
+  Controller bedienbar: Stereo rendering, Stereo HUD, Turn speed, Red aim
+  guide, Controller vibration, Recenter view, Reset VR defaults.
+- **Persistenz in `fearvr.ini`**, inklusive der nicht im Menü sichtbaren
+  Einstellungen HMD-Translation, Head-Bob und Komfortbildschirm.
+- **F11-Kalibrierung** für die Player-Body-Pieces, falls der Standard für das
+  Arm-Piece einmal nicht passt. Das Ergebnis wird sofort gespeichert.
+
+### Betrieb
+
+- **Zwei Prozesse nach Bitness:** x64-OpenXR-Host und x86-D3D9-Bridge über
+  ein versioniertes Shared-Memory-Protokoll mit Frame-Ring und
+  Heartbeat-Überwachung. Fällt der Host aus, läuft das Spiel flach weiter.
+- **Runtime-Wahl zur Laufzeit:** SteamVR und VirtualDesktopXR sind bestätigt;
+  `-Runtime` setzt `XR_RUNTIME_JSON` nur für den Hostprozess.
+- **SteamVR-Desktop-Theater** wird automatisch abgeschaltet und überwacht,
+  unter VDXR unterbleibt das vollständig.
+- **Strukturierte JSON-Logs** für Host und Bridge samt Perf-Zählern; jeder
+  Lauf schreibt in ein eigenes Verzeichnis unter `logs\`.
+- **Versionsbindung mit Notausstieg.** Alle Retail-Hooks prüfen Zeitstempel,
+  Abbildgröße und die erwarteten Bytefolgen. Passt etwas nicht, bleibt der
+  jeweilige Hook aus und das Spiel läuft weiter. Zusätzlich gibt es
+  Diagnoseschalter wie `-fearvr-safe`, `-fearvr-no-interaction` oder
+  `-fearvr-no-gamestate`.
+- **Weitergebbares Paket** (`tools\make-release.ps1`) mit Installer,
+  Desktop-Verknüpfung und Deinstallation. Es enthält ausschließlich eigene,
+  MIT-lizenzierte Binaries; die proprietären Module holt der Installer aus
+  der lokalen Public-Tools-Installation.
+
 ## Grundprinzipien
 
 - **Retail bleibt unangetastet.** Es wird nichts in die Steam-Installation
@@ -168,9 +250,9 @@ sie vollständig, und es wird keine SteamVR-Datei angefasst.
 über `steam.exe -applaunch 21090` gestartet. Das ist unabhängig davon, welche
 VR-Runtime rendert. SteamVR selbst muss unter VDXR nicht laufen.
 
-Belegung: linker Stick bewegt, linker Grip rennt, linker Stick-Klick duckt.
-Rechter Stick dreht; ab 80 % Ausschlag springt er nach oben und duckt nach
-unten, Stick-Klick zentriert die Blickrichtung. A wechselt die Waffe, B lädt
+Belegung: linker Stick bewegt, linker Grip rennt; der linke Stick-Klick ist
+frei. Rechter Stick dreht; ab 80 % Ausschlag springt er nach oben und duckt
+nach unten, Stick-Klick zentriert die Blickrichtung. A wechselt die Waffe, B lädt
 kurz gedrückt nach und wirft gehalten eine Granate, X schaltet Zeitlupe,
 Y öffnet die Pause. Rechter Grip benutzt, die Trigger zielen und feuern. Die linke Hand
 seitlich zu neigen lehnt um die Ecke. Die Taschenlampe sitzt in der linken

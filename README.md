@@ -20,6 +20,10 @@ F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 > uses a flagged CPU compatibility fallback; translation remains opt-in
 > without world collision. Details: `docs/TESTING.md`.
 
+## Demo
+
+[![F.E.A.R. VR in action](https://img.youtube.com/vi/QTsNeLT8Pn8/maxresdefault.jpg)](https://youtu.be/QTsNeLT8Pn8)
+
 ## Features
 
 Everything listed here is implemented and has run in the actual game. Where

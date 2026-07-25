@@ -61,7 +61,21 @@ VertexOutput VsMain(uint vertexId : SV_VertexID) {
 }
 
 float4 PsMain(VertexOutput input) : SV_Target {
-    return sourceTexture.Sample(sourceSampler, input.uv);
+    // The game source is often smaller than the Quest/VDXR swapchain. A
+    // small unsharp pass restores edge contrast after the linear upscale,
+    // improving perceived detail without inventing a heavier render pass.
+    uint sourceWidth = 1;
+    uint sourceHeight = 1;
+    sourceTexture.GetDimensions(sourceWidth, sourceHeight);
+    float2 texel = 1.0 / float2(sourceWidth, sourceHeight);
+    float4 center = sourceTexture.Sample(sourceSampler, input.uv);
+    float4 blur = (
+        sourceTexture.Sample(sourceSampler, input.uv + float2(texel.x, 0.0)) +
+        sourceTexture.Sample(sourceSampler, input.uv - float2(texel.x, 0.0)) +
+        sourceTexture.Sample(sourceSampler, input.uv + float2(0.0, texel.y)) +
+        sourceTexture.Sample(sourceSampler, input.uv - float2(0.0, texel.y))) *
+        0.25;
+    return saturate(center + (center - blur) * 0.30);
 }
 )";
 

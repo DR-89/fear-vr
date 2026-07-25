@@ -172,8 +172,9 @@ Belegung: linker Stick bewegt, linker Grip rennt, linker Stick-Klick öffnet
 die Pause. Rechter Stick dreht, hoch/runter wechselt die Waffe, Stick-Klick
 zentriert die Blickrichtung. A springt, B lädt nach, X duckt, Y schaltet
 Zeitlupe. Rechter Grip benutzt, die Trigger zielen und feuern. Die linke Hand
-seitlich zu neigen lehnt um die Ecke. Maus, Tastatur und Gamepad bleiben
-parallel nutzbar. Details: `docs/OPENXR-INPUT.md`.
+seitlich zu neigen lehnt um die Ecke. Die Taschenlampe ist dauerhaft an und
+ihr Strahl folgt Position und Zielrichtung der linken Hand. Maus, Tastatur und
+Gamepad bleiben parallel nutzbar. Details: `docs/OPENXR-INPUT.md`.
 
 Im Ego-Blick sind nur Hände und Waffe zu sehen; Ober- und Unterarm sind
 ausgeblendet.
@@ -182,7 +183,9 @@ Der M5-Start aktiviert das bestätigte Stereo-HUD standardmäßig und schließt
 SteamVRs verzögertes F.E.A.R.-Desktop-Theater automatisch. Optionen:
 
 - `-Translation`: begrenzte HMD-Translation bis 25 cm, ohne Weltkollision;
-- `-NoHeadBob`: Kamera- und Waffen-Head-Bob deaktivieren;
+- Head-Bob ist standardmäßig aus; `HeadBob=1` in `fearvr.ini` aktiviert nur
+  die Kamerabewegung, während die Waffe zum stabilen Zielen ruhig bleibt;
+- `-NoHeadBob`: erzwingt Head-Bob aus, auch wenn die INI ihn aktiviert;
 - `-NoStereoHud`: nur für Vergleich/Fehlersuche.
 
 Tasten im Spiel:

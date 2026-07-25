@@ -241,8 +241,10 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Problem:** Head-Bob, Camera-Shakes und geskriptete Kamerafahrten können in
   VR unangenehm sein; globale Abschaltung aller ClientFX würde dagegen
   Partikel und Spielwirkung beschädigen.
-- **Gewählte Lösung:** `-NoHeadBob` setzt ausschließlich die offiziellen
-  `HeadBobDebugMode`-/Amplitude-Konsolenvariablen für Kamera und Waffe.
+- **Gewählte Lösung:** Head-Bob ist standardmäßig aus. `HeadBob=1` kann die
+  offiziellen Kamera-Amplituden wiederherstellen, während die
+  Waffen-Amplituden für stabiles VR-Zielen immer null bleiben. `-NoHeadBob`
+  erzwingt Kamera und Waffe aus.
   F10 setzt im Renderauftrag `FEARVR_RF_FLATSCREEN`, verwendet den normalen
   einmaligen Welt-Render und zeigt ihn raumfest als Quad. Beim Verlassen wird
   neu zentriert. Fehlt in einem Zustand ein vollständiges Stereo-Weltbild,
@@ -250,8 +252,8 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Bekannte Nachteile:** F10 stabilisiert das gesamte Bild, statt einzelne
   CameraShakeFX selektiv herauszufiltern. Der Benutzer entscheidet daher
   bewusst pro problematischer Szene.
-- **Rückfallpfad:** Beide Funktionen sind optional; ohne `-NoHeadBob` bleibt
-  das Original-Bob aktiv, F10 kann jederzeit zurückgeschaltet werden.
+- **Rückfallpfad:** Kamera-Bob kann mit `HeadBob=1` in `fearvr.ini` bewusst
+  aktiviert werden; F10 kann jederzeit zurückgeschaltet werden.
 
 ### AD-012 — OpenXR-Actions über bidirektionales IPC
 

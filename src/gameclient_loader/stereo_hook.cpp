@@ -11,6 +11,8 @@
 #include <limits>
 
 #include <iltclient.h>
+#include <iltcommon.h>
+#include <ltobjectcreate.h>
 #include <iclientshell.h>
 #include <iltdrawprim.h>
 #include <iltmodel.h>
@@ -195,6 +197,8 @@ volatile LONG g_weaponHandTrackingFailureLogged = 0;
 volatile LONG g_weaponAimGuideActiveLogged = 0;
 volatile LONG g_handPoseGapBridgedLogged = 0;
 volatile LONG g_weaponSocketSyncActiveLogged = 0;
+volatile LONG g_leftHandFlashlightActiveLogged = 0;
+volatile LONG g_flashlightForcedOnLogged = 0;
 volatile LONG g_armGeometryInspectedLogged = 0;
 volatile LONG g_armGeometryEmptyAttempts = 0;
 volatile LONG g_armGeometryNeverAvailableLogged = 0;
@@ -223,6 +227,10 @@ bool g_seenForwardAxisBinding = false;
 bool g_seenStrafeAxisBinding = false;
 bool g_controllerCommandActive[128]{};
 bool g_injectedCommandActive[128]{};
+ULONGLONG g_weaponSwitchHoldStartTick = 0;
+int g_weaponSwitchDirection = 0;
+bool g_weaponSwitchTriggered = false;
+std::uint32_t g_weaponSwitchPulseCommand = 0;
 thread_local bool g_semanticBitsInjected = false;
 FearVrInputState g_currentInput{};
 struct WeaponAimState {
@@ -242,6 +250,16 @@ struct WeaponAimState {
     bool muzzleDiagnosticLogged{false};
 };
 thread_local WeaponAimState g_weaponAim;
+HLOCALOBJ g_playerCameraObject = nullptr;
+HLOCALOBJ g_leftFlashlightModel = nullptr;
+HLOCALOBJ g_leftFlashlightLight = nullptr;
+const void* g_leftFlashlightWeapon = nullptr;
+LTRigidTransform g_flashlightCameraRecovery;
+bool g_flashlightCameraOverridePending = false;
+bool g_flashlightCommandPulsePending = false;
+bool g_flashlightCommandPulseActive = false;
+bool g_flashlightEnabled = true;
+bool g_leftTriggerWasDown = false;
 struct TrackedPoseCache {
     FearVrPose pose{};
     ULONGLONG lastValidTick{0};
@@ -267,8 +285,11 @@ bool g_recoilOriginalKnown = false;
 float g_recoilOriginalValue = -1.0F;
 bool g_weaponAimGuideEnabled = true;
 bool g_controllerHapticsEnabled = true;
-bool g_headBobEnabled = true;
+bool g_headBobEnabled = false;
+bool g_forceHeadBobDisabled = false;
+bool g_stableWeaponMotionConfigured = false;
 bool g_headBobOriginalKnown = false;
+float g_headBobOriginalScale = 1.0F;
 float g_headBobOriginalDebugMode = 0.0F;
 float g_headBobOriginalAmplitudes[12]{};
 int g_turnSpeedPreset = 1;
@@ -371,6 +392,7 @@ constexpr std::uintptr_t kRetailAccuracyManagerRva = 0x00009007U;
 constexpr std::uintptr_t kRetailPlayerBodyManagerRva = 0x002D7380U;
 constexpr std::size_t kRetailPlayerBodyObjectOffset = 0x10;
 constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
+constexpr std::uint32_t kRetailCommandFlashlight = 114;
 // Retail CClientWeapon starts m_RightHandWeapon at +0x10. Its first LTObjRef
 // occupies 16 bytes on x86 (vptr, list links, HOBJECT), putting the model
 // HOBJECT at +0x1c and m_hMuzzleSocket at +0x50.
@@ -576,6 +598,7 @@ constexpr const char* kHeadBobAmplitudeVariables[] = {
     "HeadBobWeaponRotationYAmp",
     "HeadBobWeaponRotationZAmp",
 };
+constexpr std::size_t kHeadBobCameraAmplitudeCount = 6;
 
 bool CaptureHeadBobOriginals() noexcept {
     if (g_headBobOriginalKnown) {
@@ -585,11 +608,15 @@ bool CaptureHeadBobOriginals() noexcept {
         return false;
     }
     __try {
+        const HCONSOLEVAR scale =
+            g_client->GetConsoleVariable("HeadBob");
         const HCONSOLEVAR debug =
             g_client->GetConsoleVariable("HeadBobDebugMode");
-        if (debug == nullptr) {
+        if (scale == nullptr || debug == nullptr) {
             return false;
         }
+        g_headBobOriginalScale =
+            g_client->GetConsoleVariableFloat(scale);
         g_headBobOriginalDebugMode =
             g_client->GetConsoleVariableFloat(debug);
         for (std::size_t index = 0;
@@ -611,11 +638,37 @@ bool CaptureHeadBobOriginals() noexcept {
 }
 
 bool ApplyHeadBobEnabled(bool enabled) noexcept {
-    if (!CaptureHeadBobOriginals()) {
+    const bool originalsKnown = CaptureHeadBobOriginals();
+    if (enabled && !originalsKnown) {
         return false;
     }
     bool configured = true;
     __try {
+        // Retail's Walk/Run profiles come from the client database. Their
+        // amplitudes ignore the debug CVars unless HeadBobDebugMode is active,
+        // but every profile is multiplied by this global HeadBob scale.
+        configured =
+            g_client->SetConsoleVariableFloat(
+                "HeadBob",
+                enabled ? g_headBobOriginalScale : 0.0F) == LT_OK;
+        // WeaponLagEnabled adds another artificial node rotation derived from
+        // camera motion. The OpenXR controller is already the authoritative
+        // weapon pose, so the Retail lag must never be layered on top.
+        configured =
+            g_client->SetConsoleVariableFloat(
+                "WeaponLagEnabled", 0.0F) == LT_OK &&
+            configured;
+        // The VR flashlight is permanently available and follows the left
+        // controller, so Retail battery drain and locomotion-driven waver are
+        // not useful here.
+        configured =
+            g_client->SetConsoleVariableFloat(
+                "FlashlightBattery", 0.0F) == LT_OK &&
+            configured;
+        configured =
+            g_client->SetConsoleVariableFloat(
+                "FlashlightWaverSpeedScale", 0.0F) == LT_OK &&
+            configured;
         configured =
             g_client->SetConsoleVariableFloat(
                 "HeadBobDebugMode",
@@ -623,10 +676,16 @@ bool ApplyHeadBobEnabled(bool enabled) noexcept {
         for (std::size_t index = 0;
              index < std::size(kHeadBobAmplitudeVariables);
              ++index) {
+            // In VR the visible weapon follows the tracked controller. Retail
+            // weapon bob would add a second, artificial motion on top and make
+            // aiming while walking unnecessarily unstable. Camera bob remains
+            // optional, but weapon offsets and rotations are always suppressed.
+            const bool restoreCameraAmplitude =
+                enabled && index < kHeadBobCameraAmplitudeCount;
             configured =
                 g_client->SetConsoleVariableFloat(
                     kHeadBobAmplitudeVariables[index],
-                    enabled
+                    restoreCameraAmplitude
                         ? g_headBobOriginalAmplitudes[index]
                         : 0.0F) == LT_OK &&
                 configured;
@@ -636,6 +695,7 @@ bool ApplyHeadBobEnabled(bool enabled) noexcept {
     }
     if (configured) {
         g_headBobEnabled = enabled;
+        g_stableWeaponMotionConfigured = true;
     }
     Report(
         configured ? "INFO" : "WARN",
@@ -644,19 +704,23 @@ bool ApplyHeadBobEnabled(bool enabled) noexcept {
             : "headbob_configuration_failed",
         configured
             ? (enabled
-                   ? "Retail camera and weapon head bob were restored."
-                   : "Camera and weapon head bob are disabled for VR.")
+                   ? "Retail camera head bob was restored; weapon head bob "
+                     "remains disabled for stable VR aiming."
+                   : "Retail Walk/Run head bob and weapon lag are disabled; "
+                     "the OpenXR controller is the sole weapon motion source.")
             : "The Retail head-bob variables could not be changed.");
     return configured;
 }
 
 void ConfigureComfortOptions() noexcept {
-    g_headBobEnabled =
-        !CommandLineContains(L"-fearvr-no-headbob");
+    // A steady view and weapon are the safe VR default. A persisted HeadBob=1
+    // may still opt into camera motion; weapon bob remains disabled separately.
+    g_forceHeadBobDisabled =
+        CommandLineContains(L"-fearvr-no-headbob");
+    g_headBobEnabled = false;
+    g_stableWeaponMotionConfigured = false;
     CaptureHeadBobOriginals();
-    if (!g_headBobEnabled) {
-        ApplyHeadBobEnabled(false);
-    }
+    ApplyHeadBobEnabled(false);
 }
 
 bool ReadCommandLineValue(
@@ -780,6 +844,7 @@ void InitializeVrSettings() noexcept {
             L"ComfortMode",
             QueryBooleanOption(g_isComfortModeEnabled, false) ? 1 : 0) != 0);
     ApplyHeadBobEnabled(
+        !g_forceHeadBobDisabled &&
         ReadVrSetting(L"HeadBob", g_headBobEnabled ? 1 : 0) != 0);
     g_weaponAimGuideEnabled =
         ReadVrSetting(L"AimGuide", 1) != 0;
@@ -1995,9 +2060,127 @@ LTRESULT InvokeStereoProtected(
         renderer, camera, techniqueOverride);
 }
 
+void RestoreFlashlightCameraOverride() noexcept {
+    if (g_flashlightCameraOverridePending &&
+        g_playerCameraObject != nullptr && g_client != nullptr) {
+        __try {
+            g_client->SetObjectTransform(
+                g_playerCameraObject, g_flashlightCameraRecovery);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        g_flashlightCameraOverridePending = false;
+    }
+}
+
+void RemoveLeftFlashlightModel() noexcept;
+
+void UpdateLeftFlashlightModel(const void* activeWeapon) noexcept {
+    if (g_client == nullptr || !g_weaponAim.leftGripValid ||
+        !g_weaponAim.leftAimValid) {
+        return;
+    }
+
+    // Retail replaces the first-person hand/weapon presentation on a weapon
+    // switch. Recreate our proxy at that boundary so it cannot remain tied to
+    // an object that Retail has just hidden or discarded.
+    if (g_leftFlashlightModel != nullptr &&
+        g_leftFlashlightWeapon != activeWeapon) {
+        RemoveLeftFlashlightModel();
+    }
+
+    LTVector right;
+    LTVector up;
+    LTVector forward;
+    g_weaponAim.leftAimTransform.m_rRot.GetVectors(right, up, forward);
+    LTRigidTransform pose(
+        g_weaponAim.leftGripTransform.m_vPos + forward * 2.0f,
+        g_weaponAim.leftAimTransform.m_rRot);
+    // Keep the projector beyond the hand, matching Retail's flashlight
+    // offset. This prevents the left hand from sitting between the source
+    // and the illuminated cone and casting a large self-shadow.
+    const LTRigidTransform lightPose(
+        pose.m_vPos - pose.m_rRot.Right() * 10.0f +
+            pose.m_rRot.Forward() * 13.0f,
+        pose.m_rRot);
+    if (g_leftFlashlightModel == nullptr) {
+        ObjectCreateStruct create;
+        create.m_ObjectType = OT_MODEL;
+        create.m_Flags = FLAG_VISIBLE;
+        create.m_Pos = lightPose.m_vPos;
+        create.m_Rotation = lightPose.m_rRot;
+        create.m_Scale = 1.5f;
+        create.SetFileName("models/keypadlight.Model00p");
+        g_leftFlashlightModel = g_client->CreateObject(&create);
+        if (g_leftFlashlightModel != nullptr) {
+            g_leftFlashlightWeapon = activeWeapon;
+            g_client->SetObjectColor(g_leftFlashlightModel, 1.0f, 0.82f, 0.35f, 1.0f);
+            Report("INFO", "left_flashlight_model_created",
+                   "Visible flashlight proxy created in the left hand.");
+        } else {
+            Report("WARN", "left_flashlight_model_failed",
+                   "Could not create the visible left-hand flashlight proxy.");
+        }
+    }
+    if (g_leftFlashlightModel != nullptr) {
+        g_client->SetObjectTransform(g_leftFlashlightModel, pose);
+    }
+
+    if (g_leftFlashlightLight == nullptr) {
+        ObjectCreateStruct create;
+        create.m_ObjectType = OT_LIGHT;
+        create.m_Flags = FLAG_VISIBLE;
+        create.m_Pos = pose.m_vPos;
+        create.m_Rotation = pose.m_rRot;
+        g_leftFlashlightLight = g_client->CreateObject(&create);
+        if (g_leftFlashlightLight != nullptr) {
+            g_client->SetLightType(
+                g_leftFlashlightLight, eEngineLight_SpotProjector);
+            g_client->SetLightTexture(
+                g_leftFlashlightLight, "Tex\\Lights\\Headlight.dds");
+            g_client->SetObjectColor(
+                g_leftFlashlightLight, 1.0f, 1.0f, 1.0f, 1.0f);
+            g_client->SetLightRadius(g_leftFlashlightLight, 1000.0f);
+            g_client->SetLightSpotInfo(
+                g_leftFlashlightLight, 0.698132f, 0.698132f, 1.0f);
+            g_client->SetLightIntensityScale(g_leftFlashlightLight, 1.5f);
+            g_client->Common()->SetObjectFlags(
+                g_leftFlashlightLight, OFT_Flags,
+                g_flashlightEnabled ? FLAG_VISIBLE : 0, FLAG_VISIBLE);
+            Report("INFO", "left_flashlight_light_created",
+                   "Native left-hand spot projector created and forced on.");
+        } else {
+            Report("WARN", "left_flashlight_light_failed",
+                   "Could not create the native left-hand spot projector.");
+        }
+    }
+    if (g_leftFlashlightLight != nullptr) {
+        g_client->SetObjectTransform(g_leftFlashlightLight, lightPose);
+        g_client->Common()->SetObjectFlags(
+            g_leftFlashlightLight, OFT_Flags,
+            g_flashlightEnabled ? FLAG_VISIBLE : 0, FLAG_VISIBLE);
+    }
+}
+
+void RemoveLeftFlashlightModel() noexcept {
+    if (g_leftFlashlightModel != nullptr && g_client != nullptr) {
+        __try {
+            g_client->RemoveObject(g_leftFlashlightModel);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    g_leftFlashlightModel = nullptr;
+    g_leftFlashlightWeapon = nullptr;
+    if (g_leftFlashlightLight != nullptr && g_client != nullptr) {
+        g_client->RemoveObject(g_leftFlashlightLight);
+    }
+    g_leftFlashlightLight = nullptr;
+}
+
 LTRESULT __fastcall HookRenderPlayerCamera(
     ILTRenderer* renderer, void* ignoredEdx, HLOCALOBJ camera) {
     (void)ignoredEdx;
+    RestoreFlashlightCameraOverride();
+    g_playerCameraObject = camera;
     if (InterlockedCompareExchange(
             &g_playerHookCallLogged, 1, 0) == 0) {
         Report(
@@ -2084,6 +2267,42 @@ RegressionCommandLog g_regressionCommands[] = {
      "vr_slowmo_released", "Slow-mo", false, 0, 0},
 };
 
+void PrepareWeaponSwitchPulse() noexcept {
+    constexpr float kWeaponSwitchThreshold = 0.72F;
+    constexpr ULONGLONG kWeaponSwitchHoldMs = 300;
+    const float vertical = g_currentInput.turnY;
+    const int direction =
+        vertical >= kWeaponSwitchThreshold
+            ? 1
+            : (vertical <= -kWeaponSwitchThreshold ? -1 : 0);
+    g_weaponSwitchPulseCommand = 0;
+    if (direction == 0) {
+        g_weaponSwitchDirection = 0;
+        g_weaponSwitchHoldStartTick = 0;
+        g_weaponSwitchTriggered = false;
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (direction != g_weaponSwitchDirection) {
+        g_weaponSwitchDirection = direction;
+        g_weaponSwitchHoldStartTick = now;
+        g_weaponSwitchTriggered = false;
+        return;
+    }
+    if (!g_weaponSwitchTriggered &&
+        now - g_weaponSwitchHoldStartTick >= kWeaponSwitchHoldMs) {
+        g_weaponSwitchPulseCommand =
+            direction > 0 ? FEARVR_CMD_NEXT_WEAPON
+                          : FEARVR_CMD_PREV_WEAPON;
+        g_weaponSwitchTriggered = true;
+        Report("INFO", "weapon_switch_gesture", "Weapon switch triggered after a deliberate 300 ms stick hold.");
+    }
+}
+
+bool IsWeaponSwitchPulse(std::uint32_t command) noexcept {
+    return g_weaponSwitchPulseCommand == command;
+}
+
 void LogRegressionCommandTransition(
     std::uint32_t command, bool active) noexcept {
     for (RegressionCommandLog& entry : g_regressionCommands) {
@@ -2149,7 +2368,8 @@ void InjectSemanticCommandBits(
         FEARVR_CMD_RELOAD,
         FEARVR_CMD_SLOWMO,
         FEARVR_CMD_LEAN_LEFT,
-        FEARVR_CMD_LEAN_RIGHT
+        FEARVR_CMD_LEAN_RIGHT,
+        kRetailCommandFlashlight
     };
     __try {
         const auto* const bytes =
@@ -2166,7 +2386,14 @@ void InjectSemanticCommandBits(
 
         for (const std::uint32_t command : kDigitalCommands) {
             const FearVrCommandValue controller =
-                MapControllerCommand(g_currentInput, command);
+                command == kRetailCommandFlashlight
+                    ? FearVrCommandValue{
+                          1.0F, g_flashlightCommandPulseActive}
+                    : ((command == FEARVR_CMD_NEXT_WEAPON ||
+                        command == FEARVR_CMD_PREV_WEAPON)
+                           ? FearVrCommandValue{
+                                 1.0F, IsWeaponSwitchPulse(command)}
+                           : MapControllerCommand(g_currentInput, command));
             if (command < sizeof(g_injectedCommandActive) /
                               sizeof(g_injectedCommandActive[0])) {
                 bool& wasActive =
@@ -2224,7 +2451,11 @@ float __fastcall HookRetailGetBindingValue(
     }
 
     const FearVrCommandValue controller =
-        MapControllerCommand(g_currentInput, binding->command);
+        (binding->command == FEARVR_CMD_NEXT_WEAPON ||
+         binding->command == FEARVR_CMD_PREV_WEAPON)
+            ? FearVrCommandValue{
+                  1.0F, IsWeaponSwitchPulse(binding->command)}
+            : MapControllerCommand(g_currentInput, binding->command);
     if (binding->command <
         sizeof(g_controllerCommandActive) /
             sizeof(g_controllerCommandActive[0])) {
@@ -2641,7 +2872,14 @@ int __fastcall HookRetailWeaponManagerUpdate(
     const LTRotation& baseRotation,
     const LTVector& basePosition) {
     (void)ignoredEdx;
-    g_lastWeaponManagerUpdateTick = GetTickCount64();
+    const ULONGLONG now = GetTickCount64();
+    const bool enteringPlayingState =
+        g_lastWeaponManagerUpdateTick == 0 ||
+        now - g_lastWeaponManagerUpdateTick > 1000;
+    g_lastWeaponManagerUpdateTick = now;
+    if (enteringPlayingState) {
+        g_flashlightCommandPulsePending = true;
+    }
     if (!g_autoStereoActivationAttempted &&
         g_isStereoAvailable != nullptr &&
         g_isStereoEnabled != nullptr &&
@@ -2757,6 +2995,7 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // this exact grip/aim transform, so apply the same transform to the weapon
     // after Retail updates it and keep both visually locked together.
     void* const weapon = CurrentRetailWeapon(weaponManager);
+    UpdateLeftFlashlightModel(weapon);
     if (weapon != nullptr && g_weaponAim.valid &&
         g_weaponAim.gripValid &&
         g_retailSetWeaponTransform != nullptr) {
@@ -2788,7 +3027,48 @@ int __fastcall HookRetailWeaponManagerUpdate(
             Report(
                 "INFO", "weapon_aim_active",
                 "The Retail AimAt tracker keeps hands and visible weapon "
-                "together while OpenXR aim drives the fire vector.");
+            "together while OpenXR aim drives the fire vector.");
+        }
+    }
+
+    // CPlayerMgr::PreRender updates the Retail flashlight immediately after
+    // this weapon-manager call. Its follow object is the player camera. Give
+    // that object the left-hand pose for the flashlight update only; the
+    // RenderCamera hook restores the real camera before rendering either eye.
+    bool stereoEnabled = false;
+    if (g_isStereoEnabled != nullptr) {
+        __try {
+            stereoEnabled = g_isStereoEnabled() != FALSE;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            stereoEnabled = false;
+        }
+    }
+    if (stereoEnabled && g_hookInstalled &&
+        g_playerCameraObject != nullptr &&
+        g_weaponAim.leftAimValid && g_weaponAim.leftGripValid &&
+        g_client != nullptr) {
+        __try {
+            if (g_client->GetObjectTransform(
+                    g_playerCameraObject,
+                    &g_flashlightCameraRecovery) == LT_OK) {
+                const LTRigidTransform flashlightPose(
+                    g_weaponAim.leftGripTransform.m_vPos,
+                    g_weaponAim.leftAimTransform.m_rRot);
+                if (g_client->SetObjectTransform(
+                        g_playerCameraObject, flashlightPose) == LT_OK) {
+                    g_flashlightCameraOverridePending = true;
+                    if (InterlockedCompareExchange(
+                            &g_leftHandFlashlightActiveLogged,
+                            1, 0) == 0) {
+                        Report(
+                            "INFO", "left_hand_flashlight_active",
+                            "The always-on Retail flashlight beam follows "
+                            "the left OpenXR grip and aim pose.");
+                    }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_flashlightCameraOverridePending = false;
         }
     }
     return state;
@@ -3635,6 +3915,8 @@ bool __fastcall HookRetailGetFireVectors(
 }
 
 void RemoveWeaponAimHooks() noexcept {
+    RestoreFlashlightCameraOverride();
+    RemoveLeftFlashlightModel();
     RemoveHandNodeControls();
     if (g_retailWeaponManagerUpdateTarget != nullptr) {
         MH_DisableHook(g_retailWeaponManagerUpdateTarget);
@@ -3668,6 +3950,14 @@ void RemoveWeaponAimHooks() noexcept {
     g_rightHandOrientation = HandOrientationCalibration{};
     g_leftHandOrientation = HandOrientationCalibration{};
     g_lastWeaponManagerUpdateTick = 0;
+    g_flashlightCommandPulsePending = false;
+    g_flashlightCommandPulseActive = false;
+    g_flashlightEnabled = true;
+    g_leftTriggerWasDown = false;
+    g_weaponSwitchHoldStartTick = 0;
+    g_weaponSwitchDirection = 0;
+    g_weaponSwitchTriggered = false;
+    g_weaponSwitchPulseCommand = 0;
 }
 
 bool InstallWeaponAimHooks() noexcept {
@@ -3932,7 +4222,25 @@ void UpdateMenuAxis(
     }
 }
 
+void PollFlashlightToggle() noexcept {
+    const bool leftTriggerDown =
+        (g_currentInput.activeHands & FEARVR_HAND_MASK_LEFT) != 0 &&
+        g_currentInput.trigger[FEARVR_HAND_LEFT] >= 0.55F;
+    if (leftTriggerDown && !g_leftTriggerWasDown) {
+        g_flashlightEnabled = !g_flashlightEnabled;
+        Report(
+            "INFO", "left_flashlight_toggled",
+            g_flashlightEnabled
+                ? "Left Trigger click enabled the flashlight."
+                : "Left Trigger click disabled the flashlight.");
+    }
+    // Edge-triggered on purpose: holding Trigger keeps the selected state and
+    // does not retrigger the toggle every frame.
+    g_leftTriggerWasDown = leftTriggerDown;
+}
+
 void PollControllerMenuInput() noexcept {
+    PollFlashlightToggle();
     const std::uint32_t buttons = g_currentInput.buttons;
     const std::uint32_t pressed =
         buttons & ~g_lastMenuButtons;
@@ -4018,13 +4326,23 @@ void PollControllerMenuInput() noexcept {
 void __fastcall HookClientShellUpdate(
     IClientShell* clientShell, void* ignoredEdx) {
     (void)ignoredEdx;
+    // Safety net for a PreRender path that staged the left-hand flashlight
+    // pose but did not reach RenderCamera (for example during a state change).
+    RestoreFlashlightCameraOverride();
     if (InterlockedCompareExchange(
             &g_clientInputHookCallLogged, 1, 0) == 0) {
         Report(
             "INFO", "client_input_hook_called",
             "IClientShell version-5 Update slot 20 is active.");
     }
+    // Some Retail console variables are registered only after the initial
+    // interface hookup. Retry on the first client update instead of silently
+    // leaving database-driven Walk/Run bob active for the whole session.
+    if (!g_stableWeaponMotionConfigured) {
+        ApplyHeadBobEnabled(false);
+    }
     PollControllerInput();
+    PrepareWeaponSwitchPulse();
     PollControllerMenuInput();
     if (g_vrSettingsPageActive) {
         // Tastatur, Maus und Controller navigieren alle direkt über
@@ -4033,8 +4351,25 @@ void __fastcall HookClientShellUpdate(
         ResetRetailVrMenuScroll();
     }
     UpdateCrosshairOverride();
+    g_flashlightCommandPulseActive =
+        g_flashlightCommandPulsePending &&
+        (g_currentInput.aimPoseValidHands &
+         FEARVR_HAND_MASK_LEFT) != 0;
     g_semanticBitsInjected = false;
     g_clientShellUpdate(clientShell);
+    if (g_flashlightCommandPulseActive && g_semanticBitsInjected) {
+        g_flashlightCommandPulseActive = false;
+        g_flashlightCommandPulsePending = false;
+        if (InterlockedCompareExchange(
+                &g_flashlightForcedOnLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "flashlight_forced_on",
+                "A one-frame Retail command enabled the battery-free "
+                "left-hand flashlight.");
+        }
+    } else {
+        g_flashlightCommandPulseActive = false;
+    }
 }
 
 bool InstallClientInputHook(void* masterDatabase) noexcept {
@@ -4155,6 +4490,7 @@ bool TryInstallRendererHook() noexcept {
 }
 
 bool TryRemoveRendererHook() noexcept {
+    RestoreFlashlightCameraOverride();
     AcquireSRWLockExclusive(&g_hookLock);
     if (!g_hookInstalled ||
         g_renderCameraSlot == nullptr ||

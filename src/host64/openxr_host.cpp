@@ -44,6 +44,14 @@ using Microsoft::WRL::ComPtr;
 
 std::atomic_bool g_stopRequested{false};
 
+// Quest 3's native panel target is 2064x2208 per eye. Some OpenXR runtimes
+// advertise a lower recommendation (for example when their quality slider is
+// below 100%). Request at least this target while respecting the runtime's
+// advertised maximum dimensions; runtimes already offering a higher target
+// (such as VDXR's 2688x2880) remain untouched.
+constexpr std::uint32_t kQuest3EyeWidth = 2064;
+constexpr std::uint32_t kQuest3EyeHeight = 2208;
+
 std::string JsonEscape(const std::string& value) {
     std::string escaped;
     escaped.reserve(value.size() + 8);
@@ -658,21 +666,25 @@ private:
             const XrViewConfigurationView& configuration =
                 viewConfiguration_[eye];
             Swapchain& swapchain = swapchains_[eye];
-            swapchain.width =
-                static_cast<std::int32_t>(
-                    configuration.recommendedImageRectWidth);
-            swapchain.height =
-                static_cast<std::int32_t>(
-                    configuration.recommendedImageRectHeight);
+            const std::uint32_t requestedWidth = (std::max)(
+                configuration.recommendedImageRectWidth,
+                kQuest3EyeWidth);
+            const std::uint32_t requestedHeight = (std::max)(
+                configuration.recommendedImageRectHeight,
+                kQuest3EyeHeight);
+            const std::uint32_t width = (std::min)(
+                requestedWidth, configuration.maxImageRectWidth);
+            const std::uint32_t height = (std::min)(
+                requestedHeight, configuration.maxImageRectHeight);
+            swapchain.width = static_cast<std::int32_t>(width);
+            swapchain.height = static_cast<std::int32_t>(height);
 
             XrSwapchainCreateInfo createInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
             createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
             createInfo.format = static_cast<std::int64_t>(swapchainFormat_);
             createInfo.sampleCount = 1;
-            createInfo.width =
-                configuration.recommendedImageRectWidth;
-            createInfo.height =
-                configuration.recommendedImageRectHeight;
+            createInfo.width = width;
+            createInfo.height = height;
             createInfo.faceCount = 1;
             createInfo.arraySize = 1;
             createInfo.mipCount = 1;

@@ -302,8 +302,9 @@ M4-Gate:
 
 Komfortfunktionen:
 
-- `-NoHeadBob` setzt die offiziellen LithTech-HeadBob-Variablen für Kamera und
-  Waffe auf null;
+- Head-Bob ist standardmäßig aus. `HeadBob=1` in `fearvr.ini` stellt nur die
+  Kamera-Amplituden wieder her; die Waffen-Amplituden bleiben für stabiles
+  Zielen auf null. `-NoHeadBob` erzwingt beide aus;
 - F10 erzwingt einen raumfesten Komfortbildschirm und zentriert beim Rückweg
   neu;
 - Zustände ohne vollständiges Stereo-Weltbild wechseln automatisch auf das

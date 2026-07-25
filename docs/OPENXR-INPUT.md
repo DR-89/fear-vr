@@ -118,6 +118,12 @@ erhalten und werden weiterhin aus `fearvr.ini` gelesen und dorthin
 geschrieben, stehen aber nicht auf der sichtbaren Seite. Ein zweistufiges Menü
 wurde verworfen.
 
+Die Spielertaschenlampe ist im VR-Modus dauerhaft und ohne Batterieverbrauch
+aktiv. Ihr Ursprung folgt der linken Grip-Pose, ihre Strahlrichtung der linken
+Aim-Pose. Die Retail-Kamera wird nur während des Taschenlampenupdates
+vorübergehend auf diese Pose gesetzt und vor dem Rendern beider Augen
+wiederhergestellt.
+
 ### Warum die Auswahl gesprungen ist
 
 Jeder Umschalter besteht aus zwei Controls (`… : ON` und `… : OFF`), von denen

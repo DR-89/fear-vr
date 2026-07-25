@@ -70,7 +70,7 @@ Optionen:
 tools\play.ps1 -Runtime vdxr      # Virtual Desktop erzwingen
 tools\play.ps1 -Runtime steamvr   # SteamVR erzwingen
 tools\play.ps1 -Translation       # begrenzte HMD-Translation (opt-in)
-tools\play.ps1 -NoHeadBob         # Head-Bob aus
+tools\play.ps1 -NoHeadBob         # Head-Bob zwingend aus (Standard bereits aus)
 tools\play.ps1 -NoStereoHud       # nur zur Fehlersuche
 ```
 

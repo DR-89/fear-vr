@@ -1819,6 +1819,21 @@ using PresentFunction =
     HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, const RECT*,
                                 const RECT*, HWND, const RGNDATA*);
 
+void ForceHighQualitySource(D3DPRESENT_PARAMETERS* parameters) noexcept {
+    if (parameters == nullptr || parameters->BackBufferWidth < 640 ||
+        parameters->BackBufferHeight < 480) {
+        return;
+    }
+    // Render the mono source in a valid windowed target. Changing only a
+    // fullscreen mode made LithTech reject the renderer; windowed D3D9
+    // accepts this 16:9 target and the OpenXR host scales it to the headset
+    // swapchain afterwards.
+    parameters->Windowed = TRUE;
+    parameters->BackBufferWidth = 1920;
+    parameters->BackBufferHeight = 1080;
+    parameters->FullScreen_RefreshRateInHz = 0;
+}
+
 struct D3D9VtableRecord {
     void** vtable{nullptr};
     CreateDeviceFunction createDevice{nullptr};
@@ -1982,6 +1997,7 @@ HRESULT STDMETHODCALLTYPE HookCreateDevice(
     if (record.createDevice == nullptr) {
         return D3DERR_INVALIDCALL;
     }
+    ForceHighQualitySource(parameters);
     const HRESULT result = record.createDevice(
         self, adapter, deviceType, focusWindow, behaviorFlags, parameters,
         output);
@@ -2002,6 +2018,7 @@ HRESULT STDMETHODCALLTYPE HookCreateDeviceEx(
     if (record.createDeviceEx == nullptr) {
         return D3DERR_INVALIDCALL;
     }
+    ForceHighQualitySource(parameters);
     const HRESULT result = record.createDeviceEx(
         self, adapter, deviceType, focusWindow, behaviorFlags, parameters,
         fullscreenMode, output);
@@ -2018,6 +2035,7 @@ HRESULT STDMETHODCALLTYPE HookReset(IDirect3DDevice9* self,
     if (record.reset == nullptr) {
         return D3DERR_INVALIDCALL;
     }
+    ForceHighQualitySource(parameters);
     GetBridge().BeforeReset();
     const HRESULT result = record.reset(self, parameters);
     GetBridge().AfterReset(result);
@@ -2044,6 +2062,7 @@ HRESULT STDMETHODCALLTYPE HookLateReset(
     if (g_lateReset == nullptr) {
         return D3DERR_INVALIDCALL;
     }
+    ForceHighQualitySource(parameters);
     GetBridge().BeforeReset();
     const HRESULT result = g_lateReset(self, parameters);
     GetBridge().AfterReset(result);

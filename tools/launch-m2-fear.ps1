@@ -380,7 +380,7 @@ if ($Milestone -ne 'M2') {
             $(if ($NoHeadBob) {
                 'Head-Bob ist für Kamera und Waffe deaktiviert.'
             } else {
-                'Head-Bob bleibt aktiv; mit -NoHeadBob deaktivieren.'
+                'Waffen-Bob ist aus; Kamera-Bob folgt fearvr.ini (Standard: aus).'
             })
         )
         Write-Host (

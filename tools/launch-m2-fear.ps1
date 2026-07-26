@@ -32,6 +32,8 @@ param(
 
     [switch]$NoHeadBob,
 
+    [switch]$NoGpuHud,
+
     [switch]$Wait
 )
 
@@ -181,6 +183,11 @@ if ($Milestone -in @('M4', 'M5') -and $StereoHud) {
 if ($Milestone -in @('M4', 'M5') -and $NoHeadBob) {
     $steamArguments += '-fearvr-no-headbob'
 }
+# Notausstieg für den GPU-HUD-Kompositor: Er zeichnet in das Gerät des Spiels.
+# Bleibt danach etwas schwarz, trennt dieser Schalter Ursache von Wirkung.
+if ($NoGpuHud) {
+    $steamArguments += '-fearvr-no-gpu-hud'
+}
 if ($Milestone -eq 'M5') {
     $steamArguments += '-fearvr-input'
 }
@@ -253,6 +260,7 @@ $expectedModules = @{
     'fearvr-d3d9.dll' = Join-Path $manifest.moduleDirectory 'fearvr-d3d9.dll'
 }
 $loaded = @{}
+$echoPatchPath = $null
 $deadline = (Get-Date).AddSeconds(30)
 do {
     Start-Sleep -Milliseconds 250
@@ -266,6 +274,14 @@ do {
     }
     $moduleLines = @(& $moduleProbe $fear.Id)
     if ($LASTEXITCODE -eq 0) {
+        # EchoPatch ist optional und darf nichts abbrechen; gemeldet wird es
+        # trotzdem, sonst bleibt unklar, ob es beim Lauf aktiv war.
+        foreach ($line in $moduleLines) {
+            $parts = $line -split "`t", 2
+            if ($parts.Count -eq 2 -and $parts[0] -eq 'dinput8.dll') {
+                $echoPatchPath = [IO.Path]::GetFullPath($parts[1])
+            }
+        }
         foreach ($line in $moduleLines) {
             $parts = $line -split "`t", 2
             if ($parts.Count -eq 2 -and
@@ -352,6 +368,14 @@ Write-Host (
     "F.E.A.R. läuft mit $milestoneLabel-Bridge (PID $($fear.Id))."
 ) `
     -ForegroundColor Green
+# Ohne EchoPatch lädt das Spiel die System-dinput8.dll — das ist der
+# Normalfall und keine Meldung wert. Gemeldet wird nur, was im
+# Retail-Verzeichnis liegt.
+$echoPatchExpected = [IO.Path]::GetFullPath(
+    (Join-Path $cfg.RetailRoot $cfg.EchoPatchDllName))
+if ($echoPatchPath -eq $echoPatchExpected) {
+    Write-Host "EchoPatch: aktiv ($echoPatchPath)."
+}
 if ($Milestone -ne 'M2') {
     if ($stereoReady) {
         Write-Host (
@@ -395,9 +419,14 @@ if ($Milestone -ne 'M2') {
                 'eine Granate, X schaltet Zeitlupe, Y öffnet Pause.'
             )
             Write-Host (
-                'Linker Grip rennt, linker Stick-Klick duckt ebenfalls, ' +
-                'rechter Grip benutzt, Trigger zielen/feuern; ' +
+                'Linker Grip rennt — oder haelt, mit der Hand an der Waffe, ' +
+                'diese beidhaendig mit; linker Stick-Klick benutzt einen ' +
+                'Medkit, rechter Grip benutzt, Trigger zielen/feuern; ' +
                 'rechter Stick-Klick setzt Recenter.'
+            )
+            Write-Host (
+                'Im VR-Menue schaltet "Controls: LEFT-HANDED" die komplette ' +
+                'Belegung auf die andere Hand.'
             )
             Write-Host (
                 'Der rechte Grip aktiviert und nimmt auf, worauf die Waffe ' +

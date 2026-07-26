@@ -40,6 +40,15 @@ if(MSVC)
 endif()
 add_test(NAME controller_mapping COMMAND test_controller_mapping)
 
+add_executable(test_two_handed_grip test_two_handed_grip.cpp)
+target_link_libraries(
+  test_two_handed_grip PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_two_handed_grip PRIVATE /UNDEBUG)
+endif()
+add_test(NAME two_handed_grip COMMAND test_two_handed_grip)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND TARGET fearvr-proxy)
   # Isolierter M2-Producer: Der echte System-Import bleibt d3d9.lib; erst
   # nach dem Link wird ausschließlich neben diese Test-EXE der Proxy kopiert.

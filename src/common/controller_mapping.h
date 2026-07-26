@@ -25,6 +25,7 @@ enum FearVrGameCommand : std::uint32_t {
     FEARVR_CMD_LEAN_RIGHT = 21,
     FEARVR_CMD_YAW_ACCEL = 23,
     FEARVR_CMD_FOCUS = 27,
+    FEARVR_CMD_MEDKIT = 70,
     FEARVR_CMD_PREV_WEAPON = 76,
     FEARVR_CMD_NEXT_WEAPON = 77,
     FEARVR_CMD_THROW_GRENADE = 81,
@@ -71,9 +72,13 @@ inline int LeftHandLeanDirection(
     return 0;
 }
 
+// `twoHandedGrip` meldet, dass die linke Hand die Waffe mithaelt. Der linke
+// Grabknopf und die linke Handneigung gehoeren dann der Waffe: Sprinten und
+// Lehnen wuerden sonst dauerhaft mitlaufen, sobald man beidhaendig zielt.
 inline FearVrCommandValue MapControllerCommand(
     const FearVrInputState& input,
-    std::uint32_t command) noexcept {
+    std::uint32_t command,
+    bool twoHandedGrip = false) noexcept {
     // Springen und Ducken liegen auf demselben Stick wie das Drehen. Erst ein
     // deutlicher Vollausschlag darf sie ausloesen, sonst springt der Spieler
     // beim schnellen Drehen.
@@ -143,7 +148,7 @@ inline FearVrCommandValue MapControllerCommand(
     case FEARVR_CMD_RUN:
         return {
             1.0F,
-            leftActive &&
+            leftActive && !twoHandedGrip &&
                 input.squeeze[FEARVR_HAND_LEFT] >=
                     kSqueezeThreshold};
     case FEARVR_CMD_ACTIVATE:
@@ -161,15 +166,27 @@ inline FearVrCommandValue MapControllerCommand(
     case FEARVR_CMD_RELOAD:
     case FEARVR_CMD_THROW_GRENADE:
         return {0.0F, false};
+    // Retail wertet den Medkit nur an der steigenden Flanke aus
+    // (`CInterfaceMgr::OnCommandOn`), ein gehaltener Klick verbraucht deshalb
+    // genau einen. Der linke Stick-Klick war die einzige freie Taste.
+    case FEARVR_CMD_MEDKIT:
+        return {
+            1.0F,
+            leftActive &&
+                (input.buttons & FEARVR_IB_LEFT_STICK) != 0};
     case FEARVR_CMD_SLOWMO:
         return {
             1.0F,
             leftActive &&
                 (input.buttons & FEARVR_IB_LEFT_PRIMARY) != 0};
     case FEARVR_CMD_LEAN_LEFT:
-        return {1.0F, LeftHandLeanDirection(input) > 0};
+        return {
+            1.0F,
+            !twoHandedGrip && LeftHandLeanDirection(input) > 0};
     case FEARVR_CMD_LEAN_RIGHT:
-        return {1.0F, LeftHandLeanDirection(input) < 0};
+        return {
+            1.0F,
+            !twoHandedGrip && LeftHandLeanDirection(input) < 0};
     case FEARVR_CMD_MENU:
         return {
             1.0F,

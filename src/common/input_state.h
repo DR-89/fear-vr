@@ -37,6 +37,67 @@ inline void NeutralizeInputState(
     state.flags &= ~FEARVR_IF_FOCUSED;
 }
 
+// Left-handed play: every binding swaps hands exactly once, here, right after
+// the state arrives. Downstream the weapon hand stays FEARVR_HAND_RIGHT, so
+// weapon aim, flashlight, leaning, hand nodes and the command mapping all
+// mirror with a single swap instead of a handedness case each.
+//
+// The only value that must be mirrored back is the haptic request's hand mask,
+// which addresses a physical controller again.
+inline void MirrorInputHandedness(
+    FearVrInputState& state) noexcept {
+    const auto SwapFloat = [](float& left, float& right) {
+        const float saved = left;
+        left = right;
+        right = saved;
+    };
+    const auto SwapHandMasks = [](std::uint32_t& mask) {
+        const std::uint32_t left = mask & FEARVR_HAND_MASK_LEFT;
+        const std::uint32_t right = mask & FEARVR_HAND_MASK_RIGHT;
+        mask &= ~static_cast<std::uint32_t>(
+            FEARVR_HAND_MASK_LEFT | FEARVR_HAND_MASK_RIGHT);
+        if (left != 0) {
+            mask |= FEARVR_HAND_MASK_RIGHT;
+        }
+        if (right != 0) {
+            mask |= FEARVR_HAND_MASK_LEFT;
+        }
+    };
+
+    SwapFloat(state.moveX, state.turnX);
+    SwapFloat(state.moveY, state.turnY);
+    SwapFloat(
+        state.trigger[FEARVR_HAND_LEFT],
+        state.trigger[FEARVR_HAND_RIGHT]);
+    SwapFloat(
+        state.squeeze[FEARVR_HAND_LEFT],
+        state.squeeze[FEARVR_HAND_RIGHT]);
+    for (std::uint32_t index = 0; index < 4U; ++index) {
+        const std::uint32_t leftBit = FEARVR_IB_LEFT_PRIMARY << index;
+        const std::uint32_t rightBit = FEARVR_IB_RIGHT_PRIMARY << index;
+        const bool leftSet = (state.buttons & leftBit) != 0;
+        const bool rightSet = (state.buttons & rightBit) != 0;
+        state.buttons &= ~(leftBit | rightBit);
+        if (leftSet) {
+            state.buttons |= rightBit;
+        }
+        if (rightSet) {
+            state.buttons |= leftBit;
+        }
+    }
+    SwapHandMasks(state.activeHands);
+    SwapHandMasks(state.aimPoseValidHands);
+    SwapHandMasks(state.gripPoseValidHands);
+    const FearVrPose savedAim = state.handAimPose[FEARVR_HAND_LEFT];
+    state.handAimPose[FEARVR_HAND_LEFT] =
+        state.handAimPose[FEARVR_HAND_RIGHT];
+    state.handAimPose[FEARVR_HAND_RIGHT] = savedAim;
+    const FearVrPose savedGrip = state.handGripPose[FEARVR_HAND_LEFT];
+    state.handGripPose[FEARVR_HAND_LEFT] =
+        state.handGripPose[FEARVR_HAND_RIGHT];
+    state.handGripPose[FEARVR_HAND_RIGHT] = savedGrip;
+}
+
 // Signed roll of a pose about its own forward (-Z) axis, in radians.
 // OpenXR spaces are Y-up, so the roll follows from the world-up components
 // of the pose's local +X and +Y axes. A positive result means the top of the

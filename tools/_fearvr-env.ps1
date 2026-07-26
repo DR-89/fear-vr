@@ -14,6 +14,20 @@ $script:FearVr = [ordered]@{
     SdkInstallerRel = 'extras\fear_publictools_108.exe'
     SdkInstallerSize = 671441087
     SdkInstallerSha256 = '11AAA4128528403F7BC9EA5119C68051C62B92A99E6411DFD749AF55E9B19DF8'
+    # --- EchoPatch (Wemino), als dinput8.dll neben FEAR.exe ------------------
+    # Die einzige Fremdsoftware, die bewusst IN der Retail-Installation liegt.
+    # Sie besteht aus genau zwei Dateien und wird von tools\install-echopatch.ps1
+    # gesetzt und wieder entfernt. FEAR.exe selbst bleibt unangetastet, solange
+    # CheckLAAPatch = 0 in der EchoPatch.ini steht.
+    EchoPatchVersion = '4.2.1'
+    EchoPatchZipRel = 'vendor-local\echopatch\EchoPatch-4.2.1.zip'
+    EchoPatchZipSize = 1978793
+    EchoPatchZipSha256 = '5AE9BF8F4D549B0F1CD682D63B4123C2BFF2622BD2035779DF263183C61BF9AE'
+    EchoPatchDllName = 'dinput8.dll'
+    EchoPatchDllSha256 = '3B01CD16228C1A85585037B87D0C6C41E99F18AE0823821518242382B854BEFA'
+    EchoPatchIniName = 'EchoPatch.ini'
+    EchoPatchIniRel = 'patches\echopatch\EchoPatch.ini'
+    EchoPatchReleaseUrl = 'https://github.com/Wemino/EchoPatch/releases/download/4.2.1/EchoPatch.zip'
     SteamVrManifest = 'C:\Program Files (x86)\Steam\steamapps\common\SteamVR\steamxr_win64.json'
     VdxrManifest    = 'C:\Program Files\Virtual Desktop Streamer\OpenXR\virtualdesktop-openxr.json'
     UserDataRel     = 'stage\userdata'

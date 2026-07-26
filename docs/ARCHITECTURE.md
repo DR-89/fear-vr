@@ -132,6 +132,14 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   `FEARVR_BF_CPU_FALLBACK`.
 - **Bekannte Nachteile:** Per-Frame-CPU-Readback, zusätzliche Latenz und
   Bandbreite; die finale Produktionsinvariante ist damit nicht erfüllt.
+  Seit dem GPU-Kompositor sind es zwei Readbacks pro Bild statt drei — je
+  einer pro Auge, und die sind der Preis des klassischen Geräts, nicht des
+  HUDs. Weg wären sie erst, wenn das Spielgerät selbst ein D3D9Ex-Gerät
+  würde: Dann greift der bereits vorhandene `DirectShared`-Pfad
+  (`bridge.cpp`, Abfrage per `QueryInterface` auf `IDirect3DDevice9Ex`) ohne
+  jede CPU-Kopie. Der Preis dafür ist ein Wrapper für Texturen, Surfaces und
+  Buffer, weil `D3DPOOL_MANAGED` auf Ex-Geräten nicht existiert und über
+  `D3DPOOL_DEFAULT` plus SYSTEMMEM-Schattenkopie nachgebaut werden müsste.
 - **Rückfallpfad:** Bridge deaktivieren oder bis zur GPU-direkten Lösung
   Flat-Screen verwenden. Dieser Pfad darf nicht stillschweigend als
   Release-/Performancepfad gelten.
@@ -201,11 +209,18 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   Pixel identisch in beide Augen. Deltas über 65 Prozent gelten als Menü oder
   Vollbildeffekt und wechseln automatisch auf das raumfeste Panel, damit die
   Welt nicht versehentlich überwiegend mono bleibt.
-- **Bekannte Nachteile:** Der HUD-Prototyp benötigt ein zusätzliches
-  D3D9-Readback pro Frame und ist kein zulässiger finaler Pfad. Transparente
-  UI-Kanten enthalten den Hintergrund des rechten Auges. Nach dem visuellen
-  Nachweis muss die Trennung GPU-seitig oder über einen nativen UI-Layer
-  erfolgen.
+- **Seit 26.07.2026 auf der GPU:** Der Vergleich läuft als `ps_2_0`-Shader auf
+  dem Gerät des Spiels (`GpuHudCompositor` in `src/proxy32/bridge.cpp`). Der
+  Deckungsgrad, der Vollbildeffekte vom HUD trennt, entsteht über eine
+  Reduktionskette (4× je Durchlauf, bis beide Kanten ≤ 128) und wird um genau
+  ein Bild verzögert gelesen — einige Kilobyte statt eines Vollbildes, ohne
+  Synchronisationspunkt. Damit entfällt ein Readback pro Bild und die gesamte
+  Pixelarbeit auf der CPU. Der alte CPU-Mischer bleibt als automatischer
+  Rückfall erhalten; `-fearvr-no-gpu-hud` erzwingt ihn.
+- **Bekannte Nachteile:** Transparente UI-Kanten enthalten weiterhin den
+  Hintergrund des rechten Auges — das ist dem Verfahren inhärent und braucht
+  einen nativen UI-Layer. Der verbleibende Transfer-Readback ist **nicht** dem
+  HUD anzulasten, sondern dem klassischen D3D9-Gerät des Spiels (siehe AD-004).
 - **Rückfallpfad:** `-NoStereoHud` am M4-Launcher lässt den bestätigten
   Weltstereo-/Menü-Quad-Pfad unverändert; der direkte Shared-Texture-Pfad
   mischt kein HUD.

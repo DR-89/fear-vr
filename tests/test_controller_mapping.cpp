@@ -122,6 +122,17 @@ int main() {
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_SLOWMO)
                .active);
+    // Der linke Stick-Klick benutzt einen Medkit; Ducken liegt weiterhin
+    // allein auf dem rechten Stick.
+    assert(fearvr::MapControllerCommand(
+               input, fearvr::FEARVR_CMD_MEDKIT)
+               .active);
+    input.buttons &= ~static_cast<std::uint32_t>(
+        FEARVR_IB_LEFT_STICK);
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_MEDKIT)
+                .active);
+    input.buttons |= FEARVR_IB_LEFT_STICK;
 
     input.squeeze[FEARVR_HAND_LEFT] = 0.0F;
     assert(!fearvr::MapControllerCommand(

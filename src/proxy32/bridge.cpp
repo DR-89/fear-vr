@@ -12,6 +12,7 @@
 #include <string>
 
 #include <Shellapi.h>
+#include <d3dcompiler.h>
 #include <dxgi1_2.h>
 #include <MinHook.h>
 #include <wrl/client.h>
@@ -119,6 +120,10 @@ struct CommandLineConfig {
     bool stereoToggleAllowed{false};
     bool translationEnabled{false};
     bool stereoHudEnabled{false};
+    // Notausstieg: laesst den GPU-Kompositor weg und mischt das HUD wieder
+    // Pixel fuer Pixel auf der CPU. Der GPU-Weg zeichnet in das Geraet des
+    // Spiels; bleibt danach etwas schwarz, trennt dieser Schalter die Ursache.
+    bool disableGpuHud{false};
 };
 
 CommandLineConfig ReadConfig() noexcept {
@@ -153,6 +158,9 @@ CommandLineConfig ReadConfig() noexcept {
         } else if (_wcsicmp(
                        arguments[index], L"-fearvr-stereo-hud") == 0) {
             config.stereoHudEnabled = true;
+        } else if (_wcsicmp(
+                       arguments[index], L"-fearvr-no-gpu-hud") == 0) {
+            config.disableGpuHud = true;
         }
     }
     LocalFree(arguments);
@@ -187,6 +195,565 @@ enum class TransferMode {
     None,
     DirectShared,
     CpuViaD3D9Ex
+};
+
+// ============================================================================
+// GPU-Kompositor für das Stereo-HUD
+//
+// Die erste Fassung verglich das Present-Bild und das rechte Weltbild Pixel für
+// Pixel auf der CPU. Das kostete pro Bild drei volle Readbacks über den Bus und
+// drei Durchläufe über alle Pixel — bei 1080p rund sechs Millionen Iterationen.
+// Dieselbe Entscheidung trifft ein Pixelshader auf der GPU, wo die Bilder
+// ohnehin schon liegen.
+//
+// Die Mathematik ist bewusst dieselbe wie in `stereo_hud_math.h`: Schwelle über
+// den Farbkanälen, Stauchung um die Bildmitte, und die Auswahl zwischen
+// Weltbild und Present. Der Deckungsgrad, der Vollbildeffekte vom HUD trennt,
+// entsteht über eine Reduktionskette und wird um ein Bild verzögert gelesen —
+// vier Kilobyte statt acht Megabyte, und ohne die Pipeline anzuhalten.
+// ============================================================================
+
+// Ab hier wird nicht weiter reduziert; der Rest ist billiger auf der CPU.
+constexpr UINT kHudCoverageMaxExtent = 128;
+constexpr UINT kHudMaxReduceLevels = 4;
+
+constexpr char kHudMaskShader[] = R"(
+sampler2D presented : register(s0);
+sampler2D rightWorld : register(s1);
+float4 params : register(c0);
+
+float4 main(float2 uv : TEXCOORD0) : COLOR0 {
+    float3 difference = abs(tex2D(presented, uv).rgb -
+                            tex2D(rightWorld, uv).rgb);
+    float changed = step(
+        params.x, max(max(difference.r, difference.g), difference.b));
+    return float4(changed, changed, changed, 1.0);
+}
+)";
+
+constexpr char kHudReduceShader[] = R"(
+sampler2D source : register(s0);
+float4 texel : register(c0);
+
+float4 main(float2 uv : TEXCOORD0) : COLOR0 {
+    // Vier bilineare Abgriffe, jeder in der Mitte eines 2x2-Quadranten: das
+    // ergibt exakt den Mittelwert der 4x4 Quelltexel dieses Zieltexels.
+    float4 total = tex2D(source, uv + float2(-texel.x, -texel.y)) +
+                   tex2D(source, uv + float2( texel.x, -texel.y)) +
+                   tex2D(source, uv + float2(-texel.x,  texel.y)) +
+                   tex2D(source, uv + float2( texel.x,  texel.y));
+    return total * 0.25;
+}
+)";
+
+constexpr char kHudCompositeShader[] = R"(
+sampler2D presented : register(s0);
+sampler2D rightWorld : register(s1);
+sampler2D eyeWorld : register(s2);
+float4 params : register(c0);
+float4 size : register(c1);
+float4 shrink : register(c2);
+
+float4 main(float2 uv : TEXCOORD0) : COLOR0 {
+    float4 world = tex2D(eyeWorld, uv);
+    float4 flatImage = tex2D(presented, uv);
+
+    // Ganzzahlige Rückrechnung wie StereoHudSourceAxis: Ablage von der Mitte
+    // mal 5/4, zur Null hin abgeschnitten.
+    float2 outputPixel = floor(uv * size.xy);
+    float2 center = floor(size.xy * 0.5);
+    float2 scaled = (outputPixel - center) * shrink.x;
+    float2 sourcePixel = center + sign(scaled) * floor(abs(scaled));
+    float2 sourceUv = (sourcePixel + 0.5) * size.zw;
+    float inside = step(0.0, sourcePixel.x) * step(0.0, sourcePixel.y) *
+                   step(sourcePixel.x, size.x - 1.0) *
+                   step(sourcePixel.y, size.y - 1.0);
+
+    float4 overlayColor = tex2D(presented, sourceUv);
+    float3 difference = abs(overlayColor.rgb -
+                            tex2D(rightWorld, sourceUv).rgb);
+    float changed = step(
+        params.x, max(max(difference.r, difference.g), difference.b));
+
+    float overlay = params.y * inside * changed;
+    return lerp(lerp(world, overlayColor, overlay), flatImage, params.z);
+}
+)";
+
+struct HudQuadVertex {
+    float x, y, z, rhw;
+    float u, v;
+};
+
+using D3DCompileFunction = HRESULT(WINAPI*)(
+    LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*,
+    LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+
+class GpuHudCompositor {
+public:
+    // Legt Shader, Zwischenziele und den Zustandsblock an. Schlägt irgendetwas
+    // davon fehl, bleibt der Kompositor einfach aus und der Aufrufer mischt
+    // weiter auf der CPU.
+    bool Initialize(IDirect3DDevice9* device, UINT width, UINT height,
+                    Logger& logger) noexcept {
+        Release();
+        width_ = width;
+        height_ = height;
+
+        D3DCAPS9 caps{};
+        if (FAILED(device->GetDeviceCaps(&caps)) ||
+            caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) {
+            logger.Write(
+                "WARN", "stereo_hud_gpu_unsupported",
+                "The game device reports less than pixel shader 2.0; "
+                "HUD compositing stays on the CPU.");
+            return false;
+        }
+        if (!LoadCompiler(logger)) {
+            return false;
+        }
+        if (!CompilePixelShader(device, kHudMaskShader, maskShader_,
+                                "stereo_hud_mask_shader_failed", logger) ||
+            !CompilePixelShader(device, kHudReduceShader, reduceShader_,
+                                "stereo_hud_reduce_shader_failed", logger) ||
+            !CompilePixelShader(device, kHudCompositeShader,
+                                compositeShader_,
+                                "stereo_hud_composite_shader_failed",
+                                logger)) {
+            return false;
+        }
+
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            if (!CreateRenderTargetTexture(
+                    device, width, height, composite_[eye], logger)) {
+                return false;
+            }
+        }
+        if (!CreateRenderTargetTexture(
+                device, width, height, mask_, logger)) {
+            return false;
+        }
+
+        UINT levelWidth = width;
+        UINT levelHeight = height;
+        while (reduceLevelCount_ < kHudMaxReduceLevels &&
+               (levelWidth > kHudCoverageMaxExtent ||
+                levelHeight > kHudCoverageMaxExtent)) {
+            levelWidth = (levelWidth + 3U) / 4U;
+            levelHeight = (levelHeight + 3U) / 4U;
+            if (!CreateRenderTargetTexture(
+                    device, levelWidth, levelHeight,
+                    reduce_[reduceLevelCount_], logger)) {
+                return false;
+            }
+            ++reduceLevelCount_;
+        }
+        coverageWidth_ = levelWidth;
+        coverageHeight_ = levelHeight;
+        if (reduceLevelCount_ == 0) {
+            // Ein sehr kleines Bild braucht keine Reduktion; dann wird die
+            // Maske selbst gelesen.
+            coverageWidth_ = width;
+            coverageHeight_ = height;
+        }
+        HRESULT result = device->CreateOffscreenPlainSurface(
+            coverageWidth_, coverageHeight_, D3DFMT_A8R8G8B8,
+            D3DPOOL_SYSTEMMEM, coverageReadback_.ReleaseAndGetAddressOf(),
+            nullptr);
+        if (FAILED(result)) {
+            LogHresult(logger, "stereo_hud_coverage_surface_failed", result);
+            return false;
+        }
+        result = device->CreateStateBlock(
+            D3DSBT_ALL, stateBlock_.ReleaseAndGetAddressOf());
+        if (FAILED(result)) {
+            LogHresult(logger, "stereo_hud_state_block_failed", result);
+            return false;
+        }
+
+        ready_ = true;
+        coveragePending_ = false;
+        std::ostringstream message;
+        message << "reduce_levels=" << reduceLevelCount_
+                << " coverage=" << coverageWidth_ << 'x' << coverageHeight_;
+        logger.Write("INFO", "stereo_hud_gpu_ready", message.str());
+        return true;
+    }
+
+    void Release() noexcept {
+        ready_ = false;
+        coveragePending_ = false;
+        coverageSource_ = nullptr;
+        coverageRatio_ = 1.0;
+        reduceLevelCount_ = 0;
+        stateBlock_.Reset();
+        coverageReadback_.Reset();
+        for (auto& level : reduce_) {
+            level = {};
+        }
+        mask_ = {};
+        for (auto& target : composite_) {
+            target = {};
+        }
+        compositeShader_.Reset();
+        reduceShader_.Reset();
+        maskShader_.Reset();
+    }
+
+    bool ready() const noexcept { return ready_; }
+
+    IDirect3DSurface9* CompositeSurface(std::uint32_t eye) const noexcept {
+        return composite_[eye].surface.Get();
+    }
+
+    // Anteil geänderter Pixel aus dem *vorherigen* Bild. Der Wert steuert nur
+    // die Betriebsart, nicht die Bildausgabe; ein Bild Verzögerung ist dort
+    // belanglos und spart den Synchronisationspunkt.
+    double coverageRatio() const noexcept { return coverageRatio_; }
+
+    bool Compose(IDirect3DDevice9* device,
+                 IDirect3DTexture9* presented,
+                 IDirect3DTexture9* rightWorld,
+                 IDirect3DTexture9* const eyeWorld[FEARVR_EYE_COUNT],
+                 bool compositeEnabled, bool flatPanel,
+                 Logger& logger) noexcept {
+        if (!ready_ || stateBlock_->Capture() != D3D_OK) {
+            return false;
+        }
+        ComPtr<IDirect3DSurface9> previousTarget;
+        ComPtr<IDirect3DSurface9> previousDepth;
+        device->GetRenderTarget(0, previousTarget.ReleaseAndGetAddressOf());
+        // Ohne Tiefenpuffer zeichnen: Ein fremdes Ziel anderer Größe würde
+        // sonst den Zeichenaufruf ablehnen.
+        device->GetDepthStencilSurface(
+            previousDepth.ReleaseAndGetAddressOf());
+
+        // Der Present-Hook läuft nach EndScene; ein Zeichenaufruf braucht aber
+        // eine offene Szene. Schlägt BeginScene fehl, sind wir bereits in
+        // einer — dann darf sie hier auch nicht geschlossen werden.
+        const bool beganScene = SUCCEEDED(device->BeginScene());
+        bool succeeded = ApplyCommonState(device);
+        if (succeeded) {
+            ReadPreviousCoverage(logger);
+            succeeded = RenderMaskAndReduce(device, presented, rightWorld);
+        }
+        for (std::uint32_t eye = 0; succeeded && eye < FEARVR_EYE_COUNT;
+             ++eye) {
+            succeeded = RenderComposite(
+                device, presented, rightWorld, eyeWorld[eye],
+                composite_[eye], compositeEnabled, flatPanel);
+        }
+        if (beganScene) {
+            device->EndScene();
+        }
+        if (succeeded && coverageSource_ != nullptr) {
+            // Der Kopiervorgang läuft ab hier neben dem Spiel her; gelesen
+            // wird er erst im nächsten Bild.
+            coveragePending_ = SUCCEEDED(device->GetRenderTargetData(
+                coverageSource_, coverageReadback_.Get()));
+            coverageSource_ = nullptr;
+        }
+
+        device->SetDepthStencilSurface(previousDepth.Get());
+        if (previousTarget) {
+            device->SetRenderTarget(0, previousTarget.Get());
+        }
+        stateBlock_->Apply();
+        if (!succeeded) {
+            logger.Write(
+                "WARN", "stereo_hud_gpu_compose_failed",
+                "A GPU HUD pass failed; the CPU compositor takes over.");
+            ready_ = false;
+        }
+        return succeeded;
+    }
+
+private:
+    struct RenderTargetTexture {
+        ComPtr<IDirect3DTexture9> texture;
+        ComPtr<IDirect3DSurface9> surface;
+        UINT width{0};
+        UINT height{0};
+    };
+
+    static void LogHresult(Logger& logger, const char* event,
+                           HRESULT result) noexcept {
+        std::ostringstream message;
+        message << "HRESULT=0x" << std::hex << std::uppercase
+                << static_cast<std::uint32_t>(result);
+        logger.Write("ERROR", event, message.str());
+    }
+
+    bool LoadCompiler(Logger& logger) noexcept {
+        if (compile_ != nullptr) {
+            return true;
+        }
+        // Bewusst dynamisch: Fehlt der Compiler, soll die Bridge weiterlaufen
+        // und nicht schon beim Laden der DLL scheitern.
+        const HMODULE module = LoadLibraryW(L"d3dcompiler_47.dll");
+        if (module == nullptr) {
+            logger.Write(
+                "WARN", "stereo_hud_compiler_missing",
+                "d3dcompiler_47.dll is unavailable; HUD compositing "
+                "stays on the CPU.");
+            return false;
+        }
+        compile_ = reinterpret_cast<D3DCompileFunction>(
+            reinterpret_cast<void*>(
+                GetProcAddress(module, "D3DCompile")));
+        if (compile_ == nullptr) {
+            logger.Write(
+                "WARN", "stereo_hud_compiler_missing",
+                "d3dcompiler_47.dll exports no D3DCompile.");
+            return false;
+        }
+        return true;
+    }
+
+    bool CompilePixelShader(IDirect3DDevice9* device, const char* source,
+                            ComPtr<IDirect3DPixelShader9>& shader,
+                            const char* failureEvent,
+                            Logger& logger) noexcept {
+        ComPtr<ID3DBlob> code;
+        ComPtr<ID3DBlob> errors;
+        HRESULT result = compile_(
+            source, std::strlen(source), "fearvr_stereo_hud", nullptr,
+            nullptr, "main", "ps_2_0", 0, 0,
+            code.ReleaseAndGetAddressOf(),
+            errors.ReleaseAndGetAddressOf());
+        if (FAILED(result) || !code) {
+            if (errors) {
+                logger.Write(
+                    "ERROR", failureEvent,
+                    std::string(
+                        static_cast<const char*>(errors->GetBufferPointer()),
+                        errors->GetBufferSize()));
+            } else {
+                LogHresult(logger, failureEvent, result);
+            }
+            return false;
+        }
+        result = device->CreatePixelShader(
+            static_cast<const DWORD*>(code->GetBufferPointer()),
+            shader.ReleaseAndGetAddressOf());
+        if (FAILED(result)) {
+            LogHresult(logger, failureEvent, result);
+            return false;
+        }
+        return true;
+    }
+
+    static bool CreateRenderTargetTexture(IDirect3DDevice9* device,
+                                          UINT width, UINT height,
+                                          RenderTargetTexture& target,
+                                          Logger& logger) noexcept {
+        target = {};
+        HRESULT result = device->CreateTexture(
+            width, height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+            D3DPOOL_DEFAULT, target.texture.ReleaseAndGetAddressOf(),
+            nullptr);
+        if (FAILED(result)) {
+            LogHresult(logger, "stereo_hud_target_create_failed", result);
+            return false;
+        }
+        result = target.texture->GetSurfaceLevel(
+            0, target.surface.ReleaseAndGetAddressOf());
+        if (FAILED(result)) {
+            LogHresult(logger, "stereo_hud_target_surface_failed", result);
+            return false;
+        }
+        target.width = width;
+        target.height = height;
+        return true;
+    }
+
+    bool ApplyCommonState(IDirect3DDevice9* device) noexcept {
+        device->SetVertexShader(nullptr);
+        device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+        device->SetRenderState(D3DRS_ZENABLE, FALSE);
+        device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+        device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+        device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+        device->SetRenderState(D3DRS_COLORWRITEENABLE,
+                               D3DCOLORWRITEENABLE_RED |
+                                   D3DCOLORWRITEENABLE_GREEN |
+                                   D3DCOLORWRITEENABLE_BLUE |
+                                   D3DCOLORWRITEENABLE_ALPHA);
+        for (DWORD sampler = 0; sampler < 3; ++sampler) {
+            device->SetSamplerState(
+                sampler, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                sampler, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                sampler, D3DSAMP_SRGBTEXTURE, FALSE);
+            device->SetSamplerState(
+                sampler, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        }
+        return true;
+    }
+
+    static void SetPointFilter(IDirect3DDevice9* device,
+                               DWORD sampler) noexcept {
+        device->SetSamplerState(sampler, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        device->SetSamplerState(sampler, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    }
+
+    static void SetLinearFilter(IDirect3DDevice9* device,
+                                DWORD sampler) noexcept {
+        device->SetSamplerState(sampler, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(sampler, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    }
+
+    static bool DrawFullscreenQuad(IDirect3DDevice9* device, UINT width,
+                                   UINT height) noexcept {
+        // Die halbe Texelverschiebung ist die D3D9-Regel für 1:1-Abbildung
+        // zwischen Pixelmitte und Texelmitte.
+        const float right = static_cast<float>(width) - 0.5F;
+        const float bottom = static_cast<float>(height) - 0.5F;
+        const HudQuadVertex vertices[4] = {
+            {-0.5F, -0.5F, 0.0F, 1.0F, 0.0F, 0.0F},
+            {right, -0.5F, 0.0F, 1.0F, 1.0F, 0.0F},
+            {right, bottom, 0.0F, 1.0F, 1.0F, 1.0F},
+            {-0.5F, bottom, 0.0F, 1.0F, 0.0F, 1.0F}};
+        return SUCCEEDED(device->DrawPrimitiveUP(
+            D3DPT_TRIANGLEFAN, 2, vertices, sizeof(HudQuadVertex)));
+    }
+
+    bool RenderMaskAndReduce(IDirect3DDevice9* device,
+                             IDirect3DTexture9* presented,
+                             IDirect3DTexture9* rightWorld) noexcept {
+        const float threshold[4] = {kHudPixelThreshold, 0.0F, 0.0F, 0.0F};
+        if (FAILED(device->SetRenderTarget(0, mask_.surface.Get())) ||
+            FAILED(device->SetDepthStencilSurface(nullptr)) ||
+            FAILED(device->SetPixelShader(maskShader_.Get())) ||
+            FAILED(device->SetPixelShaderConstantF(0, threshold, 1)) ||
+            FAILED(device->SetTexture(0, presented)) ||
+            FAILED(device->SetTexture(1, rightWorld))) {
+            return false;
+        }
+        SetPointFilter(device, 0);
+        SetPointFilter(device, 1);
+        if (!DrawFullscreenQuad(device, mask_.width, mask_.height)) {
+            return false;
+        }
+
+        const RenderTargetTexture* source = &mask_;
+        if (FAILED(device->SetPixelShader(reduceShader_.Get())) ||
+            FAILED(device->SetTexture(1, nullptr))) {
+            return false;
+        }
+        SetLinearFilter(device, 0);
+        for (std::uint32_t level = 0; level < reduceLevelCount_; ++level) {
+            const RenderTargetTexture& target = reduce_[level];
+            const float texel[4] = {
+                1.0F / static_cast<float>(source->width),
+                1.0F / static_cast<float>(source->height), 0.0F, 0.0F};
+            if (FAILED(device->SetRenderTarget(0, target.surface.Get())) ||
+                FAILED(device->SetTexture(0, source->texture.Get())) ||
+                FAILED(device->SetPixelShaderConstantF(0, texel, 1)) ||
+                !DrawFullscreenQuad(device, target.width, target.height)) {
+                return false;
+            }
+            source = &target;
+        }
+        // Gelesen wird erst nach EndScene: GetRenderTargetData gehört nicht
+        // zwischen BeginScene und EndScene.
+        coverageSource_ = source->surface.Get();
+        return true;
+    }
+
+    bool RenderComposite(IDirect3DDevice9* device,
+                         IDirect3DTexture9* presented,
+                         IDirect3DTexture9* rightWorld,
+                         IDirect3DTexture9* eyeWorld,
+                         const RenderTargetTexture& target,
+                         bool compositeEnabled, bool flatPanel) noexcept {
+        const float params[4] = {
+            kHudPixelThreshold, compositeEnabled ? 1.0F : 0.0F,
+            flatPanel ? 1.0F : 0.0F, 0.0F};
+        const float size[4] = {
+            static_cast<float>(width_), static_cast<float>(height_),
+            1.0F / static_cast<float>(width_),
+            1.0F / static_cast<float>(height_)};
+        const float shrink[4] = {
+            static_cast<float>(kStereoHudShrinkNumerator) /
+                static_cast<float>(kStereoHudShrinkDenominator),
+            0.0F, 0.0F, 0.0F};
+        if (FAILED(device->SetRenderTarget(0, target.surface.Get())) ||
+            FAILED(device->SetPixelShader(compositeShader_.Get())) ||
+            FAILED(device->SetPixelShaderConstantF(0, params, 1)) ||
+            FAILED(device->SetPixelShaderConstantF(1, size, 1)) ||
+            FAILED(device->SetPixelShaderConstantF(2, shrink, 1)) ||
+            FAILED(device->SetTexture(0, presented)) ||
+            FAILED(device->SetTexture(1, rightWorld)) ||
+            FAILED(device->SetTexture(2, eyeWorld))) {
+            return false;
+        }
+        SetPointFilter(device, 0);
+        SetPointFilter(device, 1);
+        SetPointFilter(device, 2);
+        return DrawFullscreenQuad(device, target.width, target.height);
+    }
+
+    void ReadPreviousCoverage(Logger& logger) noexcept {
+        if (!coveragePending_) {
+            return;
+        }
+        coveragePending_ = false;
+        D3DLOCKED_RECT locked{};
+        const HRESULT result = coverageReadback_->LockRect(
+            &locked, nullptr, D3DLOCK_READONLY);
+        if (FAILED(result)) {
+            LogHresult(logger, "stereo_hud_coverage_lock_failed", result);
+            return;
+        }
+        std::uint64_t total = 0;
+        for (UINT row = 0; row < coverageHeight_; ++row) {
+            const auto* pixels = reinterpret_cast<const std::uint32_t*>(
+                static_cast<const std::uint8_t*>(locked.pBits) +
+                static_cast<std::size_t>(row) *
+                    static_cast<std::size_t>(locked.Pitch));
+            for (UINT column = 0; column < coverageWidth_; ++column) {
+                total += pixels[column] & 0xffu;
+            }
+        }
+        coverageReadback_->UnlockRect();
+        const std::uint64_t maximum =
+            static_cast<std::uint64_t>(coverageWidth_) * coverageHeight_ *
+            255ull;
+        coverageRatio_ = maximum == 0
+            ? 0.0
+            : static_cast<double>(total) / static_cast<double>(maximum);
+    }
+
+    // 2 von 255 Stufen, wie IsPostWorldPixel: der Vergleich dort ist echt
+    // größer, deshalb liegt die Schwelle hier zwischen 2 und 3.
+    static constexpr float kHudPixelThreshold = 2.5F / 255.0F;
+
+    D3DCompileFunction compile_{nullptr};
+    ComPtr<IDirect3DPixelShader9> maskShader_;
+    ComPtr<IDirect3DPixelShader9> reduceShader_;
+    ComPtr<IDirect3DPixelShader9> compositeShader_;
+    ComPtr<IDirect3DStateBlock9> stateBlock_;
+    ComPtr<IDirect3DSurface9> coverageReadback_;
+    std::array<RenderTargetTexture, FEARVR_EYE_COUNT> composite_{};
+    RenderTargetTexture mask_{};
+    std::array<RenderTargetTexture, kHudMaxReduceLevels> reduce_{};
+    IDirect3DSurface9* coverageSource_{nullptr};
+    std::uint32_t reduceLevelCount_{0};
+    UINT width_{0};
+    UINT height_{0};
+    UINT coverageWidth_{0};
+    UINT coverageHeight_{0};
+    double coverageRatio_{1.0};
+    bool coveragePending_{false};
+    bool ready_{false};
 };
 
 class Bridge {
@@ -1106,13 +1673,24 @@ private:
     bool CreateStereoCaptureSurfaces(IDirect3DDevice9* gameDevice,
                                      UINT width,
                                      UINT height) noexcept {
+        // Render-Target-*Texturen* statt reiner Surfaces: Der GPU-Kompositor
+        // muss die beiden Weltbilder in einem Shader abtasten können, und für
+        // StretchRect und GetRenderTargetData ist Ebene 0 einer solchen Textur
+        // dasselbe wie ein Render-Target-Surface.
         for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
-            const HRESULT result = gameDevice->CreateRenderTarget(
-                width, height, D3DFMT_A8R8G8B8,
-                D3DMULTISAMPLE_NONE, 0, FALSE,
-                stereoCapture_[eye].ReleaseAndGetAddressOf(), nullptr);
+            HRESULT result = gameDevice->CreateTexture(
+                width, height, 1, D3DUSAGE_RENDERTARGET,
+                D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                stereoCaptureTexture_[eye].ReleaseAndGetAddressOf(),
+                nullptr);
             if (FAILED(result)) {
                 LogHresult("stereo_capture_create_failed", result);
+                return false;
+            }
+            result = stereoCaptureTexture_[eye]->GetSurfaceLevel(
+                0, stereoCapture_[eye].ReleaseAndGetAddressOf());
+            if (FAILED(result)) {
+                LogHresult("stereo_capture_surface_failed", result);
                 return false;
             }
         }
@@ -1198,11 +1776,18 @@ private:
             return false;
         }
 
-        result = gameDevice->CreateRenderTarget(
-            width, height, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE,
-            0, FALSE, gameCapture_.ReleaseAndGetAddressOf(), nullptr);
+        result = gameDevice->CreateTexture(
+            width, height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+            D3DPOOL_DEFAULT, gameCaptureTexture_.ReleaseAndGetAddressOf(),
+            nullptr);
         if (FAILED(result)) {
             LogHresult("cpu_bridge_capture_failed", result);
+            return false;
+        }
+        result = gameCaptureTexture_->GetSurfaceLevel(
+            0, gameCapture_.ReleaseAndGetAddressOf());
+        if (FAILED(result)) {
+            LogHresult("cpu_bridge_capture_surface_failed", result);
             return false;
         }
         result = gameDevice->CreateOffscreenPlainSurface(
@@ -1278,6 +1863,12 @@ private:
         if (created) {
             created =
                 CreateStereoCaptureSurfaces(device, width, height);
+        }
+        if (created && config_.stereoHudEnabled &&
+            !config_.disableGpuHud) {
+            // Scheitert der Kompositor, bleibt das HUD trotzdem: dann mischt
+            // wieder die CPU. Kein Grund, den ganzen Bildpfad aufzugeben.
+            hudCompositor_.Initialize(device, width, height, logger_);
         }
         if (!created) {
             ReleaseResources();
@@ -1427,6 +2018,13 @@ private:
     bool CopyStereoFrameViaCpu(IDirect3DDevice9* device,
                                IDirect3DSurface9* backBuffer,
                                std::uint32_t slotIndex) noexcept {
+        if (config_.stereoHudEnabled && hudCompositor_.ready()) {
+            if (CopyStereoHudFrameViaGpu(device, backBuffer, slotIndex)) {
+                return true;
+            }
+            // Compose() hat sich beim Fehlschlag selbst abgeschaltet; der
+            // nächste Frame nimmt dann direkt den CPU-Weg.
+        }
         if (config_.stereoHudEnabled &&
             rightWorldReadback_ && presentedReadback_) {
             return CopyStereoHudFrameViaCpu(
@@ -1451,6 +2049,76 @@ private:
         if (FAILED(result)) {
             LogHresult(failureEvent, result);
             return false;
+        }
+        return true;
+    }
+
+    // Derselbe Bildaufbau wie CopyStereoHudFrameViaCpu, nur entscheidet ein
+    // Pixelshader statt einer Schleife. Übrig bleibt der Transfer-Readback,
+    // den das klassische D3D9-Gerät des Spiels erzwingt.
+    bool CopyStereoHudFrameViaGpu(IDirect3DDevice9* device,
+                                  IDirect3DSurface9* backBuffer,
+                                  std::uint32_t slotIndex) noexcept {
+        HRESULT result = device->StretchRect(
+            backBuffer, nullptr, gameCapture_.Get(), nullptr,
+            D3DTEXF_NONE);
+        if (FAILED(result)) {
+            LogHresult("stereo_hud_present_stretch_failed", result);
+            return false;
+        }
+
+        const std::uint64_t totalPixels =
+            static_cast<std::uint64_t>(width_) * height_;
+        // Der Deckungsgrad stammt aus dem vorherigen Bild. Vor dem ersten
+        // steht er auf 1.0, was als Vollbildeffekt gilt — das HUD wird also
+        // erst ab dem zweiten Bild angehoben, nie versehentlich zu früh.
+        const std::uint64_t changedPixels = static_cast<std::uint64_t>(
+            hudCompositor_.coverageRatio() *
+                static_cast<double>(totalPixels) + 0.5);
+        const bool flatPanel = menuActive_;
+        const bool composite =
+            !flatPanel &&
+            IsSafePostWorldCoverage(changedPixels, totalPixels);
+        stereoHudFlatFrame_ = flatPanel;
+
+        IDirect3DTexture9* const eyeWorld[FEARVR_EYE_COUNT] = {
+            stereoCaptureTexture_[FEARVR_EYE_LEFT].Get(),
+            stereoCaptureTexture_[FEARVR_EYE_RIGHT].Get()};
+        if (!hudCompositor_.Compose(
+                device, gameCaptureTexture_.Get(),
+                stereoCaptureTexture_[FEARVR_EYE_RIGHT].Get(), eyeWorld,
+                composite, flatPanel, logger_)) {
+            return false;
+        }
+
+        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            if (!StageSurfaceViaCpu(
+                    device, hudCompositor_.CompositeSurface(eye)) ||
+                !UploadCpuSurface(eye, slotIndex)) {
+                return false;
+            }
+        }
+
+        ++stereoHudFrames_;
+        if (stereoHudFrames_ == 1 || stereoHudFrames_ % 300 == 0) {
+            std::ostringstream message;
+            message << "changed_pixels=" << changedPixels
+                    << " coverage_percent="
+                    << (totalPixels == 0
+                            ? 0
+                            : changedPixels * 100u / totalPixels)
+                    << " mode="
+                    << (flatPanel
+                            ? "flat_panel"
+                            : (composite ? "raised_hud" : "world_only"))
+                    << " path=gpu";
+            logger_.Write(
+                composite || flatPanel ? "INFO" : "WARN",
+                flatPanel
+                    ? "stereo_hud_flat_panel"
+                    : (composite ? "stereo_hud_composited"
+                                 : "stereo_hud_rejected"),
+                message.str());
         }
         return true;
     }
@@ -1645,7 +2313,10 @@ private:
         pending_ = {};
         resourcesReady_ = false;
         transferMode_ = TransferMode::None;
+        // Zuerst der Kompositor: Er hält Render-Targets auf demselben Gerät.
+        hudCompositor_.Release();
         for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            stereoCaptureTexture_[eye].Reset();
             stereoCapture_[eye].Reset();
             for (std::uint32_t slotIndex = 0;
                  slotIndex < FEARVR_SLOTS_PER_EYE; ++slotIndex) {
@@ -1672,6 +2343,7 @@ private:
         rightWorldReadback_.Reset();
         gameReadback_.Reset();
         gameCapture_.Reset();
+        gameCaptureTexture_.Reset();
         ClearStereoFrame();
         bridgeDeviceEx_.Reset();
         bridgeDirect3DEx_.Reset();
@@ -1780,13 +2452,17 @@ private:
     IDirect3DDevice9* device_{nullptr};
     ComPtr<IDirect3D9Ex> bridgeDirect3DEx_;
     ComPtr<IDirect3DDevice9Ex> bridgeDeviceEx_;
+    ComPtr<IDirect3DTexture9> gameCaptureTexture_;
     ComPtr<IDirect3DSurface9> gameCapture_;
     ComPtr<IDirect3DSurface9> gameReadback_;
     ComPtr<IDirect3DSurface9> rightWorldReadback_;
     ComPtr<IDirect3DSurface9> presentedReadback_;
     ComPtr<IDirect3DSurface9> bridgeUpload_;
+    std::array<ComPtr<IDirect3DTexture9>, FEARVR_EYE_COUNT>
+        stereoCaptureTexture_{};
     std::array<ComPtr<IDirect3DSurface9>, FEARVR_EYE_COUNT>
         stereoCapture_{};
+    GpuHudCompositor hudCompositor_;
     std::array<std::array<SlotResource, FEARVR_SLOTS_PER_EYE>,
                FEARVR_EYE_COUNT>
         resources_{};

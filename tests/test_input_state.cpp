@@ -134,6 +134,74 @@ int main() {
         return Fail("lean roll must follow the left aim pose");
     }
 
+    // Linkshaenderbelegung: ein einziger Tausch dreht Stoecke, Trigger,
+    // Griffe, Tasten, Handmasken und Posen.
+    FearVrInputState handed{};
+    handed.moveX = 0.25F;
+    handed.moveY = -0.5F;
+    handed.turnX = 0.75F;
+    handed.turnY = 1.0F;
+    handed.trigger[FEARVR_HAND_LEFT] = 0.1F;
+    handed.trigger[FEARVR_HAND_RIGHT] = 0.9F;
+    handed.squeeze[FEARVR_HAND_LEFT] = 0.2F;
+    handed.squeeze[FEARVR_HAND_RIGHT] = 0.8F;
+    handed.buttons =
+        FEARVR_IB_LEFT_PRIMARY | FEARVR_IB_RIGHT_SECONDARY |
+        FEARVR_IB_RIGHT_STICK;
+    handed.activeHands = FEARVR_HAND_MASK_LEFT;
+    handed.aimPoseValidHands =
+        FEARVR_HAND_MASK_LEFT | FEARVR_HAND_MASK_RIGHT;
+    handed.gripPoseValidHands = FEARVR_HAND_MASK_RIGHT;
+    handed.handAimPose[FEARVR_HAND_LEFT].px = 1.0F;
+    handed.handAimPose[FEARVR_HAND_RIGHT].px = 2.0F;
+    handed.handGripPose[FEARVR_HAND_LEFT].pz = 3.0F;
+    handed.handGripPose[FEARVR_HAND_RIGHT].pz = 4.0F;
+
+    const FearVrInputState original = handed;
+    fearvr::MirrorInputHandedness(handed);
+    if (handed.moveX != original.turnX ||
+        handed.turnX != original.moveX ||
+        handed.moveY != original.turnY ||
+        handed.turnY != original.moveY) {
+        return Fail("mirroring must swap both sticks");
+    }
+    if (handed.trigger[FEARVR_HAND_RIGHT] != 0.1F ||
+        handed.squeeze[FEARVR_HAND_RIGHT] != 0.2F) {
+        return Fail("mirroring must swap triggers and grips");
+    }
+    if (handed.buttons !=
+        (FEARVR_IB_RIGHT_PRIMARY | FEARVR_IB_LEFT_SECONDARY |
+         FEARVR_IB_LEFT_STICK)) {
+        return Fail("mirroring must swap the button bits per hand");
+    }
+    if (handed.activeHands != FEARVR_HAND_MASK_RIGHT ||
+        handed.gripPoseValidHands != FEARVR_HAND_MASK_LEFT ||
+        handed.aimPoseValidHands !=
+            (FEARVR_HAND_MASK_LEFT | FEARVR_HAND_MASK_RIGHT)) {
+        return Fail("mirroring must swap the hand masks");
+    }
+    if (handed.handAimPose[FEARVR_HAND_RIGHT].px != 1.0F ||
+        handed.handGripPose[FEARVR_HAND_RIGHT].pz != 3.0F) {
+        return Fail("mirroring must swap the tracked poses");
+    }
+
+    // Zweimal gespiegelt ist der Ausgangszustand.
+    fearvr::MirrorInputHandedness(handed);
+    if (handed.moveX != original.moveX ||
+        handed.turnY != original.turnY ||
+        handed.buttons != original.buttons ||
+        handed.activeHands != original.activeHands ||
+        handed.aimPoseValidHands != original.aimPoseValidHands ||
+        handed.gripPoseValidHands != original.gripPoseValidHands ||
+        handed.trigger[FEARVR_HAND_LEFT] !=
+            original.trigger[FEARVR_HAND_LEFT] ||
+        handed.handAimPose[FEARVR_HAND_LEFT].px !=
+            original.handAimPose[FEARVR_HAND_LEFT].px ||
+        handed.handGripPose[FEARVR_HAND_LEFT].pz !=
+            original.handGripPose[FEARVR_HAND_LEFT].pz) {
+        return Fail("mirroring twice must restore the original state");
+    }
+
     std::puts("test_input_state: OK");
     return 0;
 }

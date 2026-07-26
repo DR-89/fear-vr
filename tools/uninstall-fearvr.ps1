@@ -3,15 +3,19 @@
     Entfernt alle lokalen F.E.A.R.-VR-Artefakte (ANWEISUNG.md §13, M6-Gate).
 
 .DESCRIPTION
-    Der Mod schreibt außerhalb der Projektwurzel genau eine Datei:
-    steamvr.vrsettings, und dort ausschließlich den Schlüssel
-    steamvr.autoShowGameTheater. Dieses Skript stellt diesen Schlüssel aus der
-    ältesten Sicherung wieder her und löscht anschließend die
-    projektinternen Arbeitsverzeichnisse.
+    Außerhalb der Projektwurzel entstehen genau drei Dateien:
 
-    Die Retail-Installation wird nur gelesen und vor sowie nach dem Lauf
-    gegen ihren SHA-256 geprüft. Es wird keine Steam-Dateiprüfung benötigt,
-    weil Retail nie beschrieben wurde.
+      * steamvr.vrsettings — dort ausschließlich der Schlüssel
+        steamvr.autoShowGameTheater. Er wird aus der ältesten Sicherung
+        wiederhergestellt.
+      * dinput8.dll und EchoPatch.ini im Retail-Verzeichnis, sofern EchoPatch
+        installiert wurde. Beide werden wieder entfernt.
+
+    Danach werden die projektinternen Arbeitsverzeichnisse gelöscht.
+
+    Die Retail-EXE wird nur gelesen und vor sowie nach dem Lauf gegen ihren
+    SHA-256 geprüft. Eine Steam-Dateiprüfung ist nicht nötig, weil an FEAR.exe
+    nie geschrieben wurde.
 
     Ohne -Apply ist der Lauf ein reiner Trockenlauf und zeigt nur, was
     geschehen würde.
@@ -171,6 +175,23 @@ if (-not $doProject) {
     }
 } else {
     Step 'Kein Modulbackup vorhanden; nichts wiederherzustellen.'
+}
+
+# --- 2b. EchoPatch aus dem Retail-Verzeichnis entfernen ---------------------
+# Die beiden einzigen Dateien, die dieses Projekt in die Retail-Installation
+# legt. FEAR.exe bleibt dabei unangetastet; eine fremde dinput8.dll fasst das
+# gerufene Skript nicht an.
+Write-Host '--- EchoPatch ---'
+$echoDllPath = Join-Path $cfg.RetailRoot $cfg.EchoPatchDllName
+if (-not $doProject) {
+    Step 'Übersprungen (Scope)'
+} elseif (Test-Path -LiteralPath $echoDllPath -PathType Leaf) {
+    Step "EchoPatch aus $($cfg.RetailRoot) entfernen"
+    if ($Apply) {
+        & "$PSScriptRoot\install-echopatch.ps1" -Apply -Remove | Out-Null
+    }
+} else {
+    Step 'Nicht installiert; nichts zu entfernen.'
 }
 
 # --- 3. Projektinterne Arbeitsverzeichnisse entfernen -----------------------

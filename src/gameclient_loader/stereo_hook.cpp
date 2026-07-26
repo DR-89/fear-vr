@@ -24,6 +24,7 @@
 #include "input_state.h"
 #include "protocol.h"
 #include "stereo_math.h"
+#include "two_handed_grip.h"
 
 namespace fearvr {
 namespace {
@@ -213,6 +214,7 @@ volatile LONG g_leftForearmTrackingActiveLogged = 0;
 volatile LONG g_bulletGuideAlignmentActiveLogged = 0;
 volatile LONG g_weaponHandTrackingFailureLogged = 0;
 volatile LONG g_weaponAimGuideActiveLogged = 0;
+volatile LONG g_twoHandedGripActiveLogged = 0;
 volatile LONG g_handPoseGapBridgedLogged = 0;
 volatile LONG g_weaponSocketSyncActiveLogged = 0;
 volatile LONG g_armGeometryInspectedLogged = 0;
@@ -327,6 +329,66 @@ bool g_recoilOriginalKnown = false;
 float g_recoilOriginalValue = -1.0F;
 bool g_weaponAimGuideEnabled = true;
 bool g_controllerHapticsEnabled = true;
+// Mithalten der Waffe mit der linken Hand. `active` wird im
+// Weapon-Manager-Update gesetzt und im Bindungshook gelesen; beide laufen auf
+// dem Clientthread, deshalb reicht ein einfacher Wert.
+bool g_twoHandedGripEnabled = true;
+bool g_twoHandedGripActive = false;
+// Rund 0,1 s bei 60 Bildern: kurz genug, um nicht traege zu wirken.
+constexpr float kTwoHandBlendRampPerFrame = 0.15F;
+struct TwoHandedGripState {
+    // Dreht die Handlinie auf die Waffenachse, wie sie beim Zugreifen stand.
+    LTRotation offset;
+    // Griffpunkt und Handhaltung im Waffenraum. Damit klebt die sichtbare
+    // linke Hand an der Waffe, statt frei daneben zu schweben — der
+    // Controller darf sich bewegen, die Hand bleibt am Vordergriff.
+    LTVector grabOffsetInWeapon;
+    LTRotation grabRotationInWeapon;
+    float blendRamp{0.0F};
+    bool offsetValid{false};
+    bool placementValid{false};
+};
+TwoHandedGripState g_twoHandedGrip;
+
+// Sichtbare Lage der linken Hand. Waehrend des Zweihandgriffs klebt sie am
+// gemerkten Griffpunkt der Waffe, statt frei daneben zu schweben.
+//
+// Gesteuert wird die Waffe weiterhin von der *echten* Controllerpose. Wuerde
+// auch die Steuerung diese Lage benutzen, folgte die Hand der Waffe, die der
+// Hand folgt — die Waffe liesse sich dann gar nicht mehr fuehren.
+bool LeftHandOnWeapon() noexcept {
+    return g_twoHandedGripActive && g_twoHandedGrip.placementValid;
+}
+
+LTVector EffectiveLeftHandPosition() noexcept {
+    if (!LeftHandOnWeapon()) {
+        return g_weaponAim.leftGripTransform.m_vPos;
+    }
+    return g_weaponAim.gripTransform.m_vPos +
+           g_weaponAim.fireTransform.m_rRot.RotateVector(
+               g_twoHandedGrip.grabOffsetInWeapon);
+}
+
+LTRotation EffectiveLeftHandRotation() noexcept {
+    if (!LeftHandOnWeapon()) {
+        return g_weaponAim.leftAimTransform.m_rRot;
+    }
+    return g_weaponAim.fireTransform.m_rRot *
+           g_twoHandedGrip.grabRotationInWeapon;
+}
+
+// Die Taschenlampe folgt sonst der Hand. Klebt die Hand an der Waffe, zeigt
+// sie aber dorthin, wohin sie im Moment des Zugreifens zufaellig zeigte — und
+// der Kegel leuchtet quer. Am Vordergriff gehoert das Licht nach vorn, also
+// auf die Waffenachse.
+LTRotation EffectiveFlashlightRotation() noexcept {
+    return LeftHandOnWeapon()
+        ? g_weaponAim.fireTransform.m_rRot
+        : g_weaponAim.leftAimTransform.m_rRot;
+}
+// Linkshaenderbelegung: gespiegelt wird ausschliesslich der eingehende
+// Controllerzustand, nie eine einzelne Zuordnung.
+bool g_leftHandedBindings = false;
 bool g_headBobEnabled = false;
 bool g_forceHeadBobDisabled = false;
 // Diagnoseschalter zum Eingrenzen des Absturzes an einer bestimmten
@@ -397,6 +459,8 @@ VrMenuToggle g_vrMenuHeadBob;
 VrMenuToggle g_vrMenuComfort;
 VrMenuToggle g_vrMenuAimGuide;
 VrMenuToggle g_vrMenuHaptics;
+// `enabled` zeigt die Rechtshaenderbelegung, `disabled` die gespiegelte.
+VrMenuToggle g_vrMenuHandedness;
 VrMenuControl g_vrMenuTurnSpeed[3];
 VrMenuControl g_vrMenuRecenter;
 VrMenuControl g_vrMenuDefaults;
@@ -539,6 +603,7 @@ enum VrMenuCommand : std::uint32_t {
     kVrMenuToggleComfort,
     kVrMenuToggleAimGuide,
     kVrMenuToggleHaptics,
+    kVrMenuToggleHandedness,
     kVrMenuCycleTurnSpeed,
     kVrMenuRecenter,
     kVrMenuDefaults,
@@ -1040,6 +1105,10 @@ void InitializeVrSettings() noexcept {
         ReadVrSetting(L"AimGuide", 1) != 0;
     g_controllerHapticsEnabled =
         ReadVrSetting(L"Haptics", 1) != 0;
+    g_twoHandedGripEnabled =
+        ReadVrSetting(L"TwoHandGrip", 1) != 0;
+    g_leftHandedBindings =
+        ReadVrSetting(L"LeftHanded", 0) != 0;
     g_turnSpeedPreset =
         std::clamp(ReadVrSetting(L"TurnSpeed", 1), 0, 2);
     g_hiddenBodyPieceMask = static_cast<std::uint32_t>(
@@ -1099,6 +1168,10 @@ void SaveVrSettings() noexcept {
         L"AimGuide", g_weaponAimGuideEnabled ? 1 : 0);
     WriteVrSetting(
         L"Haptics", g_controllerHapticsEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"TwoHandGrip", g_twoHandedGripEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"LeftHanded", g_leftHandedBindings ? 1 : 0);
     WriteVrSetting(L"TurnSpeed", g_turnSpeedPreset);
     g_vrSettingsFilePresent = true;
 }
@@ -1237,6 +1310,7 @@ void HideRetailVrSettingsControls() noexcept {
         g_vrMenuComfort,
         g_vrMenuAimGuide,
         g_vrMenuHaptics,
+        g_vrMenuHandedness,
     };
     for (const VrMenuToggle& toggle : toggles) {
         SetRetailControlVisible(toggle.enabled, false);
@@ -1276,6 +1350,8 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
         g_vrMenuAimGuide, g_weaponAimGuideEnabled);
     SetRetailVrToggleVisible(
         g_vrMenuHaptics, g_controllerHapticsEnabled);
+    SetRetailVrToggleVisible(
+        g_vrMenuHandedness, !g_leftHandedBindings);
     SetRetailControlVisible(g_vrMenuRecenter, true);
     SetRetailControlVisible(g_vrMenuDefaults, true);
     SetRetailControlVisible(g_vrMenuBack, true);
@@ -1364,6 +1440,8 @@ void ApplyVrDefaults() noexcept {
     ApplyHeadBobEnabled(false);
     g_weaponAimGuideEnabled = true;
     g_controllerHapticsEnabled = true;
+    g_twoHandedGripEnabled = true;
+    g_leftHandedBindings = false;
     g_turnSpeedPreset = 1;
     RequestVrRecenter();
 }
@@ -1445,6 +1523,10 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
         L"Controller vibration: ON", kVrMenuToggleHaptics);
     g_vrMenuHaptics.disabled = AddRetailVrMenuControl(
         L"Controller vibration: OFF", kVrMenuToggleHaptics);
+    g_vrMenuHandedness.enabled = AddRetailVrMenuControl(
+        L"Controls: RIGHT-HANDED", kVrMenuToggleHandedness);
+    g_vrMenuHandedness.disabled = AddRetailVrMenuControl(
+        L"Controls: LEFT-HANDED", kVrMenuToggleHandedness);
     g_vrMenuTurnSpeed[0] = AddRetailVrMenuControl(
         L"Turn speed: SLOW",
         kVrMenuCycleTurnSpeed);
@@ -1552,6 +1634,19 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             !g_controllerHapticsEnabled;
         selection = SetRetailVrToggleVisible(
             g_vrMenuHaptics, g_controllerHapticsEnabled);
+        break;
+    case kVrMenuToggleHandedness:
+        g_leftHandedBindings = !g_leftHandedBindings;
+        // Der gespiegelte Zustand betrifft auch die Handkalibrierung und die
+        // gepufferten Posen: beide gehoeren jetzt der jeweils anderen Hand.
+        RequestVrRecenter();
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuHandedness, !g_leftHandedBindings);
+        Report(
+            "INFO", "vr_handedness_changed",
+            g_leftHandedBindings
+                ? "Controller bindings are mirrored for left-handed play."
+                : "Controller bindings use the right-handed default.");
         break;
     case kVrMenuCycleTurnSpeed:
         g_turnSpeedPreset = (g_turnSpeedPreset + 1) % 3;
@@ -2619,13 +2714,17 @@ void UpdateLeftFlashlightModel(const void* activeWeapon) noexcept {
         RemoveLeftFlashlightModel();
     }
 
+    // Die Lampe sitzt an der Hand, also folgt sie ihr auch, wenn die Hand
+    // waehrend des Zweihandgriffs an der Waffe klebt — leuchtet dort aber
+    // entlang der Waffenachse.
+    const LTRotation leftHandRotation = EffectiveFlashlightRotation();
     LTVector right;
     LTVector up;
     LTVector forward;
-    g_weaponAim.leftAimTransform.m_rRot.GetVectors(right, up, forward);
+    leftHandRotation.GetVectors(right, up, forward);
     LTRigidTransform pose(
-        g_weaponAim.leftGripTransform.m_vPos + forward * 2.0f,
-        g_weaponAim.leftAimTransform.m_rRot);
+        EffectiveLeftHandPosition() + forward * 2.0f,
+        leftHandRotation);
     // Keep the projector beyond the hand, matching Retail's flashlight
     // offset. This prevents the left hand from sitting between the source
     // and the illuminated cone and casting a large self-shadow.
@@ -2976,6 +3075,7 @@ void InjectSemanticCommandBits(
         FEARVR_CMD_RELOAD,
         FEARVR_CMD_THROW_GRENADE,
         FEARVR_CMD_SLOWMO,
+        FEARVR_CMD_MEDKIT,
         FEARVR_CMD_LEAN_LEFT,
         FEARVR_CMD_LEAN_RIGHT
     };
@@ -2997,7 +3097,9 @@ void InjectSemanticCommandBits(
                 IsPulseDrivenCommand(command)
                     ? FearVrCommandValue{
                           1.0F, IsWeaponSwitchPulse(command)}
-                    : MapControllerCommand(g_currentInput, command);
+                    : MapControllerCommand(
+                          g_currentInput, command,
+                          g_twoHandedGripActive);
             if (command < sizeof(g_injectedCommandActive) /
                               sizeof(g_injectedCommandActive[0])) {
                 bool& wasActive =
@@ -3058,7 +3160,9 @@ float __fastcall HookRetailGetBindingValue(
         IsPulseDrivenCommand(binding->command)
             ? FearVrCommandValue{
                   1.0F, IsWeaponSwitchPulse(binding->command)}
-            : MapControllerCommand(g_currentInput, binding->command);
+            : MapControllerCommand(
+                  g_currentInput, binding->command,
+                  g_twoHandedGripActive);
     if (binding->command <
         sizeof(g_controllerCommandActive) /
             sizeof(g_controllerCommandActive[0])) {
@@ -3483,6 +3587,151 @@ bool RotationBetweenDirections(
     return true;
 }
 
+// Laenge der aktuellen Waffe: der gemessene Abstand zwischen Waffenursprung
+// und Muendungssockel. Er ist der einzige Waffenwert, den wir ohne
+// Retail-Waffendatenbank verlaesslich haben, und trennt Pistole von Gewehr
+// genau so, wie es fuer das beidhaendige Zielen noetig ist.
+float CurrentBarrelLengthMeters() noexcept {
+    if (!g_weaponAim.muzzleLocalValid) {
+        return 0.0F;
+    }
+    const float lengthUnits =
+        std::sqrt(g_weaponAim.muzzleOffsetInWeapon.MagSqr());
+    if (!std::isfinite(lengthUnits)) {
+        return 0.0F;
+    }
+    return lengthUnits / kGameUnitsPerMeter;
+}
+
+// Richtung von der Waffenhand zur Stuetzhand, normalisiert.
+bool CurrentSupportDirection(LTVector& direction) noexcept {
+    direction =
+        g_weaponAim.leftGripTransform.m_vPos -
+        g_weaponAim.gripTransform.m_vPos;
+    const float minimumSeparation =
+        kTwoHandMinSteerSeparationMeters * kGameUnitsPerMeter;
+    if (!(direction.MagSqr() >
+          minimumSeparation * minimumSeparation)) {
+        return false;
+    }
+    direction.Normalize();
+    return true;
+}
+
+void UpdateTwoHandedGrip() noexcept {
+    const bool usable =
+        g_twoHandedGripEnabled && g_weaponAim.valid &&
+        g_weaponAim.gripValid && g_weaponAim.leftGripValid;
+    if (g_twoHandedGripActive) {
+        if (!usable || ShouldReleaseTwoHandedGrip(g_currentInput)) {
+            g_twoHandedGripActive = false;
+            g_twoHandedGrip = TwoHandedGripState{};
+        }
+        return;
+    }
+    if (!usable || !ShouldEngageTwoHandedGrip(g_currentInput)) {
+        return;
+    }
+
+    g_twoHandedGripActive = true;
+    g_twoHandedGrip.blendRamp = 0.0F;
+    // Der Winkelversatz zwischen Handlinie und Waffe im Moment des Zugreifens.
+    // Ohne ihn schnappt die Waffe beim Greifen auf die Handlinie — genau das
+    // Verschieben, das der Benutzer gemeldet hat. Mit ihm bleibt sie stehen,
+    // und erst die weitere Handbewegung dreht sie.
+    LTVector support;
+    LTVector forward = g_weaponAim.fireTransform.m_rRot.Forward();
+    g_twoHandedGrip.offsetValid =
+        CurrentSupportDirection(support) &&
+        forward.MagSqr() > 0.0001F &&
+        RotationBetweenDirections(
+            support, forward, g_twoHandedGrip.offset);
+
+    // Griffpunkt im Waffenraum festhalten. Die Waffe sitzt im rechten Griff,
+    // ihre Ausrichtung ist die Feuerachse — beides ist hier aktuell.
+    const LTRotation weaponRotationInverse =
+        g_weaponAim.fireTransform.m_rRot.Conjugate();
+    g_twoHandedGrip.grabOffsetInWeapon =
+        weaponRotationInverse.RotateVector(
+            g_weaponAim.leftGripTransform.m_vPos -
+            g_weaponAim.gripTransform.m_vPos);
+    g_twoHandedGrip.grabRotationInWeapon =
+        weaponRotationInverse * g_weaponAim.leftAimTransform.m_rRot;
+    g_twoHandedGrip.placementValid = g_weaponAim.leftAimValid;
+
+    if (InterlockedCompareExchange(
+            &g_twoHandedGripActiveLogged, 1, 0) == 0) {
+        const float barrelLengthMeters = CurrentBarrelLengthMeters();
+        char message[192]{};
+        std::snprintf(
+            message, sizeof(message),
+            "The left hand is supporting the weapon; barrel length "
+            "%.1f cm gives an aim blend of %.2f. The grab holds until "
+            "the button is released; sprint and leaning rest until then.",
+            barrelLengthMeters * 100.0F,
+            TwoHandedAimBlend(barrelLengthMeters));
+        Report("INFO", "two_handed_grip_active", message);
+    }
+}
+
+// Beim beidhaendigen Halten fuehrt die Linie zwischen beiden Haenden die
+// Waffe. Wie stark, haengt an der Waffenlaenge: eine Pistole bleibt allein an
+// der rechten Hand, ein Gewehr liegt in beiden. Gedreht wird ueber die
+// kuerzeste Drehung, damit die Waffenneigung der rechten Hand erhalten bleibt.
+void ApplyTwoHandedAimSupport() noexcept {
+    if (!g_twoHandedGripActive || !g_twoHandedGrip.offsetValid) {
+        return;
+    }
+    const float blend =
+        TwoHandedAimBlend(CurrentBarrelLengthMeters());
+    if (blend <= 0.0F) {
+        return;
+    }
+
+    LTVector support;
+    if (!CurrentSupportDirection(support)) {
+        return;
+    }
+    LTVector forward = g_weaponAim.fireTransform.m_rRot.Forward();
+    if (forward.MagSqr() < 0.0001F) {
+        return;
+    }
+    forward.Normalize();
+
+    // Die Handlinie im Rahmen des Zugreifens: Beim Griff ist das exakt die
+    // damalige Waffenachse, danach dreht jede Handbewegung sie weiter.
+    LTVector target = g_twoHandedGrip.offset.RotateVector(support);
+    if (target.MagSqr() < 0.0001F) {
+        return;
+    }
+    target.Normalize();
+    // Zwei Haende an derselben Waffe koennen nicht beliebig zueinander
+    // stehen. Laeuft die Stuetzhand zu weit weg, bleibt die Waffe bei der
+    // Waffenhand, statt ihr hinterherzuschwenken.
+    if (forward.Dot(target) < kTwoHandMinSteerAlignment) {
+        return;
+    }
+
+    // Der Anteil faehrt ueber wenige Bilder hoch. Der Versatz allein macht den
+    // Griff schon sprungfrei; die Rampe faengt zusaetzlich den Ruck ab, wenn
+    // die Hand im Moment des Zugreifens noch in Bewegung ist.
+    g_twoHandedGrip.blendRamp = (std::min)(
+        1.0F, g_twoHandedGrip.blendRamp + kTwoHandBlendRampPerFrame);
+    const float effectiveBlend = blend * g_twoHandedGrip.blendRamp;
+
+    LTVector blended = forward + (target - forward) * effectiveBlend;
+    if (blended.MagSqr() < 0.0001F) {
+        return;
+    }
+    blended.Normalize();
+    LTRotation correction;
+    if (!RotationBetweenDirections(forward, blended, correction)) {
+        return;
+    }
+    g_weaponAim.fireTransform.m_rRot =
+        correction * g_weaponAim.fireTransform.m_rRot;
+}
+
 int __fastcall HookRetailWeaponManagerUpdate(
     void* weaponManager, void* ignoredEdx,
     const LTRotation& baseRotation,
@@ -3580,6 +3829,11 @@ int __fastcall HookRetailWeaponManagerUpdate(
                 g_weaponAim.fireTransform.m_rRot;
         }
     }
+
+    // Erst nach der Muendungskorrektur: Die Stuetzhand dreht die fertige
+    // Feuerachse, nicht die Rohpose des Controllers.
+    UpdateTwoHandedGrip();
+    ApplyTwoHandedAimSupport();
 
     // Install before Retail updates the weapon from the RightHand socket.
     // This path is verified to run every playing frame, unlike the optional
@@ -3893,7 +4147,7 @@ void LeftUpperArmNodeControl(
     if (g_weaponAim.leftGripValid) {
         ApplyUpperArmTarget(
             data, g_leftHandControl,
-            g_weaponAim.leftGripTransform.m_vPos);
+            EffectiveLeftHandPosition());
     }
 }
 
@@ -3924,7 +4178,7 @@ void LeftForearmNodeControl(
     }
     if (ApplyForearmTarget(
             data, g_leftHandControl,
-            g_weaponAim.leftGripTransform.m_vPos)) {
+            EffectiveLeftHandPosition())) {
         if (InterlockedCompareExchange(
                 &g_leftForearmTrackingActiveLogged, 1, 0) == 0) {
             Report(
@@ -3962,8 +4216,7 @@ void LeftHandNodeControl(
         return;
     }
     const LTRigidTransform desiredSocket(
-        g_weaponAim.leftGripTransform.m_vPos,
-        g_weaponAim.leftAimTransform.m_rRot);
+        EffectiveLeftHandPosition(), EffectiveLeftHandRotation());
     if (ApplyHandSocketPose(
             data, g_leftHandControl,
             desiredSocket) &&
@@ -4532,7 +4785,11 @@ void RequestFireHaptic() noexcept {
     request.durationNs = 35'000'000;
     request.amplitude = 0.25F;
     request.frequency = 0.0F;
-    request.handMask = FEARVR_HAND_MASK_RIGHT;
+    // Der Haptikauftrag adressiert wieder einen physischen Controller und
+    // muss deshalb zurueckgespiegelt werden.
+    request.handMask = g_leftHandedBindings
+        ? FEARVR_HAND_MASK_LEFT
+        : FEARVR_HAND_MASK_RIGHT;
     request.flags = FEARVR_HF_VALID;
     if (g_submitHapticRequest(&request) &&
         InterlockedCompareExchange(
@@ -4605,6 +4862,10 @@ void RemoveWeaponAimHooks() noexcept {
     g_weaponAim.muzzleWeapon = nullptr;
     g_rightHandOrientation = HandOrientationCalibration{};
     g_leftHandOrientation = HandOrientationCalibration{};
+    // Ohne Aim-Hooks laeuft kein Weapon-Manager-Update mehr, das den Griff
+    // wieder loesen koennte. Sprinten und Lehnen duerfen nicht haengen.
+    g_twoHandedGripActive = false;
+    g_twoHandedGrip = TwoHandedGripState{};
     g_lastWeaponManagerUpdateTick = 0;
     g_flashlightEnabled = true;
     g_leftTriggerWasDown = false;
@@ -4941,11 +5202,25 @@ void PollControllerInput() noexcept {
     if (!IsInputStateUsable(input, fresh)) {
         NeutralizeInputState(input);
     }
+    // Vor der Drehgeschwindigkeit: `turnX` traegt nach dem Spiegeln den
+    // physisch anderen Stick, skaliert wird aber der Drehstick.
+    if (g_leftHandedBindings) {
+        MirrorInputHandedness(input);
+    }
     constexpr float kTurnSpeedScale[] = {0.75F, 1.0F, 1.25F};
     const int turnPreset = std::clamp(g_turnSpeedPreset, 0, 2);
     input.turnX = std::clamp(
         input.turnX * kTurnSpeedScale[turnPreset], -1.0F, 1.0F);
     g_currentInput = input;
+    // Der Griff wird im Weapon-Manager-Update geloest. Steht das still —
+    // Menue, Zwischensequenz, Ladebildschirm — bleibt der letzte Zustand
+    // sonst stehen und haelt Sprinten und Lehnen dauerhaft zurueck.
+    if (g_twoHandedGripActive &&
+        input.squeeze[FEARVR_HAND_LEFT] <
+            kTwoHandReleaseSqueeze) {
+        g_twoHandedGripActive = false;
+        g_twoHandedGrip = TwoHandedGripState{};
+    }
 
     if (input.activeHands != g_lastActiveHands) {
         char message[96]{};

@@ -12,7 +12,8 @@ maßgeblich.
 
 - M4 und **M5 sind abgeschlossen und committed**. Der Arbeitsbaum ist sauber.
 - Die Retail-Installation wird nicht verändert. Gebaut und getestet wird über
-  `stage\m5-game` und `stage\userdata-m5`.
+  `stage\m5-game` und `stage\userdata-m5`. (Der EchoPatch-Versuch am 26.07.2026
+  hat dort zwei Dateien abgelegt und wieder entfernt; siehe unten.)
 - Nur auf ausdrücklichen Wunsch committen.
 
 ## Aktuell vom Benutzer bestätigter Zustand
@@ -40,7 +41,9 @@ Folgende Punkte funktionieren:
   - rechter Grip: Benutzen
   - Trigger: Zielen/Feuern
   - rechter Stick-Klick: Recenter
-  - linker Stick-Klick: frei (Ducken liegt allein auf dem rechten Stick)
+  - linker Stick-Klick: Medkit (`COMMAND_ID_MEDKIT` = 70; Ducken liegt
+    weiterhin allein auf dem rechten Stick). Gebaut, noch nicht im Spiel
+    getestet — damit ist keine freie Taste mehr uebrig.
   - Haptik je Schuss ueber den Fire-Vectors-Aufruf statt ueber die
     Triggerflanke, damit auch Dauerfeuer vibriert
   - HUD-Stauchung: gleichmaessig zur Bildmitte (5/4) statt zonenweiser
@@ -72,6 +75,121 @@ Folgende Punkte funktionieren:
 - Lehnen über die Neigung der linken Hand fühlt sich angenehm an; Richtung und
   Schwelle passen (bestätigt am 25.07.2026).
 
+## Neu: Stereo-HUD mischt auf der GPU
+
+Gebaut, **noch nicht im Spiel getestet** — und von allem Neuen der Teil mit dem
+grössten Risiko, weil er in das D3D9-Gerät des Spiels zeichnet.
+
+Vorher pro Bild: drei `GetRenderTargetData` über den Bus und drei volle
+Durchläufe über alle Pixel (Deckungsgrad zählen, zweimal komponieren). Jetzt
+entscheidet ein `ps_2_0`-Shader dieselbe Formel wie `stereo_hud_math.h`:
+Schwelle über den Farbkanälen, 5/4-Stauchung zur Bildmitte, Auswahl zwischen
+Weltbild und Present. Der Deckungsgrad entsteht über eine Reduktionskette
+(4× je Durchlauf bis beide Kanten ≤ 128) und wird **um ein Bild verzögert**
+gelesen, damit kein Synchronisationspunkt entsteht. Übrig bleiben zwei
+Readbacks, je einer pro Auge — die erzwingt das klassische D3D9-Gerät, nicht
+das HUD.
+
+Code: `GpuHudCompositor` in `src/proxy32/bridge.cpp`, HLSL als Rohstring
+direkt daneben, übersetzt zur Laufzeit über `d3dcompiler_47.dll`
+(dynamisch geladen; fehlt sie, bleibt es beim CPU-Weg).
+
+Sicherungen, falls es schiefgeht:
+- `pwsh -File tools\launch-m5-fear.ps1 -NoGpuHud` erzwingt den alten CPU-Mischer.
+- Scheitert irgendein GPU-Durchlauf zur Laufzeit, schaltet sich der Kompositor
+  selbst ab (`stereo_hud_gpu_compose_failed`) und die CPU übernimmt ab dem
+  nächsten Bild.
+- `-NoStereoHud` lässt das HUD ganz weg, wie bisher.
+
+Beim ersten Lauf zu prüfen:
+- Logzeile `stereo_hud_gpu_ready` mit Reduktionsstufen und Deckungsgrösse.
+- Sieht das HUD aus wie vorher? Die Stauchung wird im Shader mit
+  Gleitkomma statt Ganzzahl gerechnet; Abweichungen wären subpixelgross,
+  aber genau hier würde man sie sehen.
+- Rendert das Spiel nach dem ersten Bild normal weiter? Der Kompositor sichert
+  den kompletten Gerätezustand über `CreateStateBlock(D3DSBT_ALL)` plus
+  Render-Target und Tiefenpuffer von Hand — wenn irgendwo etwas fehlt, wird
+  das Spielbild schwarz oder verfärbt sich.
+- `coverage_percent` in `stereo_hud_composited` sollte in derselben
+  Grössenordnung liegen wie in den alten Logs.
+
+## EchoPatch 4.2.1: probiert und wieder entfernt
+
+Retail ist wieder im Auslieferungszustand. Zwei Startversuche, zwei
+Blockaden — beide strukturell:
+
+1. **Der Crash-Handler ist ein VEH** und läuft damit vor jedem SEH-Handler.
+   Dieses Projekt sondiert Retail-Interna absichtlich mit `__try/__except`;
+   `ApplyHeadBobEnabled` löst beim Start eine Zugriffsverletzung aus, fängt
+   sie ab und meldet `headbob_configuration_failed`. Mit dem VEH wurde daraus
+   ein tödlicher Absturz beim Laden (`EIP=0`, `Source: VEH`), exakt zwischen
+   `vr_features_disabled` und `headbob_configuration_failed`. Mit
+   `EnableCrashHandler = 0` startete das Spiel wieder bis `stereo_hook_armed`.
+2. Danach modaler Dialog: **„Unable to find signature for patch:
+   SurfaceJumpImpulse"**. EchoPatchs Quelltext ist nach `src/Engine`,
+   `src/Client`, `src/Server` gegliedert — es patcht also die Spielmodule, und
+   genau die haben wir umgebaut (`GameOrig.dll` statt `GameClient.dll`).
+
+Abwägung: Fast alles, wofür EchoPatch bekannt ist, mussten wir für VR ohnehin
+abschalten. Dagegen steht, dass die gesamte Hookstrategie auf einer byteweise
+verifizierten `FEAR.exe` und festen RVAs beruht. Ein zweiter Patcher darauf ist
+das Risiko nicht wert, und jeder künftige Absturz hätte zwei Verdächtige.
+
+Alles bleibt reproduzierbar: `tools\install-echopatch.ps1 -Apply` installiert
+es jederzeit wieder, die angepasste INI liegt in `patches\echopatch\`, das
+gepinnte Release in `vendor-local\echopatch\`. Herleitung und ein Weg für einen
+erneuten Versuch: `docs\ECHOPATCH.md`.
+
+## Neu: Waffe mit der linken Hand mithalten
+
+Gebaut (x86 und x64 sauber, alle acht Tests grün), aber **noch nicht im Spiel
+getestet**. Der linke Grip greift die Waffe, sobald die linke Hand dort liegt,
+wo ein Vordergriff wäre: 0,05–0,60 m vor der rechten Hand, höchstens 0,22 m
+seitlich der Zielachse, Grip ab 0,65 gedrückt und erst unter 0,45 wieder
+gelöst. Greift die Hand woanders, bleibt derselbe Knopf das Rennen.
+
+Bei langen Waffen führt dann die Linie zwischen beiden Händen die Feuerachse
+anteilig mit. Als Waffenlänge dient der ohnehin gemessene Abstand
+Waffenursprung–Mündungssockel (`muzzleOffsetInWeapon`); die Rampe läuft von 0
+bei 0,28 m auf 0,85 ab 0,55 m.
+
+Während des Griffs sind **Rennen und Lehnen gelöst** — beides hängt an
+derselben linken Hand und liefe sonst dauerhaft mit.
+
+Beim ersten Griff pro Sitzung schreibt der GameClient
+`two_handed_grip_active` ins Log, inklusive gemessener Waffenlänge in cm und
+resultierender Gewichtung. **Genau diese Zeilen sind beim nächsten
+Spieldurchgang zu prüfen:** Stimmen die Längen für Pistole und Gewehr nicht mit
+der Rampe überein, sind `kTwoHandShortWeaponMeters` und
+`kTwoHandLongWeaponMeters` in `src/common/two_handed_grip.h` nachzuziehen.
+
+Code: `src/common/two_handed_grip.h` (reine, getestete Geometrie),
+`ApplyTwoHandedAimSupport` in `stereo_hook.cpp` (Drehung der fertigen
+Feuerachse nach der Mündungskorrektur), `tests/test_two_handed_grip.cpp`.
+Abschaltbar über `TwoHandGrip=0` in `fearvr.ini`; kein Menüeintrag, damit die
+einseitige VR-Menüseite kurz bleibt. Herleitung: `docs/OPENXR-INPUT.md`.
+
+## Neu: Linkshänderbelegung
+
+Gebaut, **noch nicht im Spiel getestet**. Neuer Menüeintrag
+`Controls: RIGHT-HANDED / LEFT-HANDED` zwischen „Controller vibration“ und
+„Recenter view“; persistiert als `LeftHanded` in `fearvr.ini`.
+
+Gespiegelt wird ausschliesslich der eingehende `FearVrInputState`
+(`MirrorInputHandedness` in `src/common/input_state.h`), direkt nach dem
+Abholen in `PollControllerInput` und **vor** der Drehgeschwindigkeitsskalierung.
+Damit bleibt stromabwärts alles beim Alten: Die Waffenhand ist weiterhin
+`FEARVR_HAND_RIGHT`. Einzige Rückspiegelung: die Handmaske der
+Haptikanforderung. Beim Umschalten wird recentert (Handkalibrierung und
+Posenpuffer gehören danach der anderen Hand).
+
+Bekannte Grenze: Das sichtbare Handmodell an der Waffe bleibt ein rechtes, weil
+Retail die Waffe im `RightHand`-Socket führt. Die Arme sind ausgeblendet,
+deshalb dürfte das kaum stören — im Spiel prüfen.
+
+Die VR-Menüseite hat damit neun Einträge und ist ausgereizt. Weitere Optionen
+gehören in `fearvr.ini`.
+
 ## VR-Menü: aktueller Aufbau
 
 Das Menü ist bewusst kurz und einseitig, damit kein Eintrag über den Rand läuft
@@ -82,9 +200,10 @@ und kein unsauberes Scrollen entsteht:
 3. Turn speed
 4. Red aim guide
 5. Controller vibration
-6. Recenter view
-7. Reset VR defaults
-8. BACK
+6. Controls: RIGHT-HANDED / LEFT-HANDED
+7. Recenter view
+8. Reset VR defaults
+9. BACK
 
 HMD translation, Head bob und Comfort screen sind weiterhin als Einstellungen
 vorhanden und werden aus `fearvr.ini` gelesen/gespeichert, sind aber nicht mehr
@@ -569,9 +688,12 @@ M5 ist committed. M6 ist weitgehend umgesetzt (siehe unten).
 2. Offene Live-Regressionen aus `docs/TESTING.md` §2 abarbeiten
    (Fenstermodus/Vollbild, Alt-Tab, Auflösungswechsel, Save/Load,
    Tod/Respawn, Leiter, Knockdown, Debug-Build).
-3. Weiterhin offen aus M4/M5: der CPU-Readback im Stereo-HUD-Mischer muss
-   GPU-seitig oder als nativer UI-Layer ersetzt werden, und Translation
-   braucht Weltkollision, bevor sie Standard werden darf.
+3. Der CPU-Readback im Stereo-HUD-Mischer ist seit dem 26.07.2026 durch den
+   GPU-Kompositor ersetzt (gebaut, noch nicht im Spiel geprüft). Offen bleiben
+   die beiden Transfer-Readbacks, die erst mit einem D3D9Ex-Gerät verschwinden,
+   die mono gefärbten Kanten transparenter UI-Elemente — dafür bräuchte es
+   einen nativen UI-Layer — und Weltkollision für die Translation, bevor sie
+   Standard werden darf.
 
 ## M6: Stand vom 25.07.2026
 

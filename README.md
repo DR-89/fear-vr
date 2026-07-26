@@ -168,6 +168,18 @@ Checks retail path, `FEAR.exe` hash/version, OpenXR runtime, registry and
 available build tools, and reports missing components — without changing
 anything.
 
+## EchoPatch (tried, then removed)
+
+[EchoPatch](https://github.com/Wemino/EchoPatch) was evaluated as a companion
+patch and is **not** installed. Its crash handler is a vectored exception
+handler and killed the game on startup, because this mod deliberately probes
+retail internals behind `__try/__except`. With that disabled, EchoPatch aborted
+on a missing signature — it patches the game modules, and this mod renames the
+retail client to `GameOrig.dll`. Everything EchoPatch is known for (FOV, HUD
+scaling, SSAA, gamepad) had to be switched off for VR anyway. Full reasoning
+and a reproducible install script, should anyone want to retry:
+`docs/ECHOPATCH.md`.
+
 ## Build
 
 One command checks pinned dependencies, builds x86 and x64, runs both test
@@ -258,11 +270,16 @@ entirely, and no SteamVR file is touched.
 launched via `steam.exe -applaunch 21090`. This is independent of which VR
 runtime renders. SteamVR itself does not need to run under VDXR.
 
-Bindings: left stick moves, left grip sprints; left stick click is free.
+Bindings: left stick moves, left grip sprints — or, with that hand placed on
+the weapon, holds it as a second hand; left stick click uses a medkit.
 Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click recenters the view. A switches weapons, B reloads (short press) or
 throws a grenade (hold), X toggles slow-mo, Y opens pause. Right grip uses,
 triggers aim and fire. Tilting the left hand sideways leans around corners.
+Holding the weapon with both hands steers longer weapons along the line
+between the hands; sprinting and leaning rest while that grab is held.
+`Controls: LEFT-HANDED` in the VR menu mirrors every binding between the
+hands.
 The flashlight is in the left hand, follows its position and aim direction,
 and toggles with a click on the left trigger. Every shot vibrates. Mouse,
 keyboard and gamepad remain usable in parallel. Details:
@@ -301,15 +318,16 @@ navigates, A or trigger confirms and B goes back.
 
 Outside the project root, the mod writes exactly **one** file:
 `steamvr.vrsettings`, and there only the key
-`steamvr.autoShowGameTheater`. There is no registry change, no write to the
-retail installation, and no file outside the project folder.
+`steamvr.autoShowGameTheater`. There is no registry change and no write to the
+retail installation. (`tools\install-echopatch.ps1` would place two files in
+the retail folder, but EchoPatch is not installed — see above.)
 
 ```powershell
 pwsh -File tools\uninstall-fearvr.ps1          # dry run, changes nothing
 pwsh -File tools\uninstall-fearvr.ps1 -Apply   # actually remove
 ```
 
-Removes `stage\`, `build\`, `dist\`, `local-runtime\` and `logs\`.
+Removes `stage\`, `build\`, `dist\`, `local-runtime\`, `logs\` and EchoPatch.
 Beforehand, `autoShowGameTheater` is specifically restored from the oldest
 backup — only that one key, so later custom SteamVR settings are preserved.
 
@@ -328,9 +346,17 @@ it sees SteamVR running.
 
 ## Known Limitations
 
-- The classic D3D9 path requires a CPU readback per frame
-  (`FEARVR_BF_CPU_FALLBACK`), as does the stereo HUD compositor. Both are
-  flagged as proof-of-concept and are not a release performance path.
+- The classic D3D9 path still requires a CPU readback per eye and frame
+  (`FEARVR_BF_CPU_FALLBACK`). F.E.A.R. creates a plain `IDirect3DDevice9`, and
+  D3D9 can only share surfaces across processes from a D3D9Ex device — so this
+  is the one remaining copy. The zero-copy `DirectShared` path already exists
+  and engages the moment the device is an Ex device; getting there needs a
+  wrapper for textures and buffers, because `D3DPOOL_MANAGED` does not exist on
+  Ex devices. **The stereo HUD compositor no longer reads back**: the pixel
+  comparison runs as a `ps_2_0` shader on the GPU, and its coverage heuristic
+  reads a few kilobytes one frame late instead of a full frame. That removed
+  one of three readbacks and all per-pixel CPU work. `-fearvr-no-gpu-hud`
+  forces the old CPU compositor back.
 - HMD translation has no world collision and therefore remains opt-in
   (`-Translation`).
 - The version-dependent hooks apply to **F.E.A.R. 1.08.282.0**. On mismatched

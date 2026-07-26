@@ -55,6 +55,11 @@ Spiel-Backbuffer
   -> unveränderter D3D11/OpenXR-Hostpfad
 ```
 
+Seit dem 26.07.2026 mischt das Stereo-HUD nicht mehr in dieser Kopie mit: Der
+Vergleich läuft als Pixelshader auf dem Gerät des Spiels und schreibt fertige
+Augenbilder, von denen nur noch je eines gelesen wird (`GpuHudCompositor`,
+`docs/ARCHITECTURE.md` AD-009). Der oben gezeigte Transferweg selbst bleibt.
+
 Die Bridge veröffentlicht dafür das Diagnoseflag `FEARVR_BF_CPU_FALLBACK`
 und protokolliert `path=cpu_d3d9ex`. Dieser Weg ist eine bewusste
 M2-Kompatibilitätslösung, **nicht** der endgültige Renderpfad. Er widerspricht

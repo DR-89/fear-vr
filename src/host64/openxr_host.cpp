@@ -901,6 +901,23 @@ private:
                     locatedViews_[FEARVR_EYE_RIGHT].fov};
                 const bool nativeStereo =
                     ipcBridge_ && ipcBridge_->StereoActive();
+                const std::uint32_t panelRecenterGeneration =
+                    ipcBridge_
+                    ? ipcBridge_->PanelRecenterGeneration()
+                    : 0;
+                if (panelRecenterGeneration !=
+                    panelRecenterGeneration_) {
+                    panelRecenterGeneration_ =
+                        panelRecenterGeneration;
+                    if (!nativeStereo &&
+                        panelRecenterGeneration != 0) {
+                        monoQuadAnchored_ = false;
+                        logger_.Write(
+                            "INFO", "mono_quad_recenter_requested",
+                            "The 2D menu action or F9 will re-anchor the "
+                            "panel at the current view direction.");
+                    }
+                }
                 if (nativeStereo) {
                     const FearVrFov runtimeLeft{
                         submittedFov[FEARVR_EYE_LEFT].angleLeft,
@@ -912,8 +929,11 @@ private:
                         submittedFov[FEARVR_EYE_RIGHT].angleRight,
                         submittedFov[FEARVR_EYE_RIGHT].angleUp,
                         submittedFov[FEARVR_EYE_RIGHT].angleDown};
-                    const SymmetricFov symmetric =
-                        SharedSymmetricFov(runtimeLeft, runtimeRight);
+                    const std::uint32_t fovScalePercent =
+                        ipcBridge_->FovScalePercent();
+                    const SymmetricFov symmetric = ScaleSymmetricFov(
+                        SharedSymmetricFov(runtimeLeft, runtimeRight),
+                        static_cast<float>(fovScalePercent) / 100.0F);
                     if (symmetric.valid) {
                         const FearVrFov protocolFov =
                             ToProtocolFov(symmetric);
@@ -925,16 +945,18 @@ private:
                                 protocolFov.angleUp,
                                 protocolFov.angleDown};
                         }
-                        if (!symmetricStereoLogged_) {
+                        if (loggedFovScalePercent_ != fovScalePercent) {
                             std::ostringstream message;
                             message << "horizontal="
                                     << symmetric.halfHorizontal * 2.0F
                                     << " vertical="
-                                    << symmetric.halfVertical * 2.0F;
+                                    << symmetric.halfVertical * 2.0F
+                                    << " scale=" << fovScalePercent
+                                    << "%";
                             logger_.Write(
                                 "INFO", "symmetric_stereo_fov",
                                 message.str());
-                            symmetricStereoLogged_ = true;
+                            loggedFovScalePercent_ = fovScalePercent;
                         }
                     }
                 }
@@ -1059,34 +1081,44 @@ private:
                                 leftRotation.w + rightRotation.w});
                         const TrackingVector forward = Rotate(
                             centerRotation, {0.0F, 0.0F, -1.0F});
-                        monoQuadPose_ = {};
-                        monoQuadPose_.orientation = {
-                            centerRotation.x, centerRotation.y,
-                            centerRotation.z, centerRotation.w};
-                        monoQuadPose_.position = {
+                        FearVrPose centerPose{};
+                        centerPose.px =
                             (locatedViews_[FEARVR_EYE_LEFT]
                                  .pose.position.x +
                              locatedViews_[FEARVR_EYE_RIGHT]
                                  .pose.position.x) *
-                                    0.5F +
-                                forward.x * 2.0F,
+                            0.5F;
+                        centerPose.py =
                             (locatedViews_[FEARVR_EYE_LEFT]
                                  .pose.position.y +
                              locatedViews_[FEARVR_EYE_RIGHT]
                                  .pose.position.y) *
-                                    0.5F +
-                                forward.y * 2.0F,
+                            0.5F;
+                        centerPose.pz =
                             (locatedViews_[FEARVR_EYE_LEFT]
                                  .pose.position.z +
                              locatedViews_[FEARVR_EYE_RIGHT]
                                  .pose.position.z) *
-                                    0.5F +
-                                forward.z * 2.0F};
+                            0.5F;
+                        centerPose.qx = centerRotation.x;
+                        centerPose.qy = centerRotation.y;
+                        centerPose.qz = centerRotation.z;
+                        centerPose.qw = centerRotation.w;
+                        const FearVrPose levelAnchor =
+                            YawOnlyRecenterPose(centerPose);
+                        monoQuadPose_ = {};
+                        monoQuadPose_.orientation = {
+                            levelAnchor.qx, levelAnchor.qy,
+                            levelAnchor.qz, levelAnchor.qw};
+                        monoQuadPose_.position = {
+                            centerPose.px + forward.x * 2.0F,
+                            centerPose.py + forward.y * 2.0F,
+                            centerPose.pz + forward.z * 2.0F};
                         monoQuadAnchored_ = true;
                         logger_.Write(
                             "INFO", "mono_quad_anchored",
-                            "Menu panel anchored in LOCAL space at "
-                            "the current view direction.");
+                            "Menu panel centered at the current gaze point "
+                            "with a level, yaw-only orientation.");
                     }
                     quad.space = appSpace_;
                     quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -1376,11 +1408,12 @@ private:
     std::uint64_t lastSubmittedImageFrameId_{0};
     std::uint64_t submittedFrames_{0};
     std::uint64_t requestFrameId_{0};
-    bool symmetricStereoLogged_{false};
+    std::uint32_t loggedFovScalePercent_{0};
     bool imagePoseMatchLogged_{false};
     bool monoQuadLogged_{false};
     bool monoQuadAnchored_{false};
     bool rightStickWasDown_{false};
+    std::uint32_t panelRecenterGeneration_{0};
     XrPosef monoQuadPose_{{0.0F, 0.0F, 0.0F, 1.0F},
                          {0.0F, 0.0F, -2.0F}};
     bool exitRequested_{false};

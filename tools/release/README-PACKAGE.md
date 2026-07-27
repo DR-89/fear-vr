@@ -1,140 +1,212 @@
 # F.E.A.R. VR
 
-VR-Mod für die Singleplayer-Basisversion von **F.E.A.R. 1.08**
-(LithTech Jupiter EX, Direct3D 9). Natives Stereo-Rendering, Headtracking und
-OpenXR-Motion-Controls.
+VR mod for the single-player base version of **F.E.A.R. 1.08**
+(LithTech Jupiter EX, Direct3D 9). Native stereo rendering, headtracking and
+OpenXR motion controls.
 
-## Voraussetzungen
+## Requirements
 
-1. **F.E.A.R. Ultimate Shooter Edition**, legal installiert, Version
-   **1.08.282.0**. Der Mod prüft Version und SHA-256; bei Abweichung bleiben
-   alle versionsabhängigen Hooks deaktiviert.
-2. **F.E.A.R. Public Tools 1.08.** Der offizielle Installer
-   `fear_publictools_108.exe` liegt der Ultimate Shooter Edition unter
-   `extras\` bei.
-3. Ein Headset mit **SteamVR** oder **Virtual Desktop**. Beide Runtimes sind
-   bestätigt.
-4. Windows 10/11, 64 Bit.
+1. **F.E.A.R. 1.08**, legally installed. The Steam Ultimate Shooter Edition
+   (1.08.282.0) is the confirmed build; GOG and retail-disc copies of 1.08
+   install and launch as well, but are untested. An unknown build is reported
+   with its SHA-256 and installation continues — every byte signature this mod
+   uses lives in `GameOrig.dll` from the Public Tools, not in `FEAR.exe`.
+   Versions below 1.08 are rejected.
+2. **F.E.A.R. Public Tools 1.08.** The official installer
+   `fear_publictools_108.exe` ships with the Ultimate Shooter Edition under
+   `extras\`.
+3. A headset with **SteamVR** or **Virtual Desktop**. Both runtimes are
+   confirmed.
+4. Windows 10/11, 64-bit.
 
-### Hinweis zur Installation der Public Tools
+### Note on installing the Public Tools
 
-Der Installer prüft
-`HKLM\SOFTWARE\WOW6432Node\Monolith Productions\FEAR\1.00.0000\Patch` und
-erwartet dort den Wert **8**, während Steam **10** setzt. Für die Installation
-muss der Wert vorübergehend auf 8 stehen und danach wieder auf 10. Ohne diesen
-Schritt lehnt der Installer die Steam-Fassung ab.
+The installer reads
+`HKLM\SOFTWARE\WOW6432Node\Monolith Productions\FEAR\1.00.0000\Patch` and
+expects the value **8**, while Steam sets **10**. Set it to 8 for the
+installation and back to 10 afterwards — without that step the installer
+rejects the Steam edition.
 
-Diese fünf Module sind proprietär und dürfen dem Paket nicht beiliegen. Sie
-werden bei der Installation aus **deiner eigenen** Public-Tools-Installation
-kopiert:
+```powershell
+$key = 'HKLM:\SOFTWARE\WOW6432Node\Monolith Productions\FEAR\1.00.0000'
+Set-ItemProperty $key -Name Patch -Value 8      # before installing
+Set-ItemProperty $key -Name Patch -Value 10     # after installing
+```
+
+These five modules are proprietary and must not ship with this package. They
+are copied from **your own** Public Tools installation during setup:
 
 `GameClient.dll`, `GameServer.dll`, `ClientFx.fxd`, `FEAR.dep`,
 `FEARMod.Arch00s`
 
 ## Installation
 
+Double-click **`Install.cmd`** in this folder. That is all — the window stays
+open at the end so the result stays readable.
+
+Equivalent from a shell, if you prefer typing:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\install.ps1
 ```
 
-Standardziel ist `%USERPROFILE%\FearVR`.
+The default target is `%USERPROFILE%\FearVR`. The game folder and the Public
+Tools are detected automatically and verified by their hashes. If a path
+cannot be found, the installer shows examples and asks for it.
 
-> **Nicht unterhalb von `%LOCALAPPDATA%` installieren.** Die Engine scheitert
-> dort beim Laden der Archivkonfiguration mit „Failed to initialize client —
-> unable to load game resources". Der Installer lehnt solche Ziele deshalb ab.
+> **Do not install below `%LOCALAPPDATA%`.** The engine then fails to load its
+> archive configuration and aborts with "Failed to initialize client - unable
+> to load game resources". The installer rejects such targets.
 
-Optionen:
+Options:
 
 ```powershell
-tools\install.ps1 -InstallDir "D:\Spiele\FearVR"
-tools\install.ps1 -InstallDir "C:\Users\<Name>\FearVR"
-tools\install.ps1 -RetailRoot "D:\Steam\steamapps\common\FEAR Ultimate Shooter Edition"
-tools\install.ps1 -PublicToolsGame "C:\FEAR Public Tools\Dev\Runtime\Game"
-tools\install.ps1 -NoShortcut
+tools\install.ps1 -InstallDir "D:\Games\FearVR"
+tools\install.ps1 -RetailRoot "D:\SteamLibrary\steamapps\common\FEAR Ultimate Shooter Edition"
+tools\install.ps1 -PublicToolsGame "C:\Program Files (x86)\Monolith Productions\FEAR Public Tools"
+tools\install.ps1 -LaunchMode direct  # start FEAR.exe without Steam (GOG, disc)
+tools\install.ps1 -NoShortcut       # no desktop shortcut
+tools\install.ps1 -NonInteractive   # never prompt; fail instead
 ```
 
-Retail und Public Tools werden automatisch gesucht und über ihre Hashes
-verifiziert.
+`Install.cmd` passes any extra arguments straight through, so
+`Install.cmd -InstallDir "D:\Games\FearVR"` works the same way.
 
-## Spielen
+A copy under `steamapps\common` is launched through
+`steam.exe -applaunch 21090`; any other copy is started directly with the
+same arguments. `-LaunchMode` overrides that choice.
 
-Desktop-Verknüpfung **F.E.A.R. VR** oder:
+`-PublicToolsGame` accepts either the installation folder or its
+`Dev\Runtime\Game` subfolder. Quote any path that contains spaces.
+
+## Updating
+
+Double-click `Install.cmd` in the new package. There is nothing to uninstall
+first.
+
+An existing installation is detected, the paths and launch mode from last
+time are reused, the modules are replaced, and modules a newer package no
+longer uses are removed. **Saved games and profiles stay.** Close the game
+first — while `FEAR.exe` runs, its modules are locked and the installer
+refuses to continue.
+
+`-Clean` wipes the install folder except `userdata` before staging again.
+
+## Playing
+
+Desktop shortcut **F.E.A.R. VR**, or:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\play.ps1
 ```
 
-Optionen:
+Options:
 
 ```powershell
-tools\play.ps1 -Runtime vdxr      # Virtual Desktop erzwingen
-tools\play.ps1 -Runtime steamvr   # SteamVR erzwingen
-tools\play.ps1 -Translation       # begrenzte HMD-Translation (opt-in)
-tools\play.ps1 -NoHeadBob         # Head-Bob zwingend aus (Standard bereits aus)
-tools\play.ps1 -NoStereoHud       # nur zur Fehlersuche
+tools\play.ps1 -Runtime vdxr      # force Virtual Desktop
+tools\play.ps1 -Runtime steamvr   # force SteamVR
+tools\play.ps1 -Translation       # limited HMD translation (opt-in)
+tools\play.ps1 -NoHeadBob         # force head bob off (already off by default)
+tools\play.ps1 -NoStereoHud       # troubleshooting only
 ```
 
-`-Runtime` setzt `XR_RUNTIME_JSON` nur für den Hostprozess. Die systemweite
-Runtime-Einstellung wird nicht verändert.
+`-Runtime` sets `XR_RUNTIME_JSON` for the host process only. The system-wide
+runtime setting is never changed.
 
-Steam wird zum Starten benötigt, weil F.E.A.R. offiziell über
-`steam.exe -applaunch 21090` startet. Das ist unabhängig davon, welche
-VR-Runtime rendert; SteamVR selbst muss unter Virtual Desktop nicht laufen.
+A Steam copy needs the Steam client running, because F.E.A.R. officially
+starts through `steam.exe -applaunch 21090`. GOG and disc copies do not need
+Steam at all. Either way this is independent of which VR runtime renders;
+SteamVR itself does not have to run when using Virtual Desktop.
 
-## Steuerung
+## Controls
 
-| Eingabe | Funktion |
+| Input | Action |
 |---|---|
-| linker Stick | Bewegen |
-| linker Grip | Rennen |
-| linker Stick-Klick | Ducken |
-| rechter Stick links/rechts | Drehen |
-| rechter Stick hoch/runter | Springen / Ducken (ab 80 %) |
-| rechter Stick-Klick | Blickrichtung zentrieren |
-| rechter Grip | Benutzen |
-| Trigger | Zielen und Feuern |
-| A / B / X / Y | Waffenwahl / Nachladen (gehalten: Granate) / Zeitlupe / Pausenmenü |
-| linke Hand seitlich neigen | um die Ecke lehnen |
+| left stick | move |
+| left grip | sprint — or, with the hand on the weapon, hold it two-handed |
+| left stick click | use medkit |
+| left trigger | focus |
+| right stick left/right | turn |
+| right stick up/down | jump / crouch (from 80 % deflection) |
+| right stick click | melee attack in 3D / re-anchor panel in 2D |
+| right grip | use |
+| right trigger | fire |
+| A | weapon switch |
+| B | short: reload — held: throw grenade |
+| X | slow-mo |
+| Y | pause menu |
+| tilt left hand sideways | lean around corners (only with *Physical lean: OFF*) |
+| physically lean your head | move the viewpoint, stopped by walls (*Physical lean: ON*) |
+| thrust either free hand forward | weapon/off-hand strike |
+| jump, then thrust either free hand | jump kick (never injects a jump) |
+| sprint forward, crouch physically or with stick, then thrust | slide kick |
+| grab on a ladder, pull down | climb up (set *Ladder climbing: HANDS*) |
 
-Tastatur: **F8** Stereo an/aus, **F9** zentrieren, **F10** raumfester
-Komfortbildschirm, **F11** Player-Body-Pieces neu kalibrieren.
+Keyboard: **F8** stereo on/off, **F9** re-anchor 2D panel, **F10** world-locked comfort
+screen, **F11** developer body-piece diagnostic.
 
-Maus, Tastatur und Gamepad bleiben parallel nutzbar. Die VR-Optionen stehen
-im ESC-Menü unter **VR SETTINGS**.
+Mouse, keyboard and gamepad remain usable in parallel. The VR options live in
+the ESC menu under **VR SETTINGS**, including
+`Controls: RIGHT-HANDED / LEFT-HANDED`, which mirrors the whole layout, and
+`Ladder climbing: HANDS / CLASSIC`, which decides whether ladders are climbed
+by grabbing the rungs or with the stick as in the original game.
+`Melee: GESTURES / CLASSIC` enables or disables all motion melee. Fresh
+configurations default to `GESTURES`.
+`Show arms: ON / OFF` switches between the original Retail arms and the VR
+mask. It defaults to `OFF`; hands, torso and legs remain visible. The choice
+is saved as `ShowArms` in `fearvr.ini`.
 
-Die linke System-/Menütaste ist nicht belegbar: SteamVR fängt sie für sein
-eigenes Systemmenü ab.
+The four moves can also be disabled independently in `fearvr.ini` under
+`[VR]`: `MeleeWeaponStrike`, `MeleeOffHandStrike`, `MeleeJumpKick` and
+`MeleeSlideKick` (`1` = enabled, the default; `0` = disabled).
 
-## Deinstallation
+The left system/menu button cannot be bound: SteamVR grabs it for its own
+system menu.
+
+## Uninstall
+
+Double-click **`Uninstall.cmd`**. It first lists what would be removed and
+only deletes after you confirm with **Y**.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1          # Trockenlauf
-powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -Apply   # ausführen
+powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1          # dry run
+powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -Apply   # remove
 ```
 
-**Spielstände bleiben erhalten.** Sie liegen in `<InstallDir>\userdata` und
-werden nur mit `-IncludeUserData` entfernt.
+**Saved games are kept.** They live in `<InstallDir>\userdata` and are only
+removed with `-IncludeUserData`.
 
-Die Retail-Installation wird zu keinem Zeitpunkt beschrieben. Eine
-Steam-Dateiprüfung ist nicht nötig; die Installation gilt Steam gegenüber als
-unverändert.
+The retail installation is never written to at any point. A Steam file
+verification is not needed; as far as Steam is concerned the installation is
+unmodified.
 
-## Bekannte Grenzen
+## Known limits
 
-- Der klassische D3D9-Pfad braucht ein CPU-Readback pro Frame, ebenso der
-  Stereo-HUD-Mischer. Das ist ein Techniknachweis, kein Performancepfad.
-- HMD-Translation hat keine Weltkollision und bleibt deshalb opt-in.
-- Die Hooks gelten für F.E.A.R. **1.08.282.0**. Bei abweichendem Hash bleiben
-  sie aus, und das Spiel läuft flach weiter.
-- Der Waffen-Sprung beim Treppensteigen ist nicht abschließend geklärt.
-- „Motion-Controlled Aiming" ist über Zielstrahl und Trefferpunkt belegt; eine
-  allgemeine „6DoF-Waffe" wird nicht behauptet.
+- The classic D3D9 path still needs one CPU readback per eye and frame
+  (`FEARVR_BF_CPU_FALLBACK` in the log). F.E.A.R. creates a plain
+  `IDirect3DDevice9`, and D3D9 can only share surfaces between processes from
+  a D3D9Ex device — so this is the one remaining copy. The zero-copy
+  `DirectShared` path exists and engages as soon as the device is an Ex
+  device.
+- The stereo HUD compositor, by contrast, **no longer reads back**: the pixel
+  comparison runs as a `ps_2_0` shader on the GPU, and the coverage heuristic
+  that separates the HUD from fullscreen effects reads a few kilobytes one
+  frame late instead of a full frame. That removed one of three readbacks and
+  all per-pixel CPU work. `-fearvr-no-gpu-hud` forces the old CPU compositor
+  back for troubleshooting.
+- HMD translation has no world collision and therefore stays opt-in.
+- The version-dependent hooks check byte signatures in the Public Tools
+  modules of **F.E.A.R. 1.08**. If one does not match, that hook stays
+  disabled and the game keeps running flat.
+- The weapon jump when climbing stairs is not fully understood yet.
+- "Motion-controlled aiming" is backed by the aim ray and the hit point; a
+  general "6DoF weapon" is not claimed.
 
-## Lizenz
+## License
 
-Die eigenen Bestandteile stehen unter der **MIT-Lizenz** (siehe `LICENSE`).
-Für die Abhängigkeiten gilt `THIRD_PARTY_NOTICES.md`.
+Our own parts are under the **MIT license** (see `LICENSE`). For the
+dependencies see `THIRD_PARTY_NOTICES.md`.
 
-Dieses Paket enthält **keine** Retail-Dateien, keine proprietären SDK-Quellen
-und keine extrahierten Assets. Zum Betrieb sind eine eigene, legal erworbene
-F.E.A.R.-Installation und der offizielle Public-Tools-Installer erforderlich.
+This package contains **no** retail files, no proprietary SDK sources and no
+extracted assets. Running it requires your own, legally obtained F.E.A.R.
+installation and the official Public Tools installer.

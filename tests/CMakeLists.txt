@@ -49,6 +49,51 @@ if(MSVC)
 endif()
 add_test(NAME two_handed_grip COMMAND test_two_handed_grip)
 
+add_executable(test_melee_thrust test_melee_thrust.cpp)
+target_link_libraries(
+  test_melee_thrust PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_melee_thrust PRIVATE /UNDEBUG)
+endif()
+add_test(NAME melee_thrust COMMAND test_melee_thrust)
+
+add_executable(test_melee_actions test_melee_actions.cpp)
+target_link_libraries(
+  test_melee_actions PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_melee_actions PRIVATE /UNDEBUG)
+endif()
+add_test(NAME melee_actions COMMAND test_melee_actions)
+
+add_executable(test_climb_grip test_climb_grip.cpp)
+target_link_libraries(
+  test_climb_grip PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_climb_grip PRIVATE /UNDEBUG)
+endif()
+add_test(NAME climb_grip COMMAND test_climb_grip)
+
+add_executable(test_lean_collision test_lean_collision.cpp)
+target_link_libraries(
+  test_lean_collision PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_lean_collision PRIVATE /UNDEBUG)
+endif()
+add_test(NAME lean_collision COMMAND test_lean_collision)
+
+add_executable(test_lean_body test_lean_body.cpp)
+target_link_libraries(
+  test_lean_body PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_lean_body PRIVATE /UNDEBUG)
+endif()
+add_test(NAME lean_body COMMAND test_lean_body)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND TARGET fearvr-proxy)
   # Isolierter M2-Producer: Der echte System-Import bleibt d3d9.lib; erst
   # nach dem Link wird ausschließlich neben diese Test-EXE der Proxy kopiert.

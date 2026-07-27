@@ -4,6 +4,7 @@ EXPORTS
     FearVr_IsStereoAvailable
     FearVr_IsStereoEnabled
     FearVr_SetStereoEnabled
+    FearVr_SetFovScalePercent
     FearVr_IsTranslationEnabled
     FearVr_SetTranslationEnabled
     FearVr_IsStereoHudEnabled

@@ -35,6 +35,15 @@ extern "C" {
 #define FEARVR_PROTOCOL_MAGIC   0x52565246u
 #define FEARVR_PROTOCOL_VERSION 5u
 
+/* Spielkamera und OpenXR-Projektionslayer verwenden dieselbe FOV-Skalierung.
+ * Null steht fuer den kompatiblen Standard, falls eine alte Gegenstelle das
+ * zuvor reservierte Feld nicht setzt. */
+enum {
+  FEARVR_FOV_SCALE_DEFAULT_PERCENT = 100u,
+  FEARVR_FOV_SCALE_MIN_PERCENT = 100u,
+  FEARVR_FOV_SCALE_MAX_PERCENT = 130u
+};
+
 /* ---- Augen & Ringpuffer -------------------------------------------------- */
 enum {
   FEARVR_EYE_LEFT  = 0,
@@ -199,7 +208,7 @@ typedef struct FearVrSharedHeader {
   uint32_t headerSize;     /* == sizeof(FearVrSharedHeader)                  */
   uint32_t slotStructSize; /* == sizeof(FearVrSlot)                          */
   uint32_t slotsPerEye;    /* == FEARVR_SLOTS_PER_EYE                        */
-  uint32_t reserved0;      /* Padding/zukünftig                             */
+  uint32_t panelRecenterGeneration; /* Game -> Host: 2D-Panel neu verankern   */
   uint64_t hostHeartbeat;  /* vom Host hochgezählt                          */
   uint64_t gameHeartbeat;  /* vom Game hochgezählt                          */
   uint64_t requestSequence; /* Seqlock: ungerade=Schreibvorgang, gerade=stabil */
@@ -210,7 +219,7 @@ typedef struct FearVrSharedHeader {
   uint32_t hostProcessId;
   uint32_t gameProcessId;
   uint32_t bridgeFlags;     /* FEARVR_BF_*                                   */
-  uint32_t reserved1;
+  uint32_t fovScalePercent; /* Game -> Host; 0 = kompatibler Standard 100 %  */
   FearVrRenderRequest request; /* neuester vollständig veröffentlichter Auftrag */
   FearVrInputState input;   /* neuester vollständiger Controllerzustand      */
   FearVrHapticRequest haptic; /* neueste Haptikanforderung                   */

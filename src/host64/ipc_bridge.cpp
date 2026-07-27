@@ -31,6 +31,10 @@ volatile LONG* AtomicFlags(FearVrSharedHeader& header) noexcept {
     return reinterpret_cast<volatile LONG*>(&header.bridgeFlags);
 }
 
+volatile LONG* Atomic32(std::uint32_t& value) noexcept {
+    return reinterpret_cast<volatile LONG*>(&value);
+}
+
 volatile LONG64* Atomic64(std::uint64_t& value) noexcept {
     return reinterpret_cast<volatile LONG64*>(&value);
 }
@@ -262,6 +266,25 @@ bool IpcBridge::GameWasConnected() const noexcept {
 bool IpcBridge::StereoActive() const noexcept {
     return shared_ != nullptr &&
            (shared_->bridgeFlags & FEARVR_BF_STEREO_ACTIVE) != 0;
+}
+
+std::uint32_t IpcBridge::PanelRecenterGeneration() const noexcept {
+    if (shared_ == nullptr) {
+        return 0;
+    }
+    return static_cast<std::uint32_t>(
+        InterlockedCompareExchange(
+            Atomic32(shared_->panelRecenterGeneration), 0, 0));
+}
+
+std::uint32_t IpcBridge::FovScalePercent() const noexcept {
+    if (shared_ == nullptr) {
+        return FEARVR_FOV_SCALE_DEFAULT_PERCENT;
+    }
+    const auto percent = static_cast<std::uint32_t>(
+        InterlockedCompareExchange(
+            Atomic32(shared_->fovScalePercent), 0, 0));
+    return NormalizeFovScalePercent(percent);
 }
 
 void IpcBridge::PublishRenderRequest(

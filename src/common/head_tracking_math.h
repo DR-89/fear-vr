@@ -148,6 +148,52 @@ inline FearVrPose CenterHeadPose(
     return center;
 }
 
+// A VR recenter must only choose which horizontal direction is "forward".
+// Treating the current pitch and roll as neutral tilts the room with the head:
+// returning to a physically level pose then produces the opposite pitch/roll.
+// Derive yaw from the projected HMD forward vector and retain the position for
+// the existing translation origin. Near a vertical gaze, where forward has no
+// useful azimuth, the projected right vector provides a stable fallback.
+inline FearVrPose YawOnlyRecenterPose(
+    const FearVrPose& pose) noexcept {
+    if (!IsValidPose(pose)) {
+        return {};
+    }
+
+    const TrackingQuaternion rotation = PoseRotation(pose);
+    const TrackingVector forward =
+        Rotate(rotation, {0.0F, 0.0F, -1.0F});
+    const float forwardHorizontalSquared =
+        forward.x * forward.x + forward.z * forward.z;
+
+    float yaw = 0.0F;
+    if (std::isfinite(forwardHorizontalSquared) &&
+        forwardHorizontalSquared > 0.000001F) {
+        yaw = std::atan2(-forward.x, -forward.z);
+    } else {
+        const TrackingVector right =
+            Rotate(rotation, {1.0F, 0.0F, 0.0F});
+        const float rightHorizontalSquared =
+            right.x * right.x + right.z * right.z;
+        if (!std::isfinite(rightHorizontalSquared) ||
+            rightHorizontalSquared <= 0.000001F) {
+            return {};
+        }
+        yaw = std::atan2(-right.z, right.x);
+    }
+    if (!std::isfinite(yaw)) {
+        return {};
+    }
+
+    const float halfYaw = yaw * 0.5F;
+    FearVrPose recenter = pose;
+    recenter.qx = 0.0F;
+    recenter.qy = std::sin(halfYaw);
+    recenter.qz = 0.0F;
+    recenter.qw = std::cos(halfYaw);
+    return recenter;
+}
+
 // OpenXR is right-handed with -Z forward. LithTech uses +X right, +Y up and
 // +Z forward with its left-handed cross-product convention.
 inline TrackingVector OpenXrToLithTech(
@@ -202,14 +248,47 @@ inline RelativeEyePose TrackedPoseRelativeToRecenter(
         IsFinite(lithTechPosition) && IsFinite(lithTechRotation)};
 }
 
+// Der reine Kopfversatz gegenueber der Recenter-Position, in
+// LithTech-Achsen und Metern. Getrennt abrufbar, weil das physische Lehnen
+// ihn gegen die Weltgeometrie pruefen muss, bevor er auf die Augen kommt:
+// Ohne diese Pruefung schoebe ein Lehnen den Blickpunkt in die Wand hinein.
+inline TrackingVector HeadTranslationRelativeToRecenter(
+    const FearVrPose& recenter, const FearVrPose& currentCenter,
+    float maximumTranslationMeters = 0.25F) noexcept {
+    if (!IsValidPose(recenter) || !IsValidPose(currentCenter) ||
+        !std::isfinite(maximumTranslationMeters) ||
+        maximumTranslationMeters < 0.0F) {
+        return {};
+    }
+    const TrackingVector centerDelta = ClampMagnitude(
+        Rotate(
+            Conjugate(PoseRotation(recenter)),
+            {currentCenter.px - recenter.px,
+             currentCenter.py - recenter.py,
+             currentCenter.pz - recenter.pz}),
+        maximumTranslationMeters);
+    return OpenXrToLithTech(centerDelta);
+}
+
+// `translationScale` kuerzt den Kopfversatz, ohne die Augenbasis anzutasten:
+// 1 laesst ihn ganz zu, 0 haelt den Blickpunkt an der Spielerposition fest.
+// Damit begrenzt der Aufrufer das physische Lehnen an Waenden, ohne dass
+// dieser Header die Spielwelt kennen muss.
 inline RelativeEyePose EyePoseRelativeToRecenter(
     const FearVrPose& recenter, const FearVrPose& currentCenter,
     const FearVrPose& eye, bool translationEnabled,
-    float maximumTranslationMeters = 0.25F) noexcept {
+    float maximumTranslationMeters = 0.25F,
+    float translationScale = 1.0F) noexcept {
     if (!IsValidPose(recenter) || !IsValidPose(currentCenter) ||
         !IsValidPose(eye) || !std::isfinite(maximumTranslationMeters) ||
-        maximumTranslationMeters < 0.0F) {
+        maximumTranslationMeters < 0.0F ||
+        !std::isfinite(translationScale)) {
         return {};
+    }
+    if (translationScale < 0.0F) {
+        translationScale = 0.0F;
+    } else if (translationScale > 1.0F) {
+        translationScale = 1.0F;
     }
 
     const TrackingQuaternion inverseRecenter =
@@ -222,6 +301,10 @@ inline RelativeEyePose EyePoseRelativeToRecenter(
     if (translationEnabled) {
         centerDelta =
             ClampMagnitude(centerDelta, maximumTranslationMeters);
+        centerDelta = {
+            centerDelta.x * translationScale,
+            centerDelta.y * translationScale,
+            centerDelta.z * translationScale};
     } else {
         centerDelta = {};
     }

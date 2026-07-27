@@ -31,6 +31,26 @@ inline SymmetricFov SharedSymmetricFov(
             valid ? vertical : 0.0F, valid};
 }
 
+inline SymmetricFov ScaleSymmetricFov(
+    const SymmetricFov& fov, float scale) noexcept {
+    if (!fov.valid || !std::isfinite(scale) || scale <= 0.0F) {
+        return {};
+    }
+    // FOV-Skalierung ist eine Projektionsskalierung: tan(halfFov) wird
+    // skaliert, nicht der Winkel selbst. So bleiben Kamera und Compositor
+    // geometrisch deckungsgleich.
+    const float horizontal =
+        std::atan(std::tan(fov.halfHorizontal) * scale);
+    const float vertical =
+        std::atan(std::tan(fov.halfVertical) * scale);
+    const bool valid =
+        std::isfinite(horizontal) && std::isfinite(vertical) &&
+        horizontal > 0.01F && vertical > 0.01F &&
+        horizontal < 1.55F && vertical < 1.55F;
+    return {valid ? horizontal : 0.0F,
+            valid ? vertical : 0.0F, valid};
+}
+
 inline FearVrFov ToProtocolFov(const SymmetricFov& fov) noexcept {
     if (!fov.valid) {
         return {};

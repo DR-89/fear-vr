@@ -94,6 +94,7 @@ foreach ($script in @(
     'release\install.ps1',
     'release\play.ps1',
     'release\uninstall.ps1',
+    'release\new-body-assets.ps1',
     'disable-steamvr-theater.ps1',
     'hide-steamvr-theater.ps1'
 )) {
@@ -104,6 +105,19 @@ foreach ($script in @(
     $destination = Join-Path $packageRoot (
         Join-Path 'tools' (Split-Path -Leaf $script))
     Copy-Item -LiteralPath $source -Destination $destination -Force
+}
+
+# --- Anklickbare Starter im Paketwurzelverzeichnis --------------------------
+# Windows oeffnet eine .ps1 per Doppelklick im Editor statt sie auszufuehren.
+# Diese beiden .cmd rufen die Skripte mit gelockerter Ausfuehrungsrichtlinie
+# auf und halten das Fenster danach offen.
+foreach ($launcher in @('Install.cmd', 'Uninstall.cmd')) {
+    $source = Join-Path $cfg.ProjectRoot "tools\release\$launcher"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Starter fehlt: $source"
+    }
+    Copy-Item -LiteralPath $source `
+        -Destination (Join-Path $packageRoot $launcher) -Force
 }
 
 # Die beiden SteamVR-Helfer dot-sourcen im Repo _fearvr-env.ps1. Im Paket

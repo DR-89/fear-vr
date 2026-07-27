@@ -390,8 +390,8 @@ if ($Milestone -ne 'M2') {
     }
     if ($Milestone -in @('M4', 'M5')) {
         Write-Host (
-            "$milestoneLabel`: HMD-Rotation ist aktiv. F9 setzt die aktuelle Blickrichtung " +
-            'als Neutralpose; F8 schaltet jederzeit zurück auf mono.'
+            "$milestoneLabel`: HMD-Rotation ist aktiv. F9 richtet nur Menues und " +
+            '2D-Bildschirme neu aus; F8 schaltet jederzeit zurück auf mono.'
         )
         Write-Host (
             $(if ($Translation) {
@@ -422,7 +422,8 @@ if ($Milestone -ne 'M2') {
                 'Linker Grip rennt — oder haelt, mit der Hand an der Waffe, ' +
                 'diese beidhaendig mit; linker Stick-Klick benutzt einen ' +
                 'Medkit, rechter Grip benutzt, Trigger zielen/feuern; ' +
-                'rechter Stick-Klick setzt Recenter.'
+                'rechter Stick-Klick greift im Spiel im Nahkampf an und ' +
+                'richtet in 2D den Bildschirm neu aus.'
             )
             Write-Host (
                 'Im VR-Menue schaltet "Controls: LEFT-HANDED" die komplette ' +
@@ -437,10 +438,16 @@ if ($Milestone -ne 'M2') {
                 'Oberseite nach links lehnt links, nach rechts lehnt rechts.'
             )
             Write-Host (
-                'F11 zeigt die Player-Body-Pieces einzeln, um das ' +
-                'Hand-Piece zu finden. Der Stand wird sofort in ' +
-                'fearvr.ini gespeichert und beim Start automatisch ' +
-                'angewandt; F11 ist danach nicht mehr nötig.'
+                'Nahkampfgesten sind standardmaessig aktiv: Handstoss fuer ' +
+                'Strike, im Sprung fuer Jump Kick; Sprint vorwaerts plus ' +
+                'Hocke und Handstoss fuer Slide Kick. Im VR-Menue schaltet ' +
+                '"Melee: GESTURES / CLASSIC" alle Gesten.'
+            )
+            Write-Host (
+                'Im VR-Menue schaltet "Show arms: ON / OFF" nur Ober- und ' +
+                'Unterarme um; Haende, Torso und Beine bleiben sichtbar. ' +
+                'Die Wahl wird in fearvr.ini gespeichert. F11 ist nur eine ' +
+                'Entwicklerdiagnose fuer Player-Body-Pieces.'
             )
         }
     } else {

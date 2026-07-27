@@ -44,6 +44,8 @@ public:
     [[nodiscard]] bool GameConnected() const noexcept;
     [[nodiscard]] bool GameWasConnected() const noexcept;
     [[nodiscard]] bool StereoActive() const noexcept;
+    [[nodiscard]] std::uint32_t PanelRecenterGeneration() const noexcept;
+    [[nodiscard]] std::uint32_t FovScalePercent() const noexcept;
     [[nodiscard]] bool HasImage(std::uint32_t eye) const noexcept;
     [[nodiscard]] ID3D11ShaderResourceView* ImageView(
         std::uint32_t eye) const noexcept;

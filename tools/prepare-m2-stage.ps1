@@ -82,6 +82,14 @@ foreach ($name in $stagedFiles.Keys) {
         -Destination (Join-Path $stageRoot $name) -Force
 }
 
+# Body_Group enthaelt bei Retail Arme, Torso und Beine gemeinsam. Erzeuge aus
+# dem lokal installierten Modell und der Textur einen Alpha-Test-Override,
+# dessen rasterisierte Armgeometrie nur Ober-/Unterarme entfernt. Haende,
+# Torso und Beine/Kicks bleiben sichtbar.
+& "$PSScriptRoot\release\new-body-assets.ps1" `
+    -SourceGame $originalGameDirectory `
+    -DestinationGame $stageRoot
+
 $archiveConfig = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot "stage\$milestoneSlug.archcfg"
 )

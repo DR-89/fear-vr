@@ -1,6 +1,7 @@
 # ENVIRONMENT.md — Verifizierter Umgebungszustand
 
-> Erzeugt und geprüft am **2026-07-24** auf dem Zielrechner.
+> Erzeugt am **2026-07-24**, um die HDTextures4FEAR-Variante am
+> **2026-07-27** erweitert.
 > Grundlage: ANWEISUNG.md §2 und §4.
 > Diese Werte werden zu Beginn **jeder** Arbeitssitzung erneut geprüft
 > (`tools/verify-install.ps1`). Bei abweichender `FEAR.exe` darf **kein**
@@ -19,7 +20,8 @@ mit ANWEISUNG.md §2 überein.
 | Dateiversion | `1.08.282.0` | `1.08.282.0` | ✅ |
 | Produktversion | — | `1.08.282.0` | ℹ️ |
 | Architektur | PE32 / x86 (`Machine 0x014C`) | PE-Signatur `PE\0\0`, Machine `0x014C` | ✅ |
-| SHA-256 `FEAR.exe` | `D5EBC38A4F12B772C9112A2811C290ADB6C5052D3BC2F817302D38CF55BB2CBE` | identisch | ✅ |
+| SHA-256 `FEAR.exe` (Steam Stock) | `D5EBC38A4F12B772C9112A2811C290ADB6C5052D3BC2F817302D38CF55BB2CBE` | identisch | ✅ |
+| SHA-256 `FEAR.exe` (HDTextures4FEAR/XP v2.0.2, Steam-Auswahl) | `D662DCCDB2EBD17D1ACED7C725A8724060010718146E0C0074DA5E8EF89B82B4` | identisch | ✅ |
 | Renderer-Import | `d3d9.dll` / `Direct3DCreate9` | beide im Importstring vorhanden | ✅ |
 | Eingabe-Import | `DINPUT8.dll` / `DirectInput8Create` | beide im Importstring vorhanden | ✅ |
 | Engine | LithTech Jupiter EX | (Dokumentation) | ℹ️ |

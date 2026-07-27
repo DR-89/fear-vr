@@ -70,8 +70,16 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     )
 }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-if ((Get-FileSha256 $manifest.runtimeExe) -ne $manifest.runtimeSha256) {
-    throw 'Manifestierte Retail-EXE stimmt nicht mehr.'
+$currentRuntimeHash = Get-FileSha256 $manifest.runtimeExe
+if (-not (Test-CompatibleRetailFearHashes `
+        $manifest.runtimeSha256 $currentRuntimeHash)) {
+    throw 'Manifestierte Retail-EXE wechselte in eine unbekannte Variante.'
+}
+if ($currentRuntimeHash -ne $manifest.runtimeSha256) {
+    Write-Host (
+        'Retail-FEAR.exe wechselte zwischen Stock und dem bestaetigten ' +
+        'HDTextures4FEAR-Patch; Start wird fortgesetzt.'
+    ) -ForegroundColor Yellow
 }
 if ((Get-FileSha256 $manifest.archiveConfig) -ne
     $manifest.archiveConfigSha256) {

@@ -79,8 +79,18 @@ $deployment = Get-Content -Raw -LiteralPath $deploymentPath | ConvertFrom-Json
 
 # --- Integritaet ------------------------------------------------------------
 $retail = Assert-RetailFearExe $deployment.retailRoot
+if (-not (Test-CompatibleRetailFearHashes `
+        $deployment.runtimeSha256 $retail.Sha256)) {
+    throw (
+        'Die Retail-EXE hat sich seit der Installation in eine unbekannte ' +
+        'Variante geaendert. Bitte neu installieren.'
+    )
+}
 if ($retail.Sha256 -ne $deployment.runtimeSha256) {
-    throw 'Die Retail-EXE hat sich seit der Installation geaendert.'
+    Write-Host (
+        'FEAR.exe wechselte zwischen zwei bestaetigten Varianten; Start ' +
+        "wird fortgesetzt: $($retail.Edition)"
+    ) -ForegroundColor Yellow
 }
 if ((Get-FileSha256 $deployment.archiveConfig) -ne
     $deployment.archiveConfigSha256) {

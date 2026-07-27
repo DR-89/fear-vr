@@ -802,6 +802,38 @@ bool IsExecutableAddress(const void* address) noexcept {
            protection == PAGE_EXECUTE_WRITECOPY;
 }
 
+// HDTextures4FEAR/XP v2.0.2 maps the patched FEAR.exe image as
+// PAGE_WRITECOPY and runs the process with DEP disabled. Its renderer
+// functions are therefore callable even though VirtualQuery does not report
+// a PAGE_EXECUTE_* flag. Accept that legacy mapping only inside the main image
+// and only while DEP is actually disabled; every DLL and DEP-enabled process
+// still requires normal executable protection.
+bool IsCallableMainImageAddress(const void* address) noexcept {
+    if (IsExecutableAddress(address)) {
+        return true;
+    }
+    MEMORY_BASIC_INFORMATION info{};
+    if (address == nullptr ||
+        VirtualQuery(address, &info, sizeof(info)) != sizeof(info) ||
+        info.State != MEM_COMMIT ||
+        info.Type != MEM_IMAGE ||
+        info.AllocationBase != GetModuleHandleW(nullptr)) {
+        return false;
+    }
+    DWORD depFlags = 0;
+    BOOL depPermanent = FALSE;
+    if (!GetProcessDEPPolicy(
+            GetCurrentProcess(), &depFlags, &depPermanent) ||
+        (depFlags & PROCESS_DEP_ENABLE) != 0) {
+        return false;
+    }
+    const DWORD protection =
+        info.Protect & ~(PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE);
+    return protection == PAGE_READONLY ||
+           protection == PAGE_READWRITE ||
+           protection == PAGE_WRITECOPY;
+}
+
 const unsigned char* ResolveRelativeBranch(
     const unsigned char* instruction) noexcept {
     if (!IsExecutableAddress(instruction) ||
@@ -898,7 +930,7 @@ const unsigned char* FindRetailGetBindingValue(
 }
 
 bool MatchesRetailPlayerCameraForwarder(const void* target) noexcept {
-    if (!IsExecutableAddress(target)) {
+    if (!IsCallableMainImageAddress(target)) {
         return false;
     }
     __try {
@@ -908,6 +940,59 @@ bool MatchesRetailPlayerCameraForwarder(const void* target) noexcept {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+void ReportRendererHookLayout(
+    const void* playerTarget,
+    const void* overrideTarget,
+    bool playerMatches,
+    bool overrideExecutable) noexcept {
+    unsigned char bytes[24]{};
+    char byteText[sizeof(bytes) * 3 + 1]{};
+    char modulePath[MAX_PATH]{"<unknown>"};
+    MEMORY_BASIC_INFORMATION info{};
+    MEMORY_BASIC_INFORMATION overrideInfo{};
+    bool readable = false;
+    __try {
+        std::memcpy(bytes, playerTarget, sizeof(bytes));
+        readable = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (readable) {
+        std::size_t offset = 0;
+        for (unsigned char byte : bytes) {
+            const int written = std::snprintf(
+                byteText + offset, sizeof(byteText) - offset,
+                offset == 0 ? "%02X" : " %02X",
+                static_cast<unsigned>(byte));
+            if (written <= 0) {
+                break;
+            }
+            offset += static_cast<std::size_t>(written);
+        }
+    } else {
+        std::snprintf(byteText, sizeof(byteText), "<unreadable>");
+    }
+    if (playerTarget != nullptr &&
+        VirtualQuery(playerTarget, &info, sizeof(info)) == sizeof(info) &&
+        info.AllocationBase != nullptr) {
+        GetModuleFileNameA(
+            static_cast<HMODULE>(info.AllocationBase),
+            modulePath, static_cast<DWORD>(std::size(modulePath)));
+    }
+    VirtualQuery(
+        overrideTarget, &overrideInfo, sizeof(overrideInfo));
+    char message[768]{};
+    std::snprintf(
+        message, sizeof(message),
+        "slot17=%p match=%u protect=0x%lX slot19=%p executable=%u "
+        "protect=0x%lX module=%s bytes=%s",
+        playerTarget, playerMatches ? 1U : 0U,
+        static_cast<unsigned long>(info.Protect),
+        overrideTarget, overrideExecutable ? 1U : 0U,
+        static_cast<unsigned long>(overrideInfo.Protect),
+        modulePath, byteText);
+    Report("ERROR", "stereo_hook_layout_probe", message);
 }
 
 bool CommandLineContains(const wchar_t* option) noexcept {
@@ -7395,8 +7480,14 @@ bool TryInstallRendererHook() noexcept {
     void* const overrideTarget =
         vtable == nullptr ? nullptr
                           : vtable[kRenderCameraWithOverrideSlot];
-    if (!MatchesRetailPlayerCameraForwarder(playerTarget) ||
-        !IsExecutableAddress(overrideTarget)) {
+    const bool playerMatches =
+        MatchesRetailPlayerCameraForwarder(playerTarget);
+    const bool overrideExecutable =
+        IsCallableMainImageAddress(overrideTarget);
+    if (!playerMatches || !overrideExecutable) {
+        ReportRendererHookLayout(
+            playerTarget, overrideTarget,
+            playerMatches, overrideExecutable);
         Report(
             "ERROR", "stereo_hook_layout_mismatch",
             "The retail RenderCamera 17-to-19 forwarding layout "

@@ -43,6 +43,15 @@ them and shows examples — nothing has to be edited by hand.
   OpenXR runtime.
 - Windows 10/11, 64-bit.
 
+### Must-have mod: F.E.A.R. HD Textures v2.0.2
+
+For the best experience, install
+[F.E.A.R. HD Textures v2.0.2 from ModDB](https://www.moddb.com/downloads/fear-hd-textures-v202).
+Download it, run its installer, select your F.E.A.R. folder and the correct
+Steam/non-Steam option, then click **Install**. That's it — install it and be
+happy. F.E.A.R. VR recognizes both the original Steam executable and the
+executable patched by this texture mod.
+
 ### 1. Install the Public Tools 1.08
 
 Five modules (`GameClient.dll`, `GameServer.dll`, `ClientFx.fxd`, `FEAR.dep`,
@@ -166,6 +175,7 @@ game is started:
 | Edition | Launch | Status |
 |---|---|---|
 | Steam (Ultimate Shooter Edition 1.08) | `steam.exe -applaunch 21090` | Confirmed in-game |
+| Steam 1.08 + HDTextures4FEAR/XP v2.0.2 | `steam.exe -applaunch 21090` | Recognized; exact patched EXE hash confirmed |
 | GOG (1.08) | `FEAR.exe` directly, same arguments | Should work, untested |
 | Retail disc, patched to 1.08 | `FEAR.exe` directly, same arguments | Should work, untested |
 
@@ -177,6 +187,11 @@ An unknown `FEAR.exe` build is no longer an error. The installer prints its
 SHA-256 with a warning that this build is untested and continues. If you run
 a GOG or disc copy, that hash plus a note whether it worked is exactly what's
 needed to list the build as confirmed.
+
+The HDTextures4FEAR/XP v2.0.2 installer replaces the Steam executable. Its
+patched hash and the original Steam hash are both recognized. Installing or
+removing that texture patch after F.E.A.R. VR was installed therefore does not
+require reinstalling the VR mod; unknown executable changes are still rejected.
 
 ### If something goes wrong
 

@@ -11,6 +11,15 @@ $script:FearVr = [ordered]@{
     FearExeName   = 'FEAR.exe'
     ExpectedVersion = '1.08.282.0'
     ExpectedSha256  = 'D5EBC38A4F12B772C9112A2811C290ADB6C5052D3BC2F817302D38CF55BB2CBE'
+    # Beide Steam-1.08-Varianten sind lokal verifiziert. Der HD-Texturen-
+    # Installer ersetzt FEAR.exe; sein Uninstaller stellt die Stock-Datei
+    # wieder her. Ein Wechsel zwischen genau diesen beiden Hashes ist sicher.
+    KnownRetailHashes = [ordered]@{
+        'D5EBC38A4F12B772C9112A2811C290ADB6C5052D3BC2F817302D38CF55BB2CBE' =
+            'Steam, Ultimate Shooter Edition 1.08'
+        'D662DCCDB2EBD17D1ACED7C725A8724060010718146E0C0074DA5E8EF89B82B4' =
+            'Steam 1.08 + HDTextures4FEAR/XP v2.0.2'
+    }
     SdkInstallerRel = 'extras\fear_publictools_108.exe'
     SdkInstallerSize = 671441087
     SdkInstallerSha256 = '11AAA4128528403F7BC9EA5119C68051C62B92A99E6411DFD749AF55E9B19DF8'
@@ -150,7 +159,21 @@ setzen, oder den Launcher mit -Runtime steamvr bzw. -Runtime vdxr aufrufen.
     }
 }
 
-# Verifiziert die Retail-FEAR.exe gegen Version + SHA-256. Wirft bei Abweichung.
+# Erlaubt einen unveraenderten Hash sowie den Wechsel zwischen zwei explizit
+# bestaetigten Retail-Varianten, beispielsweise Stock und HD-Texturen-Patch.
+function Test-CompatibleRetailFearHashes(
+    [string]$RecordedHash,
+    [string]$CurrentHash
+) {
+    if ($RecordedHash -eq $CurrentHash) { return $true }
+    $cfg = Get-FearVrConfig
+    return (
+        [bool]$cfg.KnownRetailHashes[$RecordedHash] -and
+        [bool]$cfg.KnownRetailHashes[$CurrentHash]
+    )
+}
+
+# Verifiziert die Retail-FEAR.exe gegen Version und bekannte SHA-256-Hashes.
 function Assert-RetailFearExe {
     $cfg = Get-FearVrConfig
     $exe = Join-Path $cfg.RetailRoot $cfg.FearExeName
@@ -165,8 +188,15 @@ function Assert-RetailFearExe {
     if ($ver -ne $cfg.ExpectedVersion) {
         throw "Falsche FEAR.exe-Version: '$ver' (erwartet '$($cfg.ExpectedVersion)'). Versionsabhängige Hooks bleiben DEAKTIVIERT."
     }
-    if ($sha -ne $cfg.ExpectedSha256) {
-        throw "Falscher FEAR.exe-Hash: '$sha' (erwartet '$($cfg.ExpectedSha256)'). Versionsabhängige Hooks bleiben DEAKTIVIERT."
+    $edition = $cfg.KnownRetailHashes[$sha]
+    if (-not $edition) {
+        $expected = ($cfg.KnownRetailHashes.Keys -join "', '")
+        throw "Falscher FEAR.exe-Hash: '$sha' (erwartet '$expected'). Versionsabhängige Hooks bleiben DEAKTIVIERT."
     }
-    return [pscustomobject]@{ Path = $exe; Version = $ver; Sha256 = $sha }
+    return [pscustomobject]@{
+        Path = $exe
+        Version = $ver
+        Sha256 = $sha
+        Edition = $edition
+    }
 }

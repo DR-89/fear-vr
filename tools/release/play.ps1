@@ -98,9 +98,24 @@ if (-not (Test-Path -LiteralPath $hostExe -PathType Leaf)) {
     throw "Hostprogramm fehlt: $hostExe"
 }
 
-$steamExe = Join-Path ${env:ProgramFiles(x86)} 'Steam\steam.exe'
-if (-not (Test-Path -LiteralPath $steamExe -PathType Leaf)) {
-    throw "Steam nicht gefunden: $steamExe"
+# Steam-Installationen brauchen den Umweg ueber steam.exe -applaunch. GOG-
+# und DVD-Installationen starten direkt; die Argumente sind dieselben.
+# Aeltere deployment.json ohne launchMode sind Steam-Installationen.
+$launchMode = 'steam'
+if ($deployment.PSObject.Properties.Name -contains 'launchMode' -and
+    $deployment.launchMode) {
+    $launchMode = $deployment.launchMode
+}
+$steamExe = $null
+if ($launchMode -eq 'steam') {
+    $steamExe = Get-SteamExecutable
+    if (-not $steamExe) {
+        throw @'
+Steam nicht gefunden, die Installation ist aber im Steam-Startmodus
+eingerichtet. Neu installieren mit -LaunchMode direct, wenn FEAR.exe ohne
+Steam gestartet werden soll (GOG, Retail-DVD).
+'@
+    }
 }
 
 $running = @(Get-Process -Name 'FEAR' -ErrorAction SilentlyContinue)
@@ -201,33 +216,42 @@ if (-not $ready) {
 }
 
 # --- Spiel starten ----------------------------------------------------------
-$steamArguments = @(
-    '-applaunch', $deployment.steamAppId,
+$gameArguments = @(
     '-fearvr-session', $sessionText,
     '-fearvr-logdir', "`"$runLogDirectory`"",
     '-archcfg', "`"$($deployment.archiveConfig)`"",
     '-userdirectory', "`"$($deployment.userDirectory)`"",
     '-fearvr-stereo-toggle'
 )
-if (-not $NoInput) { $steamArguments += '-fearvr-input' }
-if ($Translation) { $steamArguments += '-fearvr-translation' }
-if (-not $NoStereoHud) { $steamArguments += '-fearvr-stereo-hud' }
-if ($NoHeadBob) { $steamArguments += '-fearvr-no-headbob' }
-if ($Safe) { $steamArguments += '-fearvr-safe' }
-if ($NoFlashlight) { $steamArguments += '-fearvr-no-flashlight' }
-if ($NoHandNodes) { $steamArguments += '-fearvr-no-handnodes' }
-if ($NoWeaponTransform) { $steamArguments += '-fearvr-no-weapon-transform' }
-if ($NoBodyHide) { $steamArguments += '-fearvr-no-body-hide' }
-if ($NoStereo) { $steamArguments += '-fearvr-no-stereo' }
-if ($NoInject) { $steamArguments += '-fearvr-no-inject' }
-if ($NoBindingHook) { $steamArguments += '-fearvr-no-binding-hook' }
-if ($NoClientUpdate) { $steamArguments += '-fearvr-no-client-update' }
-if ($NoAimHooks) { $steamArguments += '-fearvr-no-aim-hooks' }
-if ($NoAimAt) { $steamArguments += '-fearvr-no-aimat' }
-if ($AimAtPassthrough) { $steamArguments += '-fearvr-aimat-passthrough' }
+if (-not $NoInput) { $gameArguments += '-fearvr-input' }
+if ($Translation) { $gameArguments += '-fearvr-translation' }
+if (-not $NoStereoHud) { $gameArguments += '-fearvr-stereo-hud' }
+if ($NoHeadBob) { $gameArguments += '-fearvr-no-headbob' }
+if ($Safe) { $gameArguments += '-fearvr-safe' }
+if ($NoFlashlight) { $gameArguments += '-fearvr-no-flashlight' }
+if ($NoHandNodes) { $gameArguments += '-fearvr-no-handnodes' }
+if ($NoWeaponTransform) { $gameArguments += '-fearvr-no-weapon-transform' }
+if ($NoBodyHide) { $gameArguments += '-fearvr-no-body-hide' }
+if ($NoStereo) { $gameArguments += '-fearvr-no-stereo' }
+if ($NoInject) { $gameArguments += '-fearvr-no-inject' }
+if ($NoBindingHook) { $gameArguments += '-fearvr-no-binding-hook' }
+if ($NoClientUpdate) { $gameArguments += '-fearvr-no-client-update' }
+if ($NoAimHooks) { $gameArguments += '-fearvr-no-aim-hooks' }
+if ($NoAimAt) { $gameArguments += '-fearvr-no-aimat' }
+if ($AimAtPassthrough) { $gameArguments += '-fearvr-aimat-passthrough' }
 
-Start-Process -FilePath $steamExe -ArgumentList ($steamArguments -join ' ') `
-    -WorkingDirectory (Split-Path -Parent $steamExe) | Out-Null
+if ($launchMode -eq 'steam') {
+    $steamArguments = @('-applaunch', $deployment.steamAppId) + $gameArguments
+    Start-Process -FilePath $steamExe -ArgumentList ($steamArguments -join ' ') `
+        -WorkingDirectory (Split-Path -Parent $steamExe) | Out-Null
+} else {
+    # GOG und Retail-DVD: Dieselben Argumente gehen direkt an FEAR.exe. Das
+    # Arbeitsverzeichnis muss der Spielordner sein, sonst findet die Engine
+    # ihre eigenen Ressourcen nicht. Geschrieben wird dort nichts: Alles
+    # Veraenderliche liegt hinter -archcfg und -userdirectory.
+    Start-Process -FilePath $retail.Path -ArgumentList ($gameArguments -join ' ') `
+        -WorkingDirectory $deployment.retailRoot | Out-Null
+}
 
 $fear = $null
 $deadline = (Get-Date).AddSeconds(25)
@@ -238,7 +262,11 @@ do {
 } until ($null -ne $fear -or (Get-Date) -ge $deadline)
 if ($null -eq $fear) {
     Stop-Process -Id $hostProcess.Id -Force -ErrorAction SilentlyContinue
-    throw 'Steam startete innerhalb von 25 Sekunden keine FEAR.exe.'
+    $startFailure = 'FEAR.exe war nach 25 Sekunden nicht gestartet.'
+    if ($launchMode -eq 'steam') {
+        $startFailure = 'Steam startete innerhalb von 25 Sekunden keine FEAR.exe.'
+    }
+    throw $startFailure
 }
 
 $theaterGuard = $null
@@ -259,9 +287,9 @@ Write-Host ''
 Write-Host 'Steuerung: linker Stick bewegt, rechter Stick dreht, hoch/runter waehlt Waffe.'
 Write-Host 'A springt, B laedt nach, X duckt, Y schaltet Zeitlupe.'
 Write-Host 'Linker Grip rennt, linker Stick-Klick oeffnet Pause, rechter Grip benutzt.'
-Write-Host 'Trigger zielen und feuern; rechter Stick-Klick zentriert die Blickrichtung.'
+Write-Host 'Trigger zielen und feuern; rechter Stick-Klick greift in 3D im Nahkampf an.'
 Write-Host 'Die linke Hand seitlich neigen lehnt um die Ecke.'
-Write-Host 'F8 Stereo an/aus, F9 zentrieren, F10 Komfortbildschirm.'
+Write-Host 'F8 Stereo an/aus, F9 richtet nur 2D-Bildschirme neu aus, F10 Komfortbildschirm.'
 Write-Host 'VR-Einstellungen stehen im ESC-Menue unter "VR SETTINGS".'
 
 if ($Wait) {

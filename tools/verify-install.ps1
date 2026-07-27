@@ -41,7 +41,8 @@ if (Test-Path -LiteralPath $exe) {
     $ver = (Get-Item -LiteralPath $exe).VersionInfo.FileVersion
     Line 'FEAR.exe Version' "$ver (erwartet $($cfg.ExpectedVersion))" ($ver -eq $cfg.ExpectedVersion)
     $sha = Get-FileSha256 $exe
-    Line 'FEAR.exe SHA-256' $(if ($sha -eq $cfg.ExpectedSha256) { 'passt' } else { $sha }) ($sha -eq $cfg.ExpectedSha256)
+    $edition = $cfg.KnownRetailHashes[$sha]
+    Line 'FEAR.exe SHA-256' $(if ($edition) { "passt ($edition)" } else { $sha }) ([bool]$edition)
 } else {
     Line 'FEAR.exe' "NICHT gefunden: $exe" $false
 }

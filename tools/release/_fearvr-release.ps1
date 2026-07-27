@@ -18,6 +18,8 @@ $script:FearVrRelease = [ordered]@{
     KnownRetailHashes = [ordered]@{
         'D5EBC38A4F12B772C9112A2811C290ADB6C5052D3BC2F817302D38CF55BB2CBE' =
             'Steam, Ultimate Shooter Edition 1.08'
+        'D662DCCDB2EBD17D1ACED7C725A8724060010718146E0C0074DA5E8EF89B82B4' =
+            'Steam 1.08 + HDTextures4FEAR/XP v2.0.2'
     }
 
     # Unverändertes VC7.1-GameClient.dll aus den Public Tools 1.08. Dient als
@@ -89,6 +91,21 @@ function Assert-RetailFearExe([string]$RetailRoot) {
         Verified = [bool]$known
         Edition = if ($known) { $known } else { "unknown 1.08 build ($version)" }
     }
+}
+
+# Ein nachtraegliches Installieren oder Entfernen des bestaetigten
+# HDTextures4FEAR-Patches darf eine vorhandene VR-Installation weiter nutzen.
+# Unbekannte Hashwechsel bleiben dagegen ein Integritaetsfehler.
+function Test-CompatibleRetailFearHashes(
+    [string]$RecordedHash,
+    [string]$CurrentHash
+) {
+    if ($RecordedHash -eq $CurrentHash) { return $true }
+    $cfg = Get-FearVrReleaseConfig
+    return (
+        [bool]$cfg.KnownRetailHashes[$RecordedHash] -and
+        [bool]$cfg.KnownRetailHashes[$CurrentHash]
+    )
 }
 
 # Alle festen lokalen Laufwerke, damit ein Spiel auf D:\ oder E:\ genauso

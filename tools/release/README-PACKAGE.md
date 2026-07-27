@@ -7,8 +7,9 @@ OpenXR motion controls.
 ## Requirements
 
 1. **F.E.A.R. 1.08**, legally installed. The Steam Ultimate Shooter Edition
-   (1.08.282.0) is the confirmed build; GOG and retail-disc copies of 1.08
-   install and launch as well, but are untested. An unknown build is reported
+   (1.08.282.0) and its HDTextures4FEAR/XP v2.0.2 patched executable are
+   recognized; GOG and retail-disc copies of 1.08 install and launch as well,
+   but are untested. An unknown build is reported
    with its SHA-256 and installation continues — every byte signature this mod
    uses lives in `GameOrig.dll` from the Public Tools, not in `FEAR.exe`.
    Versions below 1.08 are rejected.

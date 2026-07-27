@@ -24,6 +24,17 @@ enum FearVrGameCommand : std::uint32_t {
     FEARVR_CMD_LEAN_LEFT = 20,
     FEARVR_CMD_LEAN_RIGHT = 21,
     FEARVR_CMD_YAW_ACCEL = 23,
+    // Der Nahkampf von F.E.A.R. ist der Tritt, und der haengt an der
+    // Sekundaerattacke: `CPlayerBodyMgr::UpdateActionProperties` leitet
+    // SlideKick, JumpIdleKick und JumpRunKick alle aus `kAP_ACT_FireSecondary`
+    // ab, das wiederum aus COMMAND_ID_ALT_FIRING entsteht. Retail nennt genau
+    // diese Bindung im Optionsmenue „Melee Attack".
+    //
+    // COMMAND_ID_TOGGLEMELEE (60) ist etwas anderes und in F.E.A.R. wirkungs-
+    // los: Es ruft `SwitchToComplimentaryWeapon`, das ohne hinterlegte
+    // Nahkampfvariante sofort zurueckkehrt. Die erste Fassung nutzte es und
+    // loeste deshalb sichtbar nichts aus.
+    FEARVR_CMD_ALT_FIRING = 19,
     FEARVR_CMD_FOCUS = 27,
     FEARVR_CMD_MEDKIT = 70,
     FEARVR_CMD_PREV_WEAPON = 76,
@@ -165,6 +176,10 @@ inline FearVrCommandValue MapControllerCommand(
     // nach, gehalten wirft. Beides entsteht deshalb als Puls im GameClient.
     case FEARVR_CMD_RELOAD:
     case FEARVR_CMD_THROW_GRENADE:
+        return {0.0F, false};
+    // Der Nahkampf haengt an der Stossgeste der Waffenhand und wird deshalb
+    // ebenfalls als Puls im GameClient erzeugt.
+    case FEARVR_CMD_ALT_FIRING:
         return {0.0F, false};
     // Retail wertet den Medkit nur an der steigenden Flanke aus
     // (`CInterfaceMgr::OnCommandOn`), ein gehaltener Klick verbraucht deshalb

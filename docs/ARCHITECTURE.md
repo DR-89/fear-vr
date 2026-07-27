@@ -301,15 +301,19 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Nachweis:** Benutzerabnahme am 24.07.2026 — Zielstrahl und
   Scope-Ausrichtung stimmen mit dem Trefferpunkt überein.
 - **Handdarstellung:** `chars\models\player.Model00p` liefert vier Pieces ohne
-  Namen. Sichtbarkeit läuft deshalb über den Piece-Index. Piece #1 trägt die
-  Arme und wird ausgeblendet; Hände und Waffe bleiben sichtbar.
+  Namen; Piece #1 ist `Body_Group` und enthält Arme, Torso und Beine gemeinsam.
+  Der Stage-Generator liest deshalb die Rendermesh-Geometrie des lokal
+  installierten Modells, bestimmt die sechs Arm-Komponenten (beide Seiten und
+  drei LODs) und rasterisiert deren UV-Dreiecke in die Alphaebene einer lokal
+  erzeugten DXT3-Textur. Eine Kontrollmaske stellt sicher, dass keine Hand-UVs
+  getroffen werden.
 - **Bekannte Nachteile:** Knochen zu skalieren oder zu verschieben scheidet
   aus. Node-Control liefert nur einen `LTRigidTransform`, und ein Kollabieren
   der Armknochen erzeugt bei geskinnten Meshes einen sichtbaren Splitter vom
   Oberkörper zur Hand.
-- **Rückfallpfad:** `HiddenBodyPieces` in `fearvr.ini` und die F11-Probe
-  erlauben eine Neukalibrierung, falls ein Build eine andere Piece-Reihenfolge
-  liefert.
+- **Rückfallpfad:** `Show arms: ON` bzw. `ShowArms=1` setzt das unveränderte
+  Retail-Material ein. Standard ist AUS; die Wahl wird sofort gespeichert.
+  `HiddenBodyPieces` und F11 bleiben nur als Entwicklerdiagnose erhalten.
 - **Details:** `docs/OPENXR-INPUT.md`, `docs/TESTING.md` §12.
 
 ### AD-014 — VR-Einstellungen als kurze Seite in der nativen Menüliste
@@ -330,14 +334,15 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   `MORE SETTINGS >`, kleinere Fonthöhe über `SetFontHeight`, zusätzliches
   `Enable(false)` auf versteckten Controls.
 - **Gewählte Lösung:** ein englisch beschrifteter Eintrag `VR SETTINGS` direkt
-  hinter „Optionen“, als **eine** kurze Seite mit acht Einträgen, die
+  hinter „Optionen“, als **eine** kompakte Seite mit elf Einträgen, die
   vollständig in den nativen Rahmen passt. Solange die Seite aktiv ist, wird
   der Listenanfang in jedem Client-Update auf 0 festgehalten — nicht nur im
   eigenen Hook, weil Tastatur, Maus und Controller alle direkt über
   `NextSelection` navigieren. Geschrieben wird nur bei tatsächlicher Abweichung.
 - **Bekannte Nachteile:** Selten benutzte Optionen (HMD-Translation, Head-Bob,
-  Komfortbildschirm) sind nur über `fearvr.ini` erreichbar. Die Lösung hängt an
-  den geprüften Retail-Offsets und ist damit buildgebunden.
+  Komfortbildschirm und einzelne Nahkampfaktionen) sind nur über `fearvr.ini`
+  erreichbar. Die Lösung hängt an den geprüften Retail-Offsets und ist damit
+  buildgebunden.
 - **Verworfen mit Begründung:** `SetFontHeight` verringert die Basishöhe der
   Listeneinträge nicht. `Enable(false)` ist wirkungslos, weil
   `CLTGUICtrl::IsEnabled()` bereits `m_bEnabled && IsVisible()` ist, und würde

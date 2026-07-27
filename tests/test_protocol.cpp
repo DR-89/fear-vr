@@ -18,6 +18,8 @@ static_assert(sizeof(FearVrSlot) == 40, "FearVrSlot");
 static_assert(offsetof(FearVrSharedHeader, magic) == 0, "off magic");
 static_assert(offsetof(FearVrSharedHeader, version) == 4, "off version");
 static_assert(offsetof(FearVrSharedHeader, headerSize) == 8, "off headerSize");
+static_assert(offsetof(FearVrSharedHeader, panelRecenterGeneration) == 20,
+              "off panelRecenterGeneration");
 static_assert(offsetof(FearVrSharedHeader, hostHeartbeat) == 24, "off hostHb");
 static_assert(offsetof(FearVrSharedHeader, gameHeartbeat) == 32, "off gameHb");
 static_assert(offsetof(FearVrSharedHeader, requestSequence) == 40,
@@ -30,6 +32,8 @@ static_assert(offsetof(FearVrSharedHeader, hostAdapterLuid) == 64,
               "off hostAdapterLuid");
 static_assert(offsetof(FearVrSharedHeader, gameAdapterLuid) == 72,
               "off gameAdapterLuid");
+static_assert(offsetof(FearVrSharedHeader, fovScalePercent) == 92,
+              "off fovScalePercent");
 static_assert(offsetof(FearVrSharedHeader, request) == 96, "off request");
 static_assert(offsetof(FearVrSharedHeader, input) == 208, "off input");
 static_assert(offsetof(FearVrSharedHeader, haptic) == 400, "off haptic");
@@ -56,6 +60,11 @@ int main(void) {
     FearVrSharedHeader h;
     fearvr::InitializeProtocolHeader(h);
     CHECK(AcceptHeader(h));
+    CHECK(h.fovScalePercent == FEARVR_FOV_SCALE_DEFAULT_PERCENT);
+    CHECK(fearvr::NormalizeFovScalePercent(0) == 100);
+    CHECK(fearvr::NormalizeFovScalePercent(90) == 100);
+    CHECK(fearvr::NormalizeFovScalePercent(120) == 120);
+    CHECK(fearvr::NormalizeFovScalePercent(140) == 130);
 
     // --- Ungültige Varianten werden abgelehnt (Laufzeitwerte) ---
     { FearVrSharedHeader b = h; b.magic ^= 0xFFu;      CHECK(!AcceptHeader(b)); }

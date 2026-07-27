@@ -21,6 +21,18 @@ inline constexpr std::uint32_t LuidLow(std::uint64_t packed) noexcept {
     return static_cast<std::uint32_t>(packed & 0xFFFFFFFFULL);
 }
 
+inline constexpr std::uint32_t NormalizeFovScalePercent(
+    std::uint32_t percent) noexcept {
+    if (percent == 0) {
+        return FEARVR_FOV_SCALE_DEFAULT_PERCENT;
+    }
+    return percent < FEARVR_FOV_SCALE_MIN_PERCENT
+               ? FEARVR_FOV_SCALE_MIN_PERCENT
+               : (percent > FEARVR_FOV_SCALE_MAX_PERCENT
+                      ? FEARVR_FOV_SCALE_MAX_PERCENT
+                      : percent);
+}
+
 inline bool IsProtocolHeaderValid(const FearVrSharedHeader& header) noexcept {
     return header.magic == FEARVR_PROTOCOL_MAGIC &&
            header.version == FEARVR_PROTOCOL_VERSION &&
@@ -36,6 +48,7 @@ inline void InitializeProtocolHeader(FearVrSharedHeader& header) noexcept {
     header.headerSize = sizeof(FearVrSharedHeader);
     header.slotStructSize = sizeof(FearVrSlot);
     header.slotsPerEye = FEARVR_SLOTS_PER_EYE;
+    header.fovScalePercent = FEARVR_FOV_SCALE_DEFAULT_PERCENT;
 }
 
 struct ReadyPair {

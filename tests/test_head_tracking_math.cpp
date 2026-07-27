@@ -114,6 +114,63 @@ int main() {
         return Fail("the recenter orientation must become neutral");
     }
 
+    const FearVrPose pitchedDown = Pose(
+        0.0F, 0.0F, 0.0F,
+        -0.38268343F, 0.0F, 0.0F, 0.92387953F);
+    const fearvr::TrackingQuaternion yawWithPitchRotation =
+        fearvr::Multiply(
+            {0.0F, kHalfSqrtTwo, 0.0F, kHalfSqrtTwo},
+            {-0.38268343F, 0.0F, 0.0F, 0.92387953F});
+    const FearVrPose yawWithPitch = Pose(
+        0.0F, 0.0F, 0.0F,
+        yawWithPitchRotation.x, yawWithPitchRotation.y,
+        yawWithPitchRotation.z, yawWithPitchRotation.w);
+    const FearVrPose mixedRecenter =
+        fearvr::YawOnlyRecenterPose(yawWithPitch);
+    if (!fearvr::IsValidPose(mixedRecenter) ||
+        !Near(mixedRecenter.qx, 0.0F) ||
+        !Near(mixedRecenter.qy, kHalfSqrtTwo) ||
+        !Near(mixedRecenter.qz, 0.0F) ||
+        !Near(mixedRecenter.qw, kHalfSqrtTwo)) {
+        return Fail(
+            "yaw-only recenter must isolate yaw from simultaneous pitch");
+    }
+
+    const FearVrPose pitchedRecenter =
+        fearvr::YawOnlyRecenterPose(pitchedDown);
+    const fearvr::RelativeEyePose pitchAtReset =
+        fearvr::TrackedPoseRelativeToRecenter(
+            pitchedRecenter, pitchedDown);
+    const fearvr::RelativeEyePose levelAfterPitchReset =
+        fearvr::TrackedPoseRelativeToRecenter(
+            pitchedRecenter, identity);
+    const fearvr::TrackingVector pitchAtResetForward = fearvr::Rotate(
+        pitchAtReset.rotation, {0.0F, 0.0F, 1.0F});
+    const fearvr::TrackingVector levelAfterPitchResetForward = fearvr::Rotate(
+        levelAfterPitchReset.rotation, {0.0F, 0.0F, 1.0F});
+    if (!pitchAtReset.valid || !levelAfterPitchReset.valid ||
+        !(pitchAtResetForward.y < -0.7F) ||
+        !Near(levelAfterPitchResetForward.y, 0.0F) ||
+        !Near(levelAfterPitchResetForward.z, 1.0F)) {
+        return Fail(
+            "yaw-only recenter must preserve physical pitch instead of "
+            "inverting it after the head returns level");
+    }
+
+    const FearVrPose rolled = Pose(
+        0.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 0.38268343F, 0.92387953F);
+    const FearVrPose rolledRecenter =
+        fearvr::YawOnlyRecenterPose(rolled);
+    if (!fearvr::IsValidPose(rolledRecenter) ||
+        !Near(rolledRecenter.qx, 0.0F) ||
+        !Near(rolledRecenter.qy, 0.0F) ||
+        !Near(rolledRecenter.qz, 0.0F) ||
+        !Near(rolledRecenter.qw, 1.0F)) {
+        return Fail(
+            "yaw-only recenter must not absorb physical head roll");
+    }
+
     const FearVrPose rightHandAim = Pose(
         0.25F, -0.15F, -0.45F,
         0.0F, kHalfSqrtTwo, 0.0F, kHalfSqrtTwo);

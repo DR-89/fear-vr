@@ -56,15 +56,214 @@ fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
 - A: Waffenwechsel; B kurz: Nachladen; B gehalten: Granate werfen;
 - X: Zeitlupe; Y: Pause;
 - rechter Grip: Benutzen; rechter Trigger: Feuern; linker Trigger: Fokus;
-- rechter Stick-Klick: Headtracking-Recenter;
+- rechter Stick-Klick: in der 3D-Welt manueller Nahkampfangriff, in Menüs und
+  anderen 2D-Ansichten den Flachbildschirm neu verankern;
 - linker Stick-Klick: Medkit benutzen (`COMMAND_ID_MEDKIT` = 70). Retail wertet
   ihn an der steigenden Flanke in `CInterfaceMgr::OnCommandOn` aus, ein
   gehaltener Klick verbraucht deshalb genau einen Medkit. Damit ist keine freie
   Taste mehr übrig — weitere Aktionen bräuchten eine Geste oder einen
   langen Druck;
-- linke Hand seitlich neigen: um die Ecke lehnen.
+- linke Hand seitlich neigen: um die Ecke lehnen;
+- Waffenhand schnell nach vorne stoßen: Nahkampf (`COMMAND_ID_ALT_FIRING`
+  = 19 — die Sekundärattacke, die Retail im Optionsmenü „Melee Attack" nennt).
+
+### Physisches Lehnen (`Physical lean`, Standard an)
+
+F.E.A.R.s eigenes Lehnen ist ausschließlich eine Drehung: `CLeanMgr` berechnet
+einen Winkel, den `CPlayerCamera` als Rollen auf die Kamera legt
+(`PlayerCamera.cpp:953`) und der `CLeanNodeController` auf die Körperknoten.
+Der Blickpunkt bleibt dabei exakt in der Spielerposition — um eine Ecke sehen
+kann man damit nicht, es kippt nur das Bild.
+
+Deshalb bewegt jetzt der physische Kopfversatz aus dem Headtracking den
+Blickpunkt mit. Das ist dieselbe Größe, die bisher nur mit `-Translation`
+verfügbar war, nur wird sie an der Weltgeometrie begrenzt: Ein Strahl von der
+Spielerkameraposition entlang des gewünschten Versatzes misst die freie
+Strecke, und `src/common/lean_collision.h` macht daraus den Anteil, der übrig
+bleibt (12 Einheiten Sicherheitsabstand zur Fläche). Enger werden gilt sofort,
+weiter werden nur geglättet — sonst steckte der Blickpunkt für Sekundenbruch-
+teile in der Wand oder ruckelte beim Streifen einer Kante.
+
+Beide Augenposen enthalten den Kopfversatz als denselben Summanden, deshalb
+genügt **ein** Strahl pro Bild statt einem pro Auge; der gesperrte Anteil wird
+anschließend von beiden Posen abgezogen.
+
+Der Körper wird bewusst **nicht** nachgezogen. Frühere Fassungen speisten
+kleine Bewegungsachsen ein, damit Retails Kollisionskapsel dem Lean folgte.
+Das erzeugte beim Anhalten und Zurücklehnen eine Rückkopplung, konnte pendeln
+und den Blick selten hinter das Körpermodell setzen. Der aktuelle Pfad bewegt
+deshalb nur Blickpunkt, Hände, Waffe, Mündung und Schussursprung um denselben
+weltbegrenzten Versatz. Körpermodell und Retail-Kollisionskapsel bleiben an der
+normalen Spielerposition; es werden keinerlei Lean-Bewegungsachsen injiziert.
+
+Der gemessene Kopfversatz wird verstärkt, bevor Blickpunkt und Hände ihm
+folgen: `LeanScale` in `fearvr.ini`, Standard 200 Prozent, erlaubt sind 100
+bis 400. Zehn Zentimeter physisches Lehnen wirken damit wie zwanzig — man muss
+sich also nur halb so weit beugen, um hinter einer Deckung hervorzusehen. Der
+gemessene Versatz bleibt vorher auf 25 cm begrenzt, die Wirkung damit auf
+einen halben Meter. In den Augenposen steckt der *unverstärkte* Versatz, und
+genau der wird beim Verrechnen wieder herausgenommen; verstärkt ist nur der
+weltbegrenzte physische Lean-Versatz.
+
+Solange physisches Lehnen aktiv ist, entfällt Retails Kameraneigung über die
+linke Handneigung (`COMMAND_ID_LEAN_LEFT`/`_RIGHT` werden dann nicht mehr
+injiziert). Beides zusammen kippte das Bild zusätzlich zu einer Bewegung, die
+der Spieler ohnehin selbst macht. Mit `Physical lean: OFF` ist die Handneigung
+unverändert da.
+
+Umschaltbar im VR-Menü unter `Physical lean: ON / OFF`, gespeichert als
+`PhysicalLean` in `fearvr.ini`.
+
+### Klettern an Leitern (abschaltbar, Standard aus)
+
+Umschaltbar im VR-Menü unter `Ladder climbing: HANDS / CLASSIC`, gespeichert
+als `Climbing` in `fearvr.ini`. Standard ist `CLASSIC`, also die
+Retail-Steuerung über den Stick. An einer Leiter
+greift dann ein Grabknopf die Sprosse, und die Bewegung dieser Hand **pro
+Bild** treibt das Klettern: Ziehen nach unten klettert aufwärts, beim
+beidhändigen Greifen führt die stärker ziehende Hand.
+
+Bewegt wird nur, *während* die Hand zieht. Zwei Fassungen sind daran zuvor
+gescheitert, beide am selben Punkt: Die Handpose ist raumbezogen, also bleibt
+die Hand im Zimmer stehen, während der Spielkörper hochfährt. Die Auslenkung
+gegenüber dem Griffpunkt verschwand deshalb nie (einmal greifen = endlos
+hochfahren), und ein Zugguthaben lief ohne Kenntnis der echten
+Klettergeschwindigkeit über mehrere Sprossen nach. Jetzt zählt die geglättete
+Handgeschwindigkeit des aktuellen Bildes, mit langsamem Anstieg gegen
+Trackingzittern und schnellem Abklingen gegen Nachlauf.
+
+Solange der Spieler an der Leiter hängt, gehört die Vorwärtsachse ganz den
+Händen — auch ohne Griff. Sonst kletterte der Stick weiter mit, und `HANDS`
+wäre nur eine zusätzliche Möglichkeit statt einer Entscheidung. Die Auswertung steht in
+`src/common/climb_grip.h` und ist über `tests/test_climb_grip.cpp` ohne
+Headset geprüft — einschließlich genau dieses Falls.
+
+Bewegt wird über die Kommandos, die Retail an der Leiter selbst auswertet.
+`CMoveMgr::UpdateControlFlags` prüft dort ausschließlich `COMMAND_ID_FORWARD`
+und `COMMAND_ID_REVERSE` (bzw. das Vorzeichen der Bewegungsachse) — die
+Klettergeschwindigkeit ist fest, der Zug entscheidet nur über die Richtung.
+Ein Schreibzugriff auf die Spielerphysik ist deshalb nicht nötig. Beide
+Kommandos werden **nur** während des Kletterns injiziert; sonst bliebe von der
+analogen Stickbewegung nur noch volle Geschwindigkeit übrig.
+
+Ob der Spieler an einer Leiter hängt, liefert `LadderMgr`. Herleitung der
+Adressen in `GameOrig.dll`:
+
+- `LadderMgr::Instance()` liegt bei RVA `0x27B50` (erreichbar auch über den
+  Inkrementell-Link-Thunk bei `0x7BBC`) und ist ein Magic-Static-Accessor: Er
+  endet mit `mov eax, <Objekt>` / `ret`.
+- Das statische Objekt liegt bei RVA `0x2D7AA8`, in `.data`.
+- `m_pLadder` ist sein erster Member. Doppelt belegt: Die Aufrufstelle in
+  `CMoveMgr`, die `"%s - jump from ladder"` protokolliert, liest direkt nach
+  dem Accessor-Aufruf `cmp dword ptr [eax], 0`, und `CanReleaseLadder`
+  beginnt mit demselben `cmp dword ptr [ecx], 0`.
+- Gegenprobe: 46 direkte Aufrufe im Modul, 36 davon verwenden das Ergebnis
+  sofort als Objektzeiger — die erwartete Streuung von `IsClimbing()`.
+
+Die Waffe verschwindet an der Leiter von selbst: `LadderMgr` ruft beim
+Aufstieg `CClientWeaponMgr::DisableWeapons`, und `CClientWeapon::SetVisible`
+kehrt bei gesetztem `m_bDisabled` folgenlos zurück — unser erzwungenes
+Sichtbarschalten kann daran nichts ändern. Der eigene Zielstrahl kannte diesen
+Zustand jedoch nicht und hing sonst in der leeren Hand; er folgt jetzt
+demselben Flag (`CClientWeapon+0x223`, belegt aus `SetVisible`, das dort
+`m_bVisible` setzt und bei gesetztem Flag sofort zurückkehrt). Damit ist er
+auch in Zwischensequenzen und am Geschütz aus.
+
+Zur Laufzeit wird das Bytemuster des Accessors geprüft und die im Code
+stehende (bereits relozierte) Objektadresse gegen die erwartete RVA gehalten.
+Stimmt etwas nicht, bleibt das Klettern aus und das Spiel unverändert
+(`ladder_manager_pattern_mismatch`). Überall außerhalb einer Leiter behalten
+die Grabknöpfe ihre gewohnte Bedeutung.
+
+### Nahkampfgesten
+
+Gemessen wird die Geschwindigkeit der Zielpose beider Hände aus zwei
+aufeinanderfolgenden Abtastungen, projiziert auf die eigene Blickrichtung der
+jeweiligen Hand. Ausgelöst wird ab 2 m/s Vorwärtsanteil, sofern die Bewegung
+höchstens 50 Grad neben der Zeigerichtung liegt; ein schneller Schwenk oder
+das Zurückziehen fallen dadurch heraus. Danach sperrt die Geste 700 ms und
+wird erst wieder scharf, wenn die Hand unter 0,8 m/s fällt — ein Stoß zählt
+so genau einmal.
+
+Die Waffenhand erzeugt den bekannten Waffenstoß. Ein Stoß der freien Hand
+erzeugt als **Off-Hand Strike** denselben Retail-Sekundärangriff; F.E.A.R. hat
+keinen eigenen unbewaffneten Faustangriff. Die freie Hand ist gesperrt, solange
+sie die Waffe im Zweihandgriff hält oder ihr Grabknopf gedrückt ist. Beide
+Hände teilen sich einen Cooldown, damit eine Bewegung nicht zwei Angriffe
+auslöst.
+
+Bei verfügbarem Retail-Bewegungszustand wartet ein Stoß am Boden höchstens
+250 ms. Meldet `CMoveMgr` in diesem Fenster `jumped` oder `falling`, wird der
+wartende Sekundärangriff zum Jump Kick; andernfalls folgt danach der normale
+Waffen- beziehungsweise Off-Hand Strike. Ein Stoß, der bereits in der Luft
+beginnt, löst den Jump Kick sofort aus. Die Geste setzt **niemals** `JUMP` —
+der Sprung muss immer vom Spieler kommen.
+
+Ein Slide Kick braucht zusätzlich einen eindeutigen Duck-Impuls: entweder
+senkt sich die frische HMD-Pose innerhalb 400 ms um mindestens 25 cm, oder der
+rechte Stick wird nach unten gedrückt. Danach darf ein Stoß der Waffen- oder
+freien Hand nur dann auslösen, wenn Retail zugleich **RUN**, **FORWARD** und
+Bodenkontakt meldet. ADS, Leiterzustand und eine deaktivierte Waffe sperren die
+Aktion. Bei der physischen Hocke erzeugt der Sequencer für 200 ms `DUCK`,
+`FORWARD` und `ALT_FIRING`; Stick-DUCK muss Retails echtes
+`PostureDownTime`-Fenster bereits geöffnet haben und braucht deshalb keine
+zweite DUCK-Flanke. Slide Kicks haben mindestens eine Sekunde gemeinsamen
+Cooldown.
+
+Retails `CPlayerCamera` übernimmt beim Ende einer Kameraanimation deren letzte
+Socket-Drehung als neue lokale Blickrichtung. Beim Slide Kick kann dadurch eine
+Abwärtsneigung dauerhaft im Blick verbleiben. Für VR wird deshalb die lokale
+Kameradrehung unmittelbar vor dem Tritt festgehalten und während der
+Kick-Animation als Renderbasis verwendet. Nur die animierte Kameradrehung wird
+unterdrückt: Körperanimation, Absenken, Position und Körper-Yaw bleiben
+erhalten, die Blickrichtung kommt vollständig vom HMD. Sobald Retails Kamera
+wieder mehrere Frames mit der festgehaltenen Basis übereinstimmt, endet der
+Eingriff automatisch.
+
+Die reine Einordnung steht in `src/common/melee_actions.h` und ist über
+`tests/test_melee_actions.cpp` ohne Headset geprüft. Der GameClient erzeugt
+daraus einen 200-ms-Puls.
+
+Die Zeitbasis ist die eigene Uhr des GameClients (`QueryPerformanceCounter`),
+nicht `predictedDisplayTimeNs` aus dem Eingabezustand. Dessen vorhergesagte
+Anzeigezeit bleibt zwischen zwei Abholungen gleich, wenn der Client häufiger
+pollt als der Host liefert — die erste Fassung verwarf deshalb jede Abtastung
+und löste im Spiel nie aus. Alle drei Sekunden protokolliert der Client unter
+`melee_thrust_peak` die schnellste gemessene Handgeschwindigkeit und die Zahl
+der ausgewerteten Abtastungen; damit lässt sich eine ausbleibende Geste sofort
+einordnen.
+
+Jump und Slide Kick sowie ihre sichtbaren Körperanimationen wurden im Headset
+bestätigt. M2 liest die Zustände zusätzlich für `melee_retail_state`:
+
+- `g_pMoveMgr` liegt bei RVA `0x2D8D8C`. Zwei Zugriffe in
+  `CMoveMgr::PlayerLeashFn` müssen auf dieselbe relozierte Adresse zeigen.
+- `m_bOnGround`, `m_bFalling` und `m_bJumped` liegen bei `CMoveMgr+0x64`,
+  `+0x66` und `+0x78`. Drei getrennte Codestellen sichern die Offsets ab,
+  darunter die originale Jump-Kick-Auswahl in `CPlayerBodyMgr`.
+- `CMoveMgr::UpdateControlFlags` startet bei der DUCK-Flanke den
+  PostureDown-Timer bei `CMoveMgr+0x4B0`. Dessen Dauer wird nicht geraten,
+  sondern aus Retails bereits initialisierter Konsolenvariable
+  `PostureDownTime` gelesen.
+
+Die Diagnose protokolliert Zustandswechsel und die gemessene Fensterdauer.
+Der Jump Kick liest davon nur `jumped` und `falling`; er injiziert weder
+`JUMP` noch andere Bewegung. Der Slide Kick verwendet zusätzlich den echten
+Bodenzustand und das gemessene Posture-Down-Fenster. Passt eine der Byteproben
+nicht zur geladenen `GameOrig.dll`, bleibt der Bewegungszustand unverfügbar:
+normale Schläge funktionieren dann weiterhin sofort, Kicks bleiben aus.
 
 Maus, Tastatur und vorhandenes Gamepad bleiben parallel nutzbar.
+
+### 2D-Panel-Recenter
+
+Die 3D-Welt besitzt bewusst keinen manuellen Headtracking-Recenter mehr. Ihre
+stabile Kamerabasis wird beim Betreten automatisch initialisiert. In Menüs,
+Ladebildern, Briefings und anderen 2D-Ansichten verankern F9, rechter
+Stick-Klick und `Recenter 2D panel` das raumfeste Panel neu an der aktuellen
+Blickrichtung. Derselbe Stickklick fordert in der 3D-Welt stattdessen Retails
+Sekundärangriff an; der aktuelle Bewegungszustand wählt normalen Schlag, Jump
+Kick oder Slide Kick.
 
 ### Linkshänderbelegung
 
@@ -197,16 +396,31 @@ nativen 320px-Rahmens läuft und kein unsauberes Scrollen entsteht:
 
 1. Stereo rendering
 2. Stereo HUD
-3. Turn speed
-4. Red aim guide
-5. Controller vibration
-6. Controls: RIGHT-HANDED / LEFT-HANDED
-7. Recenter view
-8. Reset VR defaults
-9. BACK
+3. Red aim guide
+4. Controller vibration
+5. Controls: RIGHT-HANDED / LEFT-HANDED
+6. Ladder climbing: HANDS / CLASSIC
+7. Melee: GESTURES / CLASSIC
+8. Show arms: ON / OFF
+9. FOV scale: 100% / 110% / 120% / 130%
+10. Turn speed
+11. Recenter 2D panel
+12. Reset VR defaults
+13. BACK
 
-Mit dem neunten Eintrag ist die Seite ausgereizt; weitere Einträge gehören in
-`fearvr.ini` statt auf die Seite (so wie `TwoHandGrip`).
+`Show arms` ist standardmäßig `OFF`: Nur Ober- und Unterarme werden über ein
+lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine
+bleiben sichtbar. `ON` setzt sofort das unveränderte Retail-Material ein.
+Die Auswahl wird als `ShowArms` gespeichert.
+
+`FOV scale` erweitert das symmetrische Sichtfeld in Tangentenraum und wirkt
+gleichzeitig auf Retails Stereokamera und die an OpenXR übermittelte
+Projektionsschicht. Dadurch bleiben Bild und Headset-Projektion deckungsgleich.
+`100%` ist der unveränderte Standard; die Auswahl wird als `FovScale`
+gespeichert.
+
+Die vier einzelnen Nahkampfaktionen gehören in `fearvr.ini` statt als vier
+weitere Zeilen auf die native Seite.
 
 HMD-Translation, Head-Bob und Komfortbildschirm bleiben als Einstellungen
 erhalten und werden weiterhin aus `fearvr.ini` gelesen und dorthin
@@ -251,7 +465,17 @@ gespeichert.
 
 Zusätzlich in `fearvr.ini`, ohne Menüeintrag:
 
-- `HiddenBodyPieces` — Bitmaske der ausgeblendeten Player-Body-Pieces.
-  Standard `2`: Piece #1 trägt die Arme, Hände und Waffe bleiben sichtbar.
-  **F11** kalibriert den Wert im Spiel neu, indem es die Pieces einzeln
-  isoliert.
+- `MeleeWeaponStrike=1` — Stoß der Waffenhand.
+- `MeleeOffHandStrike=1` — Off-Hand Strike.
+- `MeleeJumpKick=1` — Jump Kick auf einem vorhandenen Spielersprung.
+- `MeleeSlideKick=1` — bewachter Slide-Kick-Sequencer.
+
+`MeleeGestures=1` ist der vom Menüeintrag `Melee: GESTURES / CLASSIC`
+gespeicherte Master-Schalter. Neue und bestehende Konfigurationen ohne diese
+Schlüssel verwenden `1`; jede Aktion kann mit `0` einzeln abgeschaltet werden.
+
+- `ShowArms=0` — vom Menü gespeicherter Schalter; `0` ist der Standard und
+  verwendet die VR-Armmaske, `1` das sichtbare Retail-Material.
+- `HiddenBodyPieces=0` — reine Entwicklerdiagnose für die F11-Piece-Probe.
+  Der frühere Wert `2` wird auf `0` migriert, weil Retail-Piece #1
+  `Body_Group` mit Armen, Torso und Beinen gemeinsam enthält.

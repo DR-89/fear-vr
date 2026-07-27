@@ -12,7 +12,8 @@ Als CMake/CTest-Ziele unter `tests/` (baubar ohne Headset):
 - [x] Quaternion-Normalisierung und Achsenabbildung
       (`head_tracking_math`: OpenXR→LithTech für Yaw und Pitch;
       `input_state`: unnormierte und degenerierte Quaternionen)
-- [x] Pose relativ zum Recenter-Ursprung (`head_tracking_math`)
+- [x] Pose relativ zum Recenter-Ursprung und Yaw-only-Recenter bei geneigtem
+      beziehungsweise gesenktem Kopf (`head_tracking_math`)
 - [x] FOV-Winkel → gemeinsame symmetrische Projektion (`stereo_math`);
       echte Projektionsmatrizen baut LithTech selbst aus dem gesetzten FOV
 - [x] Ringpuffer-Paarung und Generationen
@@ -257,7 +258,8 @@ Automatisiert bestanden:
 
 - `head_tracking_math` in x86 und x64;
 - OpenXR→LithTech-Achsen- und Quaternionabbildung;
-- neutrale Recenter-Pose, IPD nach Recenter und ungültige Pose;
+- neutrale Recenter-Pose, Yaw-only-Verhalten für Pitch und Roll, IPD nach
+  Recenter und ungültige Pose;
 - Translation standardmäßig aus und bei opt-in auf 25 cm begrenzt;
 - insgesamt je 5/5 CTest-Tests in x86 und x64, einschließlich
   `stereo_hud_math`.
@@ -379,13 +381,14 @@ Automatisiert und im Retail-Lauf `logs\m5-fear-20260724-222748` bestätigt:
 
 Die Seite ist bewusst kurz und einseitig, damit kein Eintrag über den Rand des
 nativen Rahmens läuft: Stereo rendering, Stereo HUD, Turn speed, Red aim guide,
-Controller vibration, Recenter view, Reset VR defaults, BACK. HMD-Translation,
-Head-Bob und Komfortbildschirm bleiben ohne Menüeintrag in `fearvr.ini`
-einstellbar. Ein zweistufiges Menü wurde verworfen; die Beschriftungen sind
-durchgehend englisch. Bedienung: Stick navigiert, A oder Trigger bestätigt,
-B geht zurück. Details: `docs/OPENXR-INPUT.md`.
+Controller vibration, Controls, Ladder climbing, Melee, Show arms, Recenter
+view, Reset VR defaults, BACK. HMD-Translation, Head-Bob, Komfortbildschirm
+und die vier einzelnen Nahkampfaktionen bleiben ohne eigenen Menüeintrag in
+`fearvr.ini` einstellbar. Ein zweistufiges Menü wurde verworfen; die
+Beschriftungen sind durchgehend englisch. Bedienung: Stick navigiert, A oder
+Trigger bestätigt, B geht zurück. Details: `docs/OPENXR-INPUT.md`.
 
-## 12. Nur Hände und Waffe statt Arme
+## 12. Arme schaltbar, Hände, Torso und Beine sichtbar
 
 Die Retail-Modellabfrage im Lauf `logs\m5-fear-20260724-231900` ergab:
 
@@ -394,21 +397,28 @@ Die Retail-Modellabfrage im Lauf `logs\m5-fear-20260724-231900` ergab:
 - `GetNumPieces` und `GetPiece(index, …)` liefern `LT_OK`, aber
   `GetPieceName` liefert für alle vier Pieces `LT_NOTFOUND` (61).
 
-Retail speichert also keine Piece-Namen. Sichtbarkeit wird deshalb über den
-Piece-Index gesteuert und mit **F11** einmalig kalibriert: Der Probelauf
-isoliert nacheinander je ein Piece, der gewählte Stand landet sofort als
-`HiddenBodyPieces` in `stage\userdata-m5\fearvr.ini`.
+Die erste Piece-Kalibrierung war damit zu grob: Piece #1 ist `Body_Group` und
+enthält nicht nur Arme, sondern auch Torso und Beine. `HiddenBodyPieces=2`
+konnte deshalb Kicks und Körper ebenfalls ausblenden.
 
-Benutzerabnahme am 25.07.2026:
+Die endgültige Stage-Erzeugung liest stattdessen das lokale Retail-Modell und
+die Textur. Eine validierte Mesh-Verzeichnis-Suche findet 4546 Vertices und
+6216 Dreiecke. Eine Zusammenhangsanalyse wählt genau sechs Arm-Komponenten
+(links/rechts, je drei LODs), rasterisiert deren UV-Dreiecke und setzt nach
+einer 2-Pixel-Erweiterung 48.190 DXT3-Alpha-Pixel transparent. Eine getrennte
+Hand-/Handgelenkmaske muss überlappungsfrei bleiben; andernfalls bricht das
+Stage-Skript ab.
 
-- **Piece #1 trägt die Arme.** Mit `HiddenBodyPieces=2` sind Hände und Waffe
-  sichtbar, Ober- und Unterarm verschwinden;
-- der Wert ist als `kPlayerBodyArmPieceMask` zusätzlich Code-Default, greift
-  also auch ohne vorhandene `fearvr.ini` und ohne Tastendruck.
+Benutzerabnahme am 27.07.2026:
 
-Die Hände stammen vom Player-Body, nicht vom Waffenmodell: Die Waffe ist ein
-eigenes Objekt am `RightHand`-Socket. Den gesamten Body zu verstecken liefert
-deshalb eine schwebende Waffe ohne Hände und ist keine Alternative.
+- `Show arms: OFF` blendet nur Ober- und Unterarme aus;
+- Hände, Torso und Beine bleiben sichtbar, einschließlich Kick-Animationen;
+- `Show arms: ON` stellt die Retail-Arme sofort wieder her;
+- erneutes Ausschalten funktioniert ohne Neustart;
+- `ShowArms=0` wurde in `stage\userdata-m5\fearvr.ini` persistiert.
+
+F11 und `HiddenBodyPieces` bleiben reine Entwicklerdiagnosen; der alte Wert
+`2` wird beim Laden auf `0` migriert.
 
 ## 13. Lehnen über die Neigung der linken Hand
 
@@ -479,7 +489,7 @@ Im Spiel bestätigt:
 
 - vollständige semantische Controllerbelegung (§10);
 - natives VR-Menü im ESC-Menü, Auswahl sauber (§11, §14);
-- nur Hände und Waffe sichtbar, Ober- und Unterarm ausgeblendet (§12);
+- Arme schaltbar; Hände, Torso, Beine und Waffe sichtbar (§12);
 - Lehnen über die Neigung der linken Hand, Richtung und Schwelle passend (§13).
 
 M5-Gate:
@@ -547,7 +557,7 @@ seither geändert hat.
 - **Spielstände bleiben erhalten.** `stage\userdata-*` enthält Saves, Profile
   und Screenshots — das sind Benutzerdaten, keine Moddateien. Alle zehn
   `userdata-*`-Verzeichnisse blieben unangetastet, `fearvr.ini` inklusive
-  `HiddenBodyPieces=2` ebenfalls. Entfernt wird das nur mit
+  `fearvr.ini` ebenfalls. Entfernt wird das nur mit
   `-IncludeUserData`.
 - **Retail unverändert.** Der SHA-256 der `FEAR.exe` wird vor und nach jedem
   Lauf geprüft; eine Steam-Dateiprüfung ist nicht nötig.

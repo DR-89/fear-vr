@@ -1,6 +1,7 @@
 #include "stereo_hook.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -22,8 +23,12 @@
 #include "controller_mapping.h"
 #include "head_tracking_math.h"
 #include "input_state.h"
+#include "lean_collision.h"
+#include "melee_actions.h"
 #include "protocol.h"
 #include "stereo_math.h"
+#include "vertical_camera_height.h"
+#include "climb_grip.h"
 #include "two_handed_grip.h"
 
 namespace fearvr {
@@ -33,6 +38,8 @@ using IsHostConnectedFunction = BOOL(__cdecl*)();
 using IsStereoAvailableFunction = BOOL(__cdecl*)();
 using IsStereoEnabledFunction = BOOL(__cdecl*)();
 using SetStereoEnabledFunction = void(__cdecl*)(BOOL);
+using SetFovScalePercentFunction =
+    void(__cdecl*)(std::uint32_t);
 using GetBooleanOptionFunction = BOOL(__cdecl*)();
 using SetBooleanOptionFunction = void(__cdecl*)(BOOL);
 using SetMenuActiveFunction = void(__cdecl*)(BOOL);
@@ -98,6 +105,7 @@ IsHostConnectedFunction g_isHostConnected = nullptr;
 IsStereoAvailableFunction g_isStereoAvailable = nullptr;
 IsStereoEnabledFunction g_isStereoEnabled = nullptr;
 SetStereoEnabledFunction g_setStereoEnabled = nullptr;
+SetFovScalePercentFunction g_setFovScalePercent = nullptr;
 GetBooleanOptionFunction g_isTranslationEnabled = nullptr;
 SetBooleanOptionFunction g_setTranslationEnabled = nullptr;
 GetBooleanOptionFunction g_isStereoHudEnabled = nullptr;
@@ -217,24 +225,33 @@ volatile LONG g_weaponAimGuideActiveLogged = 0;
 volatile LONG g_twoHandedGripActiveLogged = 0;
 volatile LONG g_handPoseGapBridgedLogged = 0;
 volatile LONG g_weaponSocketSyncActiveLogged = 0;
+volatile LONG g_weaponCameraBaseSyncActiveLogged = 0;
+volatile LONG g_directionalCameraHeightBypassLogged = 0;
 volatile LONG g_armGeometryInspectedLogged = 0;
 volatile LONG g_armGeometryEmptyAttempts = 0;
 volatile LONG g_armGeometryNeverAvailableLogged = 0;
+volatile LONG g_bodyMaterialOverrideLogged = 0;
 // Retail player.Model00p exposes four unnamed pieces, so the piece carrying
 // the hands can only be identified by isolating them one at a time.
 constexpr std::uint32_t kPlayerBodyPieceMaskAll = 0xFU;
 // Benutzerbestätigt am 25.07.2026: Piece #1 trägt die Arme. Ohne dieses Piece
 // bleiben Hände und Waffe sichtbar, Ober- und Unterarm verschwinden.
-constexpr std::uint32_t kPlayerBodyArmPieceMask = 0x2U;
-std::uint32_t g_hiddenBodyPieceMask = kPlayerBodyArmPieceMask;
+// Piece #1 ist tatsaechlich Body_Group: Es enthaelt Arme, Torso und Beine
+// gemeinsam. Der alte Wert 2 entfernte dadurch auch alle sichtbaren Kick-
+// Animationen. Die Armflaechen werden nun im lokal erzeugten Alpha-Material
+// ausgeblendet; alle vier Mesh-Pieces muessen sichtbar bleiben.
+constexpr std::uint32_t kLegacyPlayerBodyArmPieceMask = 0x2U;
+std::uint32_t g_hiddenBodyPieceMask = 0;
 std::uint32_t g_bodyPieceProbeStep = 0;
 bool g_bodyPieceProbeKeyWasDown = false;
+// Variante A: Arme sind standardmaessig ausgeblendet. Der VR-Menueschalter
+// setzt bei Bedarf wieder das unveraenderte Retail-Material ein.
+bool g_showPlayerArms = false;
 std::uint64_t g_hapticRequestId = 0;
 std::uint64_t g_lastInputSampleId = 0;
 ULONGLONG g_lastInputSampleTick = 0;
 std::uint32_t g_lastInputButtons = 0;
 std::uint32_t g_lastActiveHands = 0;
-bool g_controllerRecenterWasDown = false;
 ULONGLONG g_lastFireHapticTick = 0;
 volatile LONG g_fireHapticActiveLogged = 0;
 std::uint32_t g_lastMenuButtons = 0;
@@ -257,6 +274,39 @@ ULONGLONG g_reloadPulseUntil = 0;
 ULONGLONG g_grenadePulseUntil = 0;
 bool g_secondaryWasDown = false;
 bool g_grenadeConsumed = false;
+ULONGLONG g_meleePulseUntil = 0;
+ULONGLONG g_slideDuckPulseUntil = 0;
+ULONGLONG g_slideForwardPulseUntil = 0;
+ULONGLONG g_meleePeakReportTick = 0;
+MeleeActionState g_meleeActions{};
+bool g_meleeThrustEnabled = true;
+bool g_meleeWeaponStrikeEnabled = true;
+bool g_meleeOffHandStrikeEnabled = true;
+bool g_meleeJumpKickEnabled = true;
+bool g_meleeSlideKickEnabled = true;
+struct SlideKickViewStabilization {
+    LTRotation localRotation;
+    float pitch{0.0F};
+    float roll{0.0F};
+    ULONGLONG startTick{0};
+    bool active{false};
+};
+SlideKickViewStabilization g_slideKickView{};
+struct RetailMovementSnapshot {
+    std::uint32_t controlFlags{0};
+    float postureDownSeconds{0.0F};
+    bool available{false};
+    bool onGround{false};
+    bool falling{false};
+    bool jumped{false};
+    bool airborne{false};
+    bool postureDownWindow{false};
+};
+RetailMovementSnapshot g_retailMovement{};
+bool g_retailMovementHadSnapshot = false;
+bool g_retailDuckWasDown = false;
+ULONGLONG g_retailPostureDownUntil = 0;
+HCONSOLEVAR g_retailPostureDownVariable = nullptr;
 thread_local bool g_semanticBitsInjected = false;
 FearVrInputState g_currentInput{};
 struct WeaponAimState {
@@ -283,9 +333,16 @@ struct WeaponAimState {
 };
 thread_local WeaponAimState g_weaponAim;
 HLOCALOBJ g_playerCameraObject = nullptr;
+VerticalCameraHeightState g_verticalCameraHeight;
+float g_visualCameraHeight = 0.0F;
+ULONGLONG g_visualCameraHeightSampleTick = 0;
+bool g_visualCameraHeightValid = false;
+constexpr ULONGLONG kVisualCameraHeightFreshMilliseconds = 100;
 HLOCALOBJ g_leftFlashlightModel = nullptr;
 HLOCALOBJ g_leftFlashlightLight = nullptr;
 const void* g_leftFlashlightWeapon = nullptr;
+// Retail hat die Waffe abgeschaltet: kein Modell, kein Zielstrahl.
+bool g_weaponDisabled = false;
 LTRigidTransform g_flashlightCameraRecovery;
 bool g_flashlightCameraOverridePending = false;
 // Genau das Objekt, dessen Transform wir entfuehrt haben. Eine
@@ -327,6 +384,9 @@ float g_crosshairOriginalValue = 0.0F;
 bool g_recoilOverrideApplied = false;
 bool g_recoilOriginalKnown = false;
 float g_recoilOriginalValue = -1.0F;
+bool g_cameraCollisionRaycastApplied = false;
+bool g_cameraCollisionOriginalKnown = false;
+float g_cameraCollisionOriginalUseObject = 1.0F;
 bool g_weaponAimGuideEnabled = true;
 bool g_controllerHapticsEnabled = true;
 // Mithalten der Waffe mit der linken Hand. `active` wird im
@@ -334,6 +394,38 @@ bool g_controllerHapticsEnabled = true;
 // dem Clientthread, deshalb reicht ein einfacher Wert.
 bool g_twoHandedGripEnabled = true;
 bool g_twoHandedGripActive = false;
+// Handklettern an Leitern. Stufe 1: Die Greif- und Zugauswertung laeuft und
+// wird protokolliert, greift aber noch nicht in die Fortbewegung ein. Dafuer
+// fehlt die Leitererkennung — `LadderMgr::Instance().m_pLadder` in
+// GameOrig.dll, deren Adresse noch nicht belegt ist.
+// Physisches Lehnen: Der Kopfversatz aus dem Headtracking bewegt den
+// Blickpunkt, an Waenden begrenzt. Retails eigenes Lehnen kippt nur die
+// Kamera, der Blickpunkt bleibt dabei in der Spielerposition stehen.
+bool g_physicalLeanEnabled = true;
+// Verstaerkung des physischen Lehnens, in Prozent. Ein Kopfversatz von zehn
+// Zentimetern wirkt bei 200 wie zwanzig — man muss sich also nur halb so weit
+// beugen, um hinter einer Deckung hervorzusehen. Der gemessene Versatz bleibt
+// vorher auf 25 cm begrenzt, die Wirkung damit auf einen halben Meter.
+int g_leanScalePercent = 200;
+LeanCollisionState g_leanCollision;
+float g_leanTranslationScale = 1.0F;
+// Der Versatz, um den der Blickpunkt gegenueber dem Spielerkoerper steht.
+// Die Handposen bekommen ihn ebenfalls: Sie sind relativ zum HMD gerechnet,
+// werden aber an die Spielerposition gehaengt — ohne diesen Ausgleich wandert
+// die Waffe beim Lehnen aus der Hand. Der Retail-Koerper und seine
+// Kollisionskapsel bleiben bewusst stehen: automatisches Nachziehen erzeugte
+// Gegensteuern, Pendeln und konnte den Blick hinter den Koerper setzen.
+LTVector g_leanViewOffsetUnits;
+bool g_climbingEnabled = false;
+ClimbGripState g_climbGrip;
+bool g_climbWasGripping = false;
+// `g_climbOnLadder`: Der Spieler haengt an einer Leiter. Solange das gilt und
+// Handklettern eingeschaltet ist, gehoert die Vorwaertsachse den Haenden —
+// ohne Griff steht sie still, statt an den Stick zurueckzufallen.
+// `g_climbActive`: zusaetzlich greift gerade eine Hand.
+bool g_climbOnLadder = false;
+bool g_climbActive = false;
+float g_climbAxis = 0.0F;
 // Rund 0,1 s bei 60 Bildern: kurz genug, um nicht traege zu wirken.
 constexpr float kTwoHandBlendRampPerFrame = 0.15F;
 struct TwoHandedGripState {
@@ -428,6 +520,9 @@ float g_headBobOriginalScale = 1.0F;
 float g_headBobOriginalDebugMode = 0.0F;
 float g_headBobOriginalAmplitudes[12]{};
 int g_turnSpeedPreset = 1;
+constexpr std::array<std::uint32_t, 4> kFovScalePercents{
+    100U, 110U, 120U, 130U};
+int g_fovScalePreset = 0;
 wchar_t g_vrSettingsPath[MAX_PATH]{};
 bool g_vrSettingsFilePresent = false;
 
@@ -461,6 +556,16 @@ VrMenuToggle g_vrMenuAimGuide;
 VrMenuToggle g_vrMenuHaptics;
 // `enabled` zeigt die Rechtshaenderbelegung, `disabled` die gespiegelte.
 VrMenuToggle g_vrMenuHandedness;
+// `enabled` zeigt das Klettern mit den Haenden, `disabled` die
+// Retail-Steuerung ueber den Stick.
+VrMenuToggle g_vrMenuClimbing;
+// `enabled` = physisches Lehnen, `disabled` = nur Retails Kameraneigung.
+VrMenuToggle g_vrMenuPhysicalLean;
+// Master-Schalter; die vier Einzelaktionen bleiben bewusst in fearvr.ini,
+// damit die native, flache Menue-Seite nicht vier weitere Zeilen bekommt.
+VrMenuToggle g_vrMenuMelee;
+VrMenuToggle g_vrMenuArms;
+VrMenuControl g_vrMenuFovScale[kFovScalePercents.size()];
 VrMenuControl g_vrMenuTurnSpeed[3];
 VrMenuControl g_vrMenuRecenter;
 VrMenuControl g_vrMenuDefaults;
@@ -541,12 +646,64 @@ constexpr std::size_t kRetailCameraPositionOffset = 0x10;
 // Teilrotationen. Retail 1.08 haelt keinen fertigen Member dafuer bereit.
 constexpr std::size_t kRetailCameraRotationSecondOffset = 0x1C;
 constexpr std::size_t kRetailCameraRotationFirstOffset = 0xB8;
+// m_tfWorld starts at +0xAC and occupies 28 bytes on x86. The following
+// member is the animated camera-socket rotation which Retail copies back into
+// m_rLocalRotation when an attached camera animation ends.
+constexpr std::size_t kRetailCameraTargetAttachRotationOffset = 0xC8;
 constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
 // Retail CClientWeapon starts m_RightHandWeapon at +0x10. Its first LTObjRef
 // occupies 16 bytes on x86 (vptr, list links, HOBJECT), putting the model
 // HOBJECT at +0x1c and m_hMuzzleSocket at +0x50.
 constexpr std::size_t kRetailRightWeaponModelObjectOffset = 0x1C;
 constexpr std::size_t kRetailRightWeaponMuzzleSocketOffset = 0x50;
+// `CClientWeapon::m_LeftHandWeapon.m_hObject`. Jede Waffe legt dieses zweite,
+// fuer die linke Hand modellierte Objekt an, auch wenn sie einhaendig ist.
+// Belegt aus `SetVisible`, das es aus `[esi+0xD4]` liest — die Bytes stehen
+// im geprueften Mustervergleich dieser Funktion.
+constexpr std::size_t kRetailLeftWeaponModelObjectOffset = 0xD4;
+// `CClientWeapon::m_bDisabled`. Retail schaltet die Waffe darueber ab, sobald
+// sie nicht in der Hand liegt — an der Leiter (`LadderMgr` ruft beim Aufstieg
+// `CClientWeaponMgr::DisableWeapons`), in Zwischensequenzen und am Geschuetz.
+// Das Modell ist dann unsichtbar, und der Zielstrahl darf es auch nicht mehr
+// geben. Belegt aus `SetVisible`, das an dieser Stelle `m_bVisible` setzt und
+// bei gesetztem Flag sofort zurueckkehrt.
+constexpr std::size_t kRetailWeaponDisabledOffset = 0x223;
+constexpr std::size_t kRetailSetWeaponVisibleDisabledProbeOffset = 0x18;
+// Leiterzustand. `LadderMgr::Instance()` ist ein Magic-Static-Accessor: Er
+// gibt die Adresse eines statischen Objekts zurueck, dessen erster Member
+// `m_pLadder` ist — `IsClimbing()` prueft nur, ob dieser Zeiger gesetzt ist.
+// Belegt an zwei Stellen in GameOrig.dll: Der Accessor endet mit
+// `mov eax, <Objekt>` / `ret`, und die Aufrufstelle in CMoveMgr, die
+// „%s - jump from ladder" protokolliert, liest unmittelbar danach
+// `cmp dword ptr [eax], 0`. `CanReleaseLadder` beginnt mit demselben
+// `cmp dword ptr [ecx], 0`, womit der Offset 0 doppelt belegt ist.
+constexpr std::uintptr_t kRetailLadderInstanceRva = 0x00027B50U;
+constexpr std::uintptr_t kRetailLadderObjectRva = 0x002D7AA8U;
+// mov cl, byte ptr [guard] — die vier Adressbytes werden beim Laden
+// relokiert und deshalb nicht mitgeprueft.
+constexpr unsigned char kRetailLadderInstancePrefix[] = {0x8A, 0x0D};
+// mov eax, 1 / test al, cl / jne
+constexpr unsigned char kRetailLadderInstanceGuard[] = {
+    0xB8, 0x01, 0x00, 0x00, 0x00, 0x84, 0xC8, 0x75};
+// Offset des abschliessenden `mov eax, <Objekt>` / `ret` im Accessor.
+constexpr std::size_t kRetailLadderInstanceReturnOffset = 0x34;
+// CMoveMgr. Der globale Zeiger wird im Konstruktor gesetzt und im
+// registrierten `PlayerLeash`-Konsolenprogramm zweimal geladen. Weitere,
+// unabhaengige Proben belegen die hier gelesenen Zustandsfelder.
+constexpr std::uintptr_t kRetailMoveManagerPointerRva = 0x002D8D8CU;
+constexpr std::uintptr_t kRetailMoveManagerPointerProbeRva = 0x0007AB00U;
+constexpr std::uintptr_t kRetailMoveFallingProbeRva = 0x00100179U;
+constexpr std::uintptr_t kRetailMoveOnGroundProbeRva = 0x000230BCU;
+constexpr std::uintptr_t kRetailMoveJumpedProbeRva = 0x001320F6U;
+constexpr std::uintptr_t kRetailPostureDownProbeRva = 0x0007FDE6U;
+constexpr std::uintptr_t kRetailPostureDownVarTrackRva = 0x002D8F04U;
+constexpr std::size_t kRetailMoveControlFlagsOffset = 0x28;
+constexpr std::size_t kRetailMoveOnGroundOffset = 0x64;
+constexpr std::size_t kRetailMoveFallingOffset = 0x66;
+constexpr std::size_t kRetailMoveJumpedOffset = 0x78;
+constexpr std::uint32_t kRetailControlFlagForward = 1U << 0;
+constexpr std::uint32_t kRetailControlFlagDuck = 1U << 5;
+constexpr std::uint32_t kRetailControlFlagRun = 1U << 9;
 constexpr int kRetailTrackerGroupAimAt = 1;
 // UI-Zustand fuer den Flachbildmodus. Herleitung in
 // docs/RETAIL-ACTIVATION.md: `g_pInterfaceMgr` liegt als Zeiger bei
@@ -604,6 +761,11 @@ enum VrMenuCommand : std::uint32_t {
     kVrMenuToggleAimGuide,
     kVrMenuToggleHaptics,
     kVrMenuToggleHandedness,
+    kVrMenuToggleClimbing,
+    kVrMenuTogglePhysicalLean,
+    kVrMenuToggleMelee,
+    kVrMenuToggleArms,
+    kVrMenuCycleFovScale,
     kVrMenuCycleTurnSpeed,
     kVrMenuRecenter,
     kVrMenuDefaults,
@@ -1049,6 +1211,8 @@ int ReadVrSetting(const wchar_t* name, int fallback) noexcept {
         L"VR", name, fallback, g_vrSettingsPath);
 }
 
+void WriteVrSetting(const wchar_t* name, int value) noexcept;
+
 bool QueryBooleanOption(
     GetBooleanOptionFunction getter, bool fallback) noexcept {
     if (getter == nullptr) {
@@ -1072,9 +1236,33 @@ void SetBooleanOption(
     }
 }
 
+int FovScalePresetForPercent(int percent) noexcept {
+    const int clamped = std::clamp(
+        percent,
+        static_cast<int>(FEARVR_FOV_SCALE_MIN_PERCENT),
+        static_cast<int>(FEARVR_FOV_SCALE_MAX_PERCENT));
+    return std::clamp((clamped - 100 + 5) / 10, 0, 3);
+}
+
+std::uint32_t CurrentFovScalePercent() noexcept {
+    const int preset = std::clamp(g_fovScalePreset, 0, 3);
+    return kFovScalePercents[static_cast<std::size_t>(preset)];
+}
+
+void ApplyFovScalePreset() noexcept {
+    if (g_setFovScalePercent == nullptr) {
+        return;
+    }
+    __try {
+        g_setFovScalePercent(CurrentFovScalePercent());
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void InitializeVrSettings() noexcept {
     LocateVrSettingsFile();
     if (!g_vrSettingsFilePresent) {
+        ApplyFovScalePreset();
         return;
     }
 
@@ -1107,16 +1295,46 @@ void InitializeVrSettings() noexcept {
         ReadVrSetting(L"Haptics", 1) != 0;
     g_twoHandedGripEnabled =
         ReadVrSetting(L"TwoHandGrip", 1) != 0;
+    g_meleeThrustEnabled =
+        ReadVrSetting(L"MeleeGestures", 1) != 0;
+    g_meleeWeaponStrikeEnabled =
+        ReadVrSetting(L"MeleeWeaponStrike", 1) != 0;
+    g_meleeOffHandStrikeEnabled =
+        ReadVrSetting(L"MeleeOffHandStrike", 1) != 0;
+    g_meleeJumpKickEnabled =
+        ReadVrSetting(L"MeleeJumpKick", 1) != 0;
+    g_meleeSlideKickEnabled =
+        ReadVrSetting(L"MeleeSlideKick", 1) != 0;
+    // Klettern greift in die Fortbewegung ein und bleibt deshalb
+    // ausdruecklich abschaltbar; Standard ist aus, solange es nicht im Spiel
+    // bestaetigt ist.
+    g_climbingEnabled = ReadVrSetting(L"Climbing", 0) != 0;
+    g_physicalLeanEnabled = ReadVrSetting(L"PhysicalLean", 1) != 0;
+    g_leanScalePercent =
+        std::clamp(ReadVrSetting(L"LeanScale", 200), 100, 400);
     g_leftHandedBindings =
         ReadVrSetting(L"LeftHanded", 0) != 0;
+    g_showPlayerArms =
+        ReadVrSetting(L"ShowArms", 0) != 0;
+    g_fovScalePreset = FovScalePresetForPercent(
+        ReadVrSetting(L"FovScale", 100));
+    ApplyFovScalePreset();
     g_turnSpeedPreset =
         std::clamp(ReadVrSetting(L"TurnSpeed", 1), 0, 2);
     g_hiddenBodyPieceMask = static_cast<std::uint32_t>(
         std::clamp(
-            ReadVrSetting(
-                L"HiddenBodyPieces",
-                static_cast<int>(kPlayerBodyArmPieceMask)),
+            ReadVrSetting(L"HiddenBodyPieces", 0),
             0, 0xF));
+    if (g_hiddenBodyPieceMask ==
+        kLegacyPlayerBodyArmPieceMask) {
+        g_hiddenBodyPieceMask = 0;
+        WriteVrSetting(L"HiddenBodyPieces", 0);
+        Report(
+            "INFO", "vr_body_piece_mask_migrated",
+            "Legacy HiddenBodyPieces=2 hid Body_Group including torso and "
+            "legs. All body pieces are now visible; the locally generated "
+            "alpha material removes only the arm UV islands.");
+    }
     // Keep the F11 probe in step with a persisted isolation mask so the next
     // press continues the walk instead of jumping back to the start.
     g_bodyPieceProbeStep =
@@ -1171,7 +1389,27 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(
         L"TwoHandGrip", g_twoHandedGripEnabled ? 1 : 0);
     WriteVrSetting(
+        L"MeleeGestures", g_meleeThrustEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"MeleeWeaponStrike",
+        g_meleeWeaponStrikeEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"MeleeOffHandStrike",
+        g_meleeOffHandStrikeEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"MeleeJumpKick", g_meleeJumpKickEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"MeleeSlideKick", g_meleeSlideKickEnabled ? 1 : 0);
+    WriteVrSetting(L"Climbing", g_climbingEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"PhysicalLean", g_physicalLeanEnabled ? 1 : 0);
+    WriteVrSetting(L"LeanScale", g_leanScalePercent);
+    WriteVrSetting(
         L"LeftHanded", g_leftHandedBindings ? 1 : 0);
+    WriteVrSetting(L"ShowArms", g_showPlayerArms ? 1 : 0);
+    WriteVrSetting(
+        L"FovScale",
+        static_cast<int>(CurrentFovScalePercent()));
     WriteVrSetting(L"TurnSpeed", g_turnSpeedPreset);
     g_vrSettingsFilePresent = true;
 }
@@ -1311,6 +1549,10 @@ void HideRetailVrSettingsControls() noexcept {
         g_vrMenuAimGuide,
         g_vrMenuHaptics,
         g_vrMenuHandedness,
+        g_vrMenuClimbing,
+        g_vrMenuPhysicalLean,
+        g_vrMenuMelee,
+        g_vrMenuArms,
     };
     for (const VrMenuToggle& toggle : toggles) {
         SetRetailControlVisible(toggle.enabled, false);
@@ -1318,6 +1560,9 @@ void HideRetailVrSettingsControls() noexcept {
     }
     for (const VrMenuControl& turnSpeed : g_vrMenuTurnSpeed) {
         SetRetailControlVisible(turnSpeed, false);
+    }
+    for (const VrMenuControl& fovScale : g_vrMenuFovScale) {
+        SetRetailControlVisible(fovScale, false);
     }
     SetRetailControlVisible(g_vrMenuRecenter, false);
     SetRetailControlVisible(g_vrMenuDefaults, false);
@@ -1346,12 +1591,22 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
             g_vrMenuTurnSpeed[index],
             index == g_turnSpeedPreset);
     }
+    for (int index = 0; index < 4; ++index) {
+        SetRetailControlVisible(
+            g_vrMenuFovScale[index],
+            index == g_fovScalePreset);
+    }
     SetRetailVrToggleVisible(
         g_vrMenuAimGuide, g_weaponAimGuideEnabled);
     SetRetailVrToggleVisible(
         g_vrMenuHaptics, g_controllerHapticsEnabled);
     SetRetailVrToggleVisible(
         g_vrMenuHandedness, !g_leftHandedBindings);
+    SetRetailVrToggleVisible(g_vrMenuClimbing, g_climbingEnabled);
+    SetRetailVrToggleVisible(
+        g_vrMenuPhysicalLean, g_physicalLeanEnabled);
+    SetRetailVrToggleVisible(g_vrMenuMelee, g_meleeThrustEnabled);
+    SetRetailVrToggleVisible(g_vrMenuArms, g_showPlayerArms);
     SetRetailControlVisible(g_vrMenuRecenter, true);
     SetRetailControlVisible(g_vrMenuDefaults, true);
     SetRetailControlVisible(g_vrMenuBack, true);
@@ -1422,8 +1677,11 @@ void LeaveRetailVrSettingsPage() noexcept {
         "The native Retail system-menu controls were restored.");
 }
 
-void RequestVrRecenter() noexcept {
+void ResetVrTrackingBasis() noexcept {
     InterlockedIncrement(&g_trackingResetGeneration);
+}
+
+void RequestVrPanelRecenter() noexcept {
     if (g_requestRecenter != nullptr) {
         __try {
             g_requestRecenter();
@@ -1443,7 +1701,26 @@ void ApplyVrDefaults() noexcept {
     g_twoHandedGripEnabled = true;
     g_leftHandedBindings = false;
     g_turnSpeedPreset = 1;
-    RequestVrRecenter();
+    g_fovScalePreset = 0;
+    ApplyFovScalePreset();
+    g_climbingEnabled = false;
+    g_meleeThrustEnabled = true;
+    g_meleeWeaponStrikeEnabled = true;
+    g_meleeOffHandStrikeEnabled = true;
+    g_meleeJumpKickEnabled = true;
+    g_meleeSlideKickEnabled = true;
+    g_showPlayerArms = false;
+    ResetMeleeActions(g_meleeActions);
+    g_meleePulseUntil = 0;
+    g_slideDuckPulseUntil = 0;
+    g_slideForwardPulseUntil = 0;
+    ResetClimbGrip(g_climbGrip);
+    g_climbActive = false;
+    g_climbOnLadder = false;
+    g_climbAxis = 0.0F;
+    g_climbWasGripping = false;
+    ResetVrTrackingBasis();
+    RequestVrPanelRecenter();
 }
 
 bool BuildRetailVrMenuControls(void* menu) noexcept {
@@ -1527,6 +1804,30 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
         L"Controls: RIGHT-HANDED", kVrMenuToggleHandedness);
     g_vrMenuHandedness.disabled = AddRetailVrMenuControl(
         L"Controls: LEFT-HANDED", kVrMenuToggleHandedness);
+    g_vrMenuClimbing.enabled = AddRetailVrMenuControl(
+        L"Ladder climbing: HANDS", kVrMenuToggleClimbing);
+    g_vrMenuClimbing.disabled = AddRetailVrMenuControl(
+        L"Ladder climbing: CLASSIC", kVrMenuToggleClimbing);
+    g_vrMenuPhysicalLean.enabled = AddRetailVrMenuControl(
+        L"Physical lean: ON", kVrMenuTogglePhysicalLean);
+    g_vrMenuPhysicalLean.disabled = AddRetailVrMenuControl(
+        L"Physical lean: OFF", kVrMenuTogglePhysicalLean);
+    g_vrMenuMelee.enabled = AddRetailVrMenuControl(
+        L"Melee: GESTURES", kVrMenuToggleMelee);
+    g_vrMenuMelee.disabled = AddRetailVrMenuControl(
+        L"Melee: CLASSIC", kVrMenuToggleMelee);
+    g_vrMenuArms.enabled = AddRetailVrMenuControl(
+        L"Show arms: ON", kVrMenuToggleArms);
+    g_vrMenuArms.disabled = AddRetailVrMenuControl(
+        L"Show arms: OFF", kVrMenuToggleArms);
+    g_vrMenuFovScale[0] = AddRetailVrMenuControl(
+        L"FOV scale: 100%", kVrMenuCycleFovScale);
+    g_vrMenuFovScale[1] = AddRetailVrMenuControl(
+        L"FOV scale: 110%", kVrMenuCycleFovScale);
+    g_vrMenuFovScale[2] = AddRetailVrMenuControl(
+        L"FOV scale: 120%", kVrMenuCycleFovScale);
+    g_vrMenuFovScale[3] = AddRetailVrMenuControl(
+        L"FOV scale: 130%", kVrMenuCycleFovScale);
     g_vrMenuTurnSpeed[0] = AddRetailVrMenuControl(
         L"Turn speed: SLOW",
         kVrMenuCycleTurnSpeed);
@@ -1537,7 +1838,7 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
         L"Turn speed: FAST",
         kVrMenuCycleTurnSpeed);
     g_vrMenuRecenter = AddRetailVrMenuControl(
-        L"Recenter view", kVrMenuRecenter);
+        L"Recenter 2D panel", kVrMenuRecenter);
     g_vrMenuDefaults = AddRetailVrMenuControl(
         L"Reset VR defaults", kVrMenuDefaults);
     g_vrMenuBack = AddRetailVrMenuControl(
@@ -1639,7 +1940,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         g_leftHandedBindings = !g_leftHandedBindings;
         // Der gespiegelte Zustand betrifft auch die Handkalibrierung und die
         // gepufferten Posen: beide gehoeren jetzt der jeweils anderen Hand.
-        RequestVrRecenter();
+        ResetVrTrackingBasis();
         selection = SetRetailVrToggleVisible(
             g_vrMenuHandedness, !g_leftHandedBindings);
         Report(
@@ -1647,6 +1948,81 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             g_leftHandedBindings
                 ? "Controller bindings are mirrored for left-handed play."
                 : "Controller bindings use the right-handed default.");
+        break;
+    case kVrMenuToggleClimbing:
+        g_climbingEnabled = !g_climbingEnabled;
+        // Ein Griff, der beim Umschalten noch stand, gehoert der alten
+        // Einstellung: sonst klettert der naechste Zug aus einem Griff, den
+        // es in dieser Betriebsart nie gab.
+        ResetClimbGrip(g_climbGrip);
+        g_climbActive = false;
+        g_climbOnLadder = false;
+        g_climbAxis = 0.0F;
+        g_climbWasGripping = false;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuClimbing, g_climbingEnabled);
+        Report(
+            "INFO", "vr_climbing_changed",
+            g_climbingEnabled
+                ? "Ladders are climbed by grabbing with the hands."
+                : "Ladders use the Retail stick controls.");
+        break;
+    case kVrMenuToggleMelee:
+        g_meleeThrustEnabled = !g_meleeThrustEnabled;
+        // Keine alte Pose oder ein bereits gestarteter Puls darf die neue
+        // Betriebsart ueberleben.
+        ResetMeleeActions(g_meleeActions);
+        g_meleePulseUntil = 0;
+        g_slideDuckPulseUntil = 0;
+        g_slideForwardPulseUntil = 0;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMelee, g_meleeThrustEnabled);
+        Report(
+            "INFO", "vr_melee_changed",
+            g_meleeThrustEnabled
+                ? "Motion-controller melee gestures are enabled."
+                : "Melee uses classic Retail controls only.");
+        break;
+    case kVrMenuToggleArms:
+        g_showPlayerArms = !g_showPlayerArms;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuArms, g_showPlayerArms);
+        Report(
+            "INFO", "vr_player_arms_changed",
+            g_showPlayerArms
+                ? "Player upper and lower arms use the visible Retail "
+                  "material."
+                : "Player upper and lower arms use the transparent VR "
+                  "material; hands, torso and legs remain visible.");
+        break;
+    case kVrMenuCycleFovScale: {
+        g_fovScalePreset = (g_fovScalePreset + 1) % 4;
+        for (int index = 0; index < 4; ++index) {
+            SetRetailControlVisible(
+                g_vrMenuFovScale[index],
+                index == g_fovScalePreset);
+        }
+        ApplyFovScalePreset();
+        selection = g_vrMenuFovScale[g_fovScalePreset];
+        char message[96]{};
+        std::snprintf(
+            message, sizeof(message),
+            "Stereo camera and OpenXR projection FOV scale set to %u%%.",
+            CurrentFovScalePercent());
+        Report("INFO", "vr_fov_scale_changed", message);
+        break;
+    }
+    case kVrMenuTogglePhysicalLean:
+        g_physicalLeanEnabled = !g_physicalLeanEnabled;
+        ResetLeanCollision(g_leanCollision);
+        g_leanTranslationScale = 1.0F;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuPhysicalLean, g_physicalLeanEnabled);
+        Report(
+            "INFO", "vr_physical_lean_changed",
+            g_physicalLeanEnabled
+                ? "Leaning moves the viewpoint, limited by the world."
+                : "Leaning only tilts the camera, as in the original game.");
         break;
     case kVrMenuCycleTurnSpeed:
         g_turnSpeedPreset = (g_turnSpeedPreset + 1) % 3;
@@ -1658,7 +2034,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         selection = g_vrMenuTurnSpeed[g_turnSpeedPreset];
         break;
     case kVrMenuRecenter:
-        RequestVrRecenter();
+        RequestVrPanelRecenter();
         selection = g_vrMenuRecenter;
         break;
     case kVrMenuDefaults:
@@ -1959,6 +2335,81 @@ void UpdateCrosshairOverride() noexcept {
     UpdateInteractionReachOverride(stereoAimGuideEnabled);
 }
 
+void RestoreRetailCameraCollisionPath() noexcept {
+    if (!g_cameraCollisionRaycastApplied ||
+        !g_cameraCollisionOriginalKnown ||
+        g_client == nullptr) {
+        return;
+    }
+    __try {
+        if (g_client->SetConsoleVariableFloat(
+                "CameraCollisionUseObject",
+                g_cameraCollisionOriginalUseObject) == LT_OK) {
+            g_cameraCollisionRaycastApplied = false;
+            Report(
+                "INFO", "vr_camera_collision_retail_restored",
+                "Retail's original camera-collision path was restored.");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Retail normally moves an invisible collision model from the previous camera
+// position to the desired one. Contact resolution can alternate between
+// nearby valid positions and is visible as first-person camera wobble in VR.
+// Its built-in raycast fallback keeps anti-clipping without that moving body.
+void UpdateVrCameraCollisionPath() noexcept {
+    if (g_client == nullptr ||
+        g_isStereoEnabled == nullptr ||
+        g_isFlatPanelActive == nullptr) {
+        return;
+    }
+
+    bool nativeVrWorld = false;
+    __try {
+        nativeVrWorld =
+            g_isStereoEnabled() != FALSE &&
+            g_isFlatPanelActive() == FALSE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+
+    if (!g_cameraCollisionOriginalKnown) {
+        __try {
+            const HCONSOLEVAR variable =
+                g_client->GetConsoleVariable(
+                    "CameraCollisionUseObject");
+            if (variable == nullptr) {
+                return;
+            }
+            g_cameraCollisionOriginalUseObject =
+                g_client->GetConsoleVariableFloat(variable);
+            g_cameraCollisionOriginalKnown = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return;
+        }
+    }
+
+    if (!nativeVrWorld) {
+        RestoreRetailCameraCollisionPath();
+        return;
+    }
+    if (g_cameraCollisionRaycastApplied) {
+        return;
+    }
+    __try {
+        if (g_client->SetConsoleVariableFloat(
+                "CameraCollisionUseObject", 0.0F) == LT_OK) {
+            g_cameraCollisionRaycastApplied = true;
+            Report(
+                "INFO", "vr_camera_collision_raycast_enabled",
+                "Native VR uses Retail's raycast camera anti-clipping "
+                "instead of its moving collision model.");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 // Liefert die Mündung in Weltkoordinaten.
 //
 // Bevorzugt wird die Rekonstruktion aus derselben Transformation, mit der auch
@@ -2047,6 +2498,190 @@ unsigned char* ResolveRetailPlayerCamera() noexcept {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
     }
+}
+
+bool RotationIsFiniteAndUsable(const LTRotation& rotation) noexcept {
+    const float magnitude = rotation.GetComponentMagSqr();
+    return std::isfinite(rotation.m_Quat[LTRotation::QX]) &&
+           std::isfinite(rotation.m_Quat[LTRotation::QY]) &&
+           std::isfinite(rotation.m_Quat[LTRotation::QZ]) &&
+           std::isfinite(rotation.m_Quat[LTRotation::QW]) &&
+           std::isfinite(magnitude) && magnitude > 0.25F &&
+           magnitude < 4.0F;
+}
+
+bool RotationToPitchYawRoll(
+    const LTRotation& rotation, float& pitch,
+    float& yaw, float& roll) noexcept {
+    LTVector right;
+    LTVector up;
+    LTVector forward;
+    rotation.GetVectors(right, up, forward);
+    pitch = std::asin(std::clamp(-forward.y, -1.0F, 1.0F));
+    yaw = std::atan2(forward.x, forward.z);
+    roll = std::atan2(right.y, up.y);
+    return std::isfinite(pitch) &&
+           std::isfinite(yaw) &&
+           std::isfinite(roll);
+}
+
+void BeginSlideKickViewStabilization() noexcept {
+    const ULONGLONG now = GetTickCount64();
+    if (g_slideKickView.active) {
+        // A second kick may start while Retail is still finishing the first
+        // camera animation. Keep the original pre-kick basis; recapturing here
+        // could turn an intermediate animated pitch into the new neutral view.
+        g_slideKickView.startTick = now;
+        Report(
+            "INFO", "slide_kick_view_stabilization_extended",
+            "Another slide kick extended the existing stable camera basis.");
+        return;
+    }
+
+    unsigned char* const camera = ResolveRetailPlayerCamera();
+    if (camera == nullptr) {
+        return;
+    }
+
+    LTRotation localRotation;
+    __try {
+        std::memcpy(
+            localRotation.m_Quat,
+            camera + kRetailCameraRotationSecondOffset,
+            sizeof(localRotation.m_Quat));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (!RotationIsFiniteAndUsable(localRotation)) {
+        return;
+    }
+    localRotation.Normalize();
+    float pitch = 0.0F;
+    float yaw = 0.0F;
+    float roll = 0.0F;
+    if (!RotationToPitchYawRoll(
+            localRotation, pitch, yaw, roll)) {
+        return;
+    }
+
+    g_slideKickView.localRotation = localRotation;
+    g_slideKickView.pitch = pitch;
+    g_slideKickView.roll = roll;
+    g_slideKickView.startTick = now;
+    g_slideKickView.active = true;
+    Report(
+        "INFO", "slide_kick_view_stabilization_started",
+        "Captured the pre-kick local camera rotation.");
+}
+
+// Retails CPlayerCamera speichert beim Verlassen einer CAM_Rotation-Animation
+// deren letzte Socket-Drehung als neue lokale Blickrichtung. In VR gehoert die
+// Blickneigung jedoch ausschliesslich dem HMD. Solange der von uns ausgelöste
+// Slide Kick läuft, halten wir deshalb Pitch und Roll von m_rLocalRotation
+// sowie m_rTargetAttachRot auf dem Wert vor dem Tritt. Retails aktueller Yaw
+// wird dagegen in jedem Frame übernommen, damit Snap-Turn weiterhin sofort
+// funktioniert. Position, Körperdrehung und die gesamte Körperanimation
+// bleiben unverändert.
+void MaintainSlideKickViewBase() noexcept {
+    if (!g_slideKickView.active) {
+        return;
+    }
+    unsigned char* const camera = ResolveRetailPlayerCamera();
+    if (camera == nullptr) {
+        g_slideKickView = {};
+        return;
+    }
+    LTRotation worldRotation;
+    LTRotation currentLocalRotation;
+    __try {
+        std::memcpy(
+            worldRotation.m_Quat,
+            camera + kRetailCameraRotationFirstOffset,
+            sizeof(worldRotation.m_Quat));
+        std::memcpy(
+            currentLocalRotation.m_Quat,
+            camera + kRetailCameraRotationSecondOffset,
+            sizeof(currentLocalRotation.m_Quat));
+        if (!RotationIsFiniteAndUsable(worldRotation) ||
+            !RotationIsFiniteAndUsable(currentLocalRotation)) {
+            g_slideKickView = {};
+            return;
+        }
+        worldRotation.Normalize();
+        currentLocalRotation.Normalize();
+        float ignoredPitch = 0.0F;
+        float currentYaw = 0.0F;
+        float ignoredRoll = 0.0F;
+        if (!RotationToPitchYawRoll(
+                currentLocalRotation, ignoredPitch,
+                currentYaw, ignoredRoll)) {
+            g_slideKickView = {};
+            return;
+        }
+        g_slideKickView.localRotation = LTRotation(
+            g_slideKickView.pitch, currentYaw,
+            g_slideKickView.roll);
+        g_slideKickView.localRotation.Normalize();
+        LTRotation targetAttachRotation =
+            worldRotation * g_slideKickView.localRotation;
+        targetAttachRotation.Normalize();
+
+        std::memcpy(
+            camera + kRetailCameraRotationSecondOffset,
+            g_slideKickView.localRotation.m_Quat,
+            sizeof(g_slideKickView.localRotation.m_Quat));
+        std::memcpy(
+            camera + kRetailCameraTargetAttachRotationOffset,
+            targetAttachRotation.m_Quat,
+            sizeof(targetAttachRotation.m_Quat));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_slideKickView = {};
+    }
+}
+
+bool ResolveSlideKickViewBase(
+    const LTRotation& retailRotation,
+    LTRotation& stableRotation) noexcept {
+    if (!g_slideKickView.active) {
+        return false;
+    }
+    unsigned char* const camera = ResolveRetailPlayerCamera();
+    if (camera == nullptr) {
+        g_slideKickView = {};
+        return false;
+    }
+
+    LTRotation worldRotation;
+    __try {
+        std::memcpy(
+            worldRotation.m_Quat,
+            camera + kRetailCameraRotationFirstOffset,
+            sizeof(worldRotation.m_Quat));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_slideKickView = {};
+        return false;
+    }
+    if (!RotationIsFiniteAndUsable(worldRotation)) {
+        g_slideKickView = {};
+        return false;
+    }
+    worldRotation.Normalize();
+    stableRotation =
+        worldRotation * g_slideKickView.localRotation;
+    stableRotation.Normalize();
+
+    const ULONGLONG elapsed =
+        GetTickCount64() - g_slideKickView.startTick;
+    constexpr ULONGLONG kStableHoldMs = 5000;
+    if (elapsed >= kStableHoldMs) {
+        g_slideKickView = {};
+        Report(
+            "INFO", "slide_kick_view_stabilized",
+            "The pre-kick camera basis was held for five seconds after the "
+            "last slide kick.");
+    }
+    (void)retailRotation;
+    return true;
 }
 
 void* ResolveRetailPickupDetector() noexcept {
@@ -2209,7 +2844,9 @@ void __fastcall HookRetailObjectDetectorUpdate(
 
 void RenderWeaponAimGuide(HLOCALOBJ camera) noexcept {
     if (g_client == nullptr || camera == nullptr ||
-        !g_weaponAim.valid || !g_weaponAimGuideEnabled) {
+        !g_weaponAim.valid || !g_weaponAimGuideEnabled ||
+        // Ohne Waffe in der Hand kein Strahl aus der Hand.
+        g_weaponDisabled) {
         return;
     }
 
@@ -2365,23 +3002,66 @@ bool PrepareTrackedEyePoses(
                 request.recenterGeneration ||
             g_headTracking.resetGeneration != resetGeneration;
         if (recenter) {
-            g_headTracking.recenter = currentCenter;
+            const FearVrPose previousRecenter =
+                g_headTracking.recenter;
+            g_headTracking.recenter =
+                YawOnlyRecenterPose(currentCenter);
+            if (!IsValidPose(g_headTracking.recenter)) {
+                g_headTracking.centered = false;
+                return false;
+            }
             g_headTracking.recenterGeneration =
                 request.recenterGeneration;
             g_headTracking.resetGeneration = resetGeneration;
             g_headTracking.centered = true;
             g_headTracking.trackingLost = false;
+            const float yawRadians = 2.0F * std::atan2(
+                g_headTracking.recenter.qy,
+                g_headTracking.recenter.qw);
+            const float previousYawRadians =
+                IsValidPose(previousRecenter)
+                ? 2.0F * std::atan2(
+                      previousRecenter.qy,
+                      previousRecenter.qw)
+                : yawRadians;
+            constexpr float kRadiansToDegrees =
+                57.29577951308232F;
+            const float yawDeltaDegrees =
+                std::remainder(
+                    yawRadians - previousYawRadians,
+                    6.283185307179586F) *
+                kRadiansToDegrees;
+            char message[320]{};
+            std::snprintf(
+                message, sizeof(message),
+                "generation=%u current_q=(%.4f,%.4f,%.4f,%.4f) "
+                "yaw=%.2f deg previous=%.2f deg delta=%.2f deg. "
+                "Physical pitch and roll remain unchanged.",
+                request.recenterGeneration,
+                static_cast<double>(currentCenter.qx),
+                static_cast<double>(currentCenter.qy),
+                static_cast<double>(currentCenter.qz),
+                static_cast<double>(currentCenter.qw),
+                static_cast<double>(
+                    yawRadians * kRadiansToDegrees),
+                static_cast<double>(
+                    previousYawRadians * kRadiansToDegrees),
+                static_cast<double>(yawDeltaDegrees));
             Report(
                 "INFO", "head_tracking_recentered",
-                "Current HMD pose is the neutral camera orientation.");
+                message);
         }
     }
     if (!g_headTracking.centered) {
         return false;
     }
 
+    // Physisches Lehnen braucht denselben Kopfversatz wie die opt-in
+    // Translation — nur wird er gleich darauf an der Weltgeometrie
+    // begrenzt, statt ungebremst durch Waende zu gehen.
     const bool translationEnabled =
-        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0;
+        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0 ||
+        g_physicalLeanEnabled;
     for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
         eyePose[eye] = EyePoseRelativeToRecenter(
             g_headTracking.recenter, currentCenter,
@@ -2399,6 +3079,87 @@ bool PrepareTrackedEyePoses(
                 : "Relative HMD rotation is active; translation is disabled.");
     }
     return true;
+}
+
+
+// Monotone Uhr in Nanosekunden fuer die Gestenerkennung. `GetTickCount64`
+// waere zu grob: Seine Aufloesung liegt bei etwa 16 ms und damit in der
+// Groessenordnung eines ganzen Bildes.
+std::uint64_t MonotonicNanoseconds() noexcept {
+    static LARGE_INTEGER frequency{};
+    if (frequency.QuadPart == 0) {
+        QueryPerformanceFrequency(&frequency);
+        if (frequency.QuadPart == 0) {
+            return 0;
+        }
+    }
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    return static_cast<std::uint64_t>(
+        (counter.QuadPart * 1000000000LL) / frequency.QuadPart);
+}
+
+// Wie viel vom physischen Kopfversatz die Welt zulaesst.
+//
+// Ein Strahl von der Spielerkameraposition entlang des gewuenschten Versatzes
+// misst die freie Strecke; `lean_collision.h` macht daraus den Anteil, der
+// uebrig bleibt. Ohne diese Pruefung wanderte der Blickpunkt beim Lehnen in
+// die Wand, denn die Kollisionskapsel des Spielers bleibt stehen.
+//
+// Einmal pro Bild, nicht pro Auge: Der Unterschied zwischen beiden Augen
+// betraegt wenige Zentimeter und wuerde nur einen zweiten Strahl kosten.
+float UpdateLeanTranslationScale(
+    const LTVector& cameraPosition,
+    const LTVector& worldOffset) noexcept {
+    if (!g_physicalLeanEnabled || g_client == nullptr) {
+        ResetLeanCollision(g_leanCollision);
+        return 1.0F;
+    }
+    const float desired = worldOffset.Mag();
+    float target = 1.0F;
+    if (desired > 1.0F) {
+        const LTVector direction = worldOffset / desired;
+        // Drei Strahlen statt einem: Mitte, und je einer seitlich versetzt.
+        // Eine Kante liegt fast immer nur vor einem Teil des Kopfes; ein
+        // einzelner Strahl trifft sie deshalb bildweise mal und mal nicht,
+        // und die Begrenzung wechselte im selben Takt. Von allen dreien gilt
+        // der engste Wert.
+        LTVector sideways = direction.Cross(LTVector(0.0F, 1.0F, 0.0F));
+        const float sidewaysLength = sideways.Mag();
+        if (sidewaysLength > 0.001F) {
+            sideways /= sidewaysLength;
+        } else {
+            sideways = LTVector(1.0F, 0.0F, 0.0F);
+        }
+        constexpr float kProbeSpreadUnits = 9.0F;
+        const LTVector probeOrigins[] = {
+            cameraPosition,
+            cameraPosition + sideways * kProbeSpreadUnits,
+            cameraPosition - sideways * kProbeSpreadUnits,
+        };
+        for (const LTVector& origin : probeOrigins) {
+            IntersectQuery query;
+            query.m_From = origin;
+            query.m_To = origin + direction *
+                (desired + kLeanCollisionMarginUnits);
+            query.m_Flags = INTERSECT_OBJECTS | IGNORE_NONSOLID;
+            IntersectInfo hit;
+            __try {
+                if (g_client->IntersectSegment(query, &hit)) {
+                    const float scale = LeanCollisionScale(
+                        desired, (hit.m_Point - origin).Mag(), true);
+                    if (scale < target) {
+                        target = scale;
+                    }
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                target = 1.0F;
+                break;
+            }
+        }
+    }
+    return UpdateLeanCollision(
+        g_leanCollision, target, MonotonicNanoseconds());
 }
 
 LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
@@ -2485,6 +3246,20 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             renderer, camera, techniqueOverride);
     }
 
+    // Der Weapon-Manager sieht sowohl CPlayerCamera::m_vPos als auch die
+    // anschliessend geglaettete Kameraobjekt-Hoehe. Seine Wahl wird fuer die
+    // Augen wiederverwendet, damit Blick, Haende und Waffe auf Treppen oder im
+    // Sprung niemals verschiedene vertikale Bezugspositionen erhalten.
+    LTVector visualBasePosition = originalTransform.m_vPos;
+    if (g_visualCameraHeightValid) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= g_visualCameraHeightSampleTick &&
+            now - g_visualCameraHeightSampleTick <=
+                kVisualCameraHeightFreshMilliseconds) {
+            visualBasePosition.y = g_visualCameraHeight;
+        }
+    }
+
     g_stereoStep = "get_camera_fov";
     float originalFovX = 0.0F;
     float originalFovY = 0.0F;
@@ -2500,6 +3275,62 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     g_stereoRecovery.fovY = originalFovY;
     g_stereoRecovery.valid = true;
 
+    LTRotation viewBaseRotation = originalTransform.m_rRot;
+    ResolveSlideKickViewBase(
+        originalTransform.m_rRot, viewBaseRotation);
+
+    // Physisches Lehnen: Der gemeinsame Kopfversatz beider Augen wird an der
+    // Welt begrenzt. Beide Augenposen enthalten ihn als denselben Summanden,
+    // deshalb genuegt es, den gesperrten Anteil hier wieder abzuziehen.
+    g_stereoStep = "limit_physical_lean";
+    if (g_physicalLeanEnabled) {
+        // `rawDelta` steckt so in den Augenposen und ist deshalb die Groesse,
+        // die unten wieder herausgerechnet wird. Gewollt ist dagegen der
+        // verstaerkte Versatz fuer Blickpunkt, Haende und Waffe.
+        const TrackingVector rawDelta =
+            HeadTranslationRelativeToRecenter(
+                g_headTracking.recenter, g_headTracking.currentCenter);
+        const float leanScale =
+            static_cast<float>(std::clamp(g_leanScalePercent, 100, 400)) *
+            0.01F;
+        const TrackingVector headDelta{
+            rawDelta.x * leanScale,
+            rawDelta.y,
+            rawDelta.z * leanScale};
+        // Der gesamte erlaubte Kopfversatz bleibt relativ zur unveraenderten
+        // Retail-Spielerposition. Es werden keine Bewegungsachsen erzeugt:
+        // Dadurch existieren weder ein nachlaufender Koerper noch ein
+        // Rueckweg, der die Kamera hinter das Koerpermodell setzen koennte.
+        TrackingVector remaining = headDelta;
+        const LTVector remainingUnits(
+            remaining.x * kGameUnitsPerMeter,
+            remaining.y * kGameUnitsPerMeter,
+            remaining.z * kGameUnitsPerMeter);
+        const LTVector worldOffset =
+            viewBaseRotation.RotateVector(remainingUnits);
+        g_leanTranslationScale = UpdateLeanTranslationScale(
+            originalTransform.m_vPos, worldOffset);
+
+        g_leanViewOffsetUnits = LTVector(
+            remaining.x * g_leanTranslationScale * kGameUnitsPerMeter,
+            remaining.y * g_leanTranslationScale * kGameUnitsPerMeter,
+            remaining.z * g_leanTranslationScale * kGameUnitsPerMeter);
+
+        // Beide Augenposen tragen den rohen Kopfversatz als denselben
+        // Summanden. Ersetzt wird er durch den verstaerkten und an der Welt
+        // begrenzten Lean-Versatz.
+        for (RelativeEyePose& tracked : trackedEye) {
+            tracked.positionMeters.x -=
+                rawDelta.x - remaining.x * g_leanTranslationScale;
+            tracked.positionMeters.y -=
+                rawDelta.y - remaining.y * g_leanTranslationScale;
+            tracked.positionMeters.z -=
+                rawDelta.z - remaining.z * g_leanTranslationScale;
+        }
+    } else {
+        g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
+    }
+
     const float stereoFovX = symmetric.halfHorizontal * 2.0F;
     const float stereoFovY = symmetric.halfVertical * 2.0F;
     LTRESULT eyeResult[FEARVR_EYE_COUNT]{LT_ERROR, LT_ERROR};
@@ -2512,18 +3343,19 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
                 ? "set_left_transform"
                 : "set_right_transform";
         LTRigidTransform eyeTransform = originalTransform;
+        eyeTransform.m_vPos = visualBasePosition;
         const RelativeEyePose& tracked = trackedEye[eye];
         const LTVector localOffset(
             tracked.positionMeters.x * kGameUnitsPerMeter,
             tracked.positionMeters.y * kGameUnitsPerMeter,
             tracked.positionMeters.z * kGameUnitsPerMeter);
         eyeTransform.m_vPos +=
-            originalTransform.m_rRot.RotateVector(localOffset);
+            viewBaseRotation.RotateVector(localOffset);
         const LTRotation headRotation(
             tracked.rotation.x, tracked.rotation.y,
             tracked.rotation.z, tracked.rotation.w);
         eyeTransform.m_rRot =
-            originalTransform.m_rRot * headRotation;
+            viewBaseRotation * headRotation;
         if (g_client->SetObjectTransform(
                 camera, eyeTransform) != LT_OK) {
             break;
@@ -2652,6 +3484,7 @@ LTRESULT InvokeStereoProtected(
 // eingerichtet.
 void ForgetWorldObjectsAfterLevelChange() noexcept {
     const bool hadState =
+        g_playerCameraObject != nullptr ||
         g_playerBodyObject != nullptr ||
         g_leftFlashlightModel != nullptr ||
         g_leftFlashlightLight != nullptr ||
@@ -2662,6 +3495,11 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     g_leftFlashlightModel = nullptr;
     g_leftFlashlightLight = nullptr;
     g_leftFlashlightWeapon = nullptr;
+    g_playerCameraObject = nullptr;
+    ResetVerticalCameraHeight(g_verticalCameraHeight);
+    g_visualCameraHeight = 0.0F;
+    g_visualCameraHeightSampleTick = 0;
+    g_visualCameraHeightValid = false;
     g_playerBodyObject = nullptr;
     g_rightHandControl = HandNodeControlState{};
     g_leftHandControl = HandNodeControlState{};
@@ -2906,6 +3744,263 @@ RegressionCommandLog g_regressionCommands[] = {
 // verpasst ihn der Retail-Bindungspfad je nach Bildrate.
 constexpr ULONGLONG kCommandPulseMs = 100;
 
+
+// Loest den globalen CMoveMgr-Zeiger ausschliesslich nach mehreren
+// gegenseitigen Proben auf. Jede Probe kommt aus einer anderen Retail-
+// Funktion:
+//
+// - PlayerLeashFn laedt denselben globalen Zeiger zweimal.
+// - eine Fallabfrage liest m_bFalling bei +0x66;
+// - die Genauigkeitsauswertung liest m_bOnGround bei +0x64;
+// - PlayerBodyMgr prueft m_bJumped/+0x78 und m_bSwimJumped/+0x79;
+// - UpdateControlFlags startet bei der DUCK-Flanke den Timer bei +0x4b0 mit
+//   dem Wert aus g_vtPostureDownTime.
+//
+// Weicht ein Byte ab, bleibt der Zustand unverfuegbar. Damit koennen spaetere
+// Kick-Meilensteine auf einer unbekannten GameOrig-Fassung nicht versehentlich
+// mit geratenen Feldern arbeiten.
+const void* const* ResolveRetailMoveManagerSlot() noexcept {
+    static const void* const* resolved = nullptr;
+    static bool attempted = false;
+    if (attempted) {
+        return resolved;
+    }
+    attempted = true;
+
+    HMODULE module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr) {
+        return nullptr;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(module);
+    __try {
+        const unsigned char* const pointerProbe =
+            base + kRetailMoveManagerPointerProbeRva;
+        constexpr unsigned char kPointerPrefix[] = {
+            0x83, 0x7C, 0x24, 0x04, 0x02, 0x74, 0x33, 0x8B, 0x0D};
+        constexpr unsigned char kPointerMiddle[] = {
+            0x33, 0xC0, 0x89, 0x81, 0x4C, 0x04, 0x00, 0x00,
+            0x8B, 0x15};
+        if (!MatchesCode(
+                pointerProbe, kPointerPrefix,
+                sizeof(kPointerPrefix)) ||
+            !MatchesCode(
+                pointerProbe + 13, kPointerMiddle,
+                sizeof(kPointerMiddle))) {
+            Report(
+                "WARN", "melee_movement_pattern_mismatch",
+                "CMoveMgr's PlayerLeash pointer probe did not match Retail "
+                "1.08; kick state diagnostics stay disabled.");
+            return nullptr;
+        }
+        const auto* const firstEncoded =
+            *reinterpret_cast<unsigned char* const*>(
+                pointerProbe + 9);
+        const auto* const secondEncoded =
+            *reinterpret_cast<unsigned char* const*>(
+                pointerProbe + 23);
+        if (firstEncoded != base + kRetailMoveManagerPointerRva ||
+            secondEncoded != firstEncoded) {
+            Report(
+                "WARN", "melee_movement_address_mismatch",
+                "CMoveMgr's two global pointer loads disagree; kick state "
+                "diagnostics stay disabled.");
+            return nullptr;
+        }
+
+        const unsigned char* const fallingProbe =
+            base + kRetailMoveFallingProbeRva;
+        constexpr unsigned char kFallingPrefix[] = {0xA1};
+        constexpr unsigned char kFallingTail[] = {
+            0x8A, 0x48, 0x66, 0x84, 0xC9, 0x74, 0x07,
+            0x8A, 0x48, 0x30};
+        const unsigned char* const onGroundProbe =
+            base + kRetailMoveOnGroundProbeRva;
+        constexpr unsigned char kOnGroundPrefix[] = {0x8B, 0x15};
+        constexpr unsigned char kOnGroundTail[] = {0x8A, 0x5A, 0x64};
+        const unsigned char* const jumpedProbe =
+            base + kRetailMoveJumpedProbeRva;
+        constexpr unsigned char kJumpedPrefix[] = {0xA1};
+        constexpr unsigned char kJumpedTail[] = {
+            0x8A, 0x48, 0x78, 0x84, 0xC9, 0x74, 0x0B,
+            0x8A, 0x48, 0x79, 0x84, 0xC9};
+        if (!MatchesCode(
+                fallingProbe, kFallingPrefix,
+                sizeof(kFallingPrefix)) ||
+            !MatchesCode(
+                fallingProbe + 5, kFallingTail,
+                sizeof(kFallingTail)) ||
+            !MatchesCode(
+                onGroundProbe, kOnGroundPrefix,
+                sizeof(kOnGroundPrefix)) ||
+            !MatchesCode(
+                onGroundProbe + 6, kOnGroundTail,
+                sizeof(kOnGroundTail)) ||
+            !MatchesCode(
+                jumpedProbe, kJumpedPrefix,
+                sizeof(kJumpedPrefix)) ||
+            !MatchesCode(
+                jumpedProbe + 5, kJumpedTail,
+                sizeof(kJumpedTail)) ||
+            *reinterpret_cast<unsigned char* const*>(
+                fallingProbe + 1) != firstEncoded ||
+            *reinterpret_cast<unsigned char* const*>(
+                onGroundProbe + 2) != firstEncoded ||
+            *reinterpret_cast<unsigned char* const*>(
+                jumpedProbe + 1) != firstEncoded) {
+            Report(
+                "WARN", "melee_movement_field_mismatch",
+                "CMoveMgr airborne field probes did not match Retail 1.08; "
+                "kick state diagnostics stay disabled.");
+            return nullptr;
+        }
+
+        const unsigned char* const postureProbe =
+            base + kRetailPostureDownProbeRva;
+        constexpr unsigned char kPosturePrefix[] = {
+            0xF6, 0x46, 0x28, 0x20, 0x74, 0x29,
+            0xF6, 0x46, 0x2C, 0x20, 0x75, 0x1D,
+            0x6A, 0x00, 0xB9};
+        constexpr unsigned char kPostureTimer[] = {
+            0x8D, 0x8E, 0xB0, 0x04, 0x00, 0x00};
+        if (!MatchesCode(
+                postureProbe, kPosturePrefix,
+                sizeof(kPosturePrefix)) ||
+            !MatchesCode(
+                postureProbe + 27, kPostureTimer,
+                sizeof(kPostureTimer)) ||
+            *reinterpret_cast<unsigned char* const*>(
+                postureProbe + 15) !=
+                base + kRetailPostureDownVarTrackRva) {
+            Report(
+                "WARN", "melee_posture_pattern_mismatch",
+                "CMoveMgr's PostureDownTime edge sequence did not match "
+                "Retail 1.08; kick state diagnostics stay disabled.");
+            return nullptr;
+        }
+
+        resolved = reinterpret_cast<const void* const*>(
+            base + kRetailMoveManagerPointerRva);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        resolved = nullptr;
+        Report(
+            "WARN", "melee_movement_probe_unreadable",
+            "CMoveMgr's Retail probes were not readable; kick state "
+            "diagnostics stay disabled.");
+    }
+    if (resolved != nullptr) {
+        Report(
+            "INFO", "melee_movement_resolved",
+            "Retail CMoveMgr and its airborne/posture fields were verified.");
+    }
+    return resolved;
+}
+
+float RetailPostureDownSeconds() noexcept {
+    if (g_client == nullptr) {
+        return 0.0F;
+    }
+    if (g_retailPostureDownVariable == nullptr) {
+        g_retailPostureDownVariable =
+            g_client->GetConsoleVariable("PostureDownTime");
+    }
+    if (g_retailPostureDownVariable == nullptr) {
+        return 0.0F;
+    }
+    const float seconds =
+        g_client->GetConsoleVariableFloat(
+            g_retailPostureDownVariable);
+    return std::isfinite(seconds) && seconds > 0.0F &&
+                   seconds < 10.0F
+        ? seconds
+        : 0.0F;
+}
+
+bool ReadRetailMovement(
+    RetailMovementSnapshot& snapshot) noexcept {
+    const void* const* const slot = ResolveRetailMoveManagerSlot();
+    if (slot == nullptr) {
+        return false;
+    }
+    __try {
+        const auto* const move =
+            static_cast<const unsigned char*>(*slot);
+        if (move == nullptr) {
+            return false;
+        }
+        snapshot.controlFlags =
+            *reinterpret_cast<const std::uint32_t*>(
+                move + kRetailMoveControlFlagsOffset);
+        snapshot.onGround =
+            *(move + kRetailMoveOnGroundOffset) != 0;
+        snapshot.falling =
+            *(move + kRetailMoveFallingOffset) != 0;
+        snapshot.jumped =
+            *(move + kRetailMoveJumpedOffset) != 0;
+        snapshot.airborne = snapshot.jumped || snapshot.falling;
+        snapshot.postureDownSeconds =
+            RetailPostureDownSeconds();
+        snapshot.available = true;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Die echte DUCK-Flanke kommt aus CMoveMgr, die Fensterlaenge aus der von
+// Retail initialisierten Konsolenvariable. M3 verwendet nur den echten
+// Luftzustand; das nachgebildete PostureDown-Fenster bleibt bis M4 reine
+// Diagnose.
+void UpdateRetailMeleeDiagnostics() noexcept {
+    RetailMovementSnapshot snapshot{};
+    if (!ReadRetailMovement(snapshot)) {
+        g_retailMovement = {};
+        g_retailMovementHadSnapshot = false;
+        g_retailDuckWasDown = false;
+        g_retailPostureDownUntil = 0;
+        return;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    const bool duckDown =
+        (snapshot.controlFlags & kRetailControlFlagDuck) != 0;
+    if (duckDown && !g_retailDuckWasDown &&
+        snapshot.postureDownSeconds > 0.0F) {
+        const ULONGLONG durationMs = static_cast<ULONGLONG>(
+            snapshot.postureDownSeconds * 1000.0F + 0.5F);
+        g_retailPostureDownUntil = now + durationMs;
+    }
+    g_retailDuckWasDown = duckDown;
+    snapshot.postureDownWindow =
+        now < g_retailPostureDownUntil;
+
+    const bool changed =
+        !g_retailMovementHadSnapshot ||
+        snapshot.onGround != g_retailMovement.onGround ||
+        snapshot.falling != g_retailMovement.falling ||
+        snapshot.jumped != g_retailMovement.jumped ||
+        snapshot.postureDownWindow !=
+            g_retailMovement.postureDownWindow;
+    g_retailMovement = snapshot;
+    g_retailMovementHadSnapshot = true;
+    if (!changed) {
+        return;
+    }
+
+    char message[256]{};
+    std::snprintf(
+        message, sizeof(message),
+        "Retail movement: onGround=%u jumped=%u falling=%u airborne=%u "
+        "postureDownWindow=%u PostureDownTime=%.3f s flags=0x%08X.",
+        snapshot.onGround ? 1U : 0U,
+        snapshot.jumped ? 1U : 0U,
+        snapshot.falling ? 1U : 0U,
+        snapshot.airborne ? 1U : 0U,
+        snapshot.postureDownWindow ? 1U : 0U,
+        static_cast<double>(snapshot.postureDownSeconds),
+        snapshot.controlFlags);
+    Report("INFO", "melee_retail_state", message);
+}
+
 // Waffenwechsel auf der rechten Primaertaste: jeder Druck schaltet eine Waffe
 // weiter. Bewusst nur die Flanke, ohne Wiederholung beim Halten — anders als
 // beim frueheren Stick-Ausschlag wuerde Dauerdruck sonst durchrattern.
@@ -2955,6 +4050,312 @@ void PrepareGrenadeAndReloadPulse() noexcept {
     g_secondaryWasDown = down;
 }
 
+// Nahkampf per Geste. Die reine Logik in `melee_actions.h` unterscheidet den
+// Waffenstoss von einem Stoss der freien Hand und teilt beiden eine Sperre zu.
+// Variante A des Kampfdesigns: Auch der Off-Hand Strike fordert Retails
+// Sekundaerangriff an; es gibt keinen sichtbaren Waffenwechsel.
+bool RetailPlayerIsOnLadder() noexcept;
+
+void UpdateMeleeActions() noexcept {
+    if (!g_meleeThrustEnabled) {
+        return;
+    }
+    MeleeActionInput frame{};
+    const ULONGLONG now = GetTickCount64();
+    frame.input = g_currentInput;
+    frame.nowNs = MonotonicNanoseconds();
+    frame.headHeightValid =
+        g_headTracking.centered && !g_headTracking.trackingLost &&
+        g_headTracking.lastFreshFrameTick != 0 &&
+        now - g_headTracking.lastFreshFrameTick <= 250 &&
+        std::isfinite(g_headTracking.currentCenter.py);
+    frame.headHeightMeters = g_headTracking.currentCenter.py;
+    frame.movementAvailable = g_retailMovement.available;
+    frame.airborne =
+        g_retailMovement.available &&
+        g_retailMovement.airborne;
+    frame.onGround =
+        g_retailMovement.available &&
+        g_retailMovement.onGround;
+    frame.movingForward =
+        g_retailMovement.available &&
+        (g_retailMovement.controlFlags &
+             kRetailControlFlagForward) != 0;
+    frame.sprinting =
+        g_retailMovement.available &&
+        (g_retailMovement.controlFlags &
+             kRetailControlFlagRun) != 0;
+    frame.postureDownWindow =
+        g_retailMovement.available &&
+        g_retailMovement.postureDownWindow;
+    frame.stickCrouch = MapControllerCommand(
+        g_currentInput, FEARVR_CMD_DUCK,
+        g_twoHandedGripActive).active;
+    frame.aimingDownSights = MapControllerCommand(
+        g_currentInput, FEARVR_CMD_FOCUS,
+        g_twoHandedGripActive).active;
+    frame.onLadder = RetailPlayerIsOnLadder();
+    frame.weaponDisabled = g_weaponDisabled;
+    frame.offHandHoldingWeapon = LeftHandOnWeapon();
+    frame.weaponStrikeEnabled = g_meleeWeaponStrikeEnabled;
+    frame.offHandStrikeEnabled = g_meleeOffHandStrikeEnabled;
+    frame.jumpKickEnabled = g_meleeJumpKickEnabled;
+    frame.slideKickEnabled = g_meleeSlideKickEnabled;
+    const MeleeActionRequest request =
+        fearvr::UpdateMeleeActions(g_meleeActions, frame);
+
+    // Diagnose pro Hand: Damit bleibt erkennbar, ob die freie Hand keine
+    // verwertbaren Posen liefert oder nur unter der Geschwindigkeitsschwelle
+    // bleibt.
+    if (now - g_meleePeakReportTick >= 3000) {
+        g_meleePeakReportTick = now;
+        const MeleeThrustDetector& weapon = g_meleeActions.weaponHand;
+        const MeleeThrustDetector& offHand = g_meleeActions.offHand;
+        if (weapon.evaluatedSamples == 0 ||
+            offHand.evaluatedSamples == 0 ||
+            weapon.peakForwardSpeed >= 0.5F ||
+            offHand.peakForwardSpeed >= 0.5F) {
+            char message[256]{};
+            std::snprintf(
+                message, sizeof(message),
+                "Forward hand speed: weapon %.2f m/s (%u samples), "
+                "off-hand %.2f m/s (%u samples), threshold %.2f m/s. "
+                "No samples means the pose or clock produced no velocity.",
+                static_cast<double>(weapon.peakForwardSpeed),
+                weapon.evaluatedSamples,
+                static_cast<double>(offHand.peakForwardSpeed),
+                offHand.evaluatedSamples,
+                static_cast<double>(kMeleeThrustSpeedMps));
+            Report("INFO", "melee_thrust_peak", message);
+        }
+        g_meleeActions.weaponHand.peakForwardSpeed = 0.0F;
+        g_meleeActions.weaponHand.evaluatedSamples = 0;
+        g_meleeActions.offHand.peakForwardSpeed = 0.0F;
+        g_meleeActions.offHand.evaluatedSamples = 0;
+    }
+
+    if (request.action == MeleeAction::None) {
+        return;
+    }
+    // Der Tritt entsteht aus einem Animationszustand, nicht aus einer
+    // Tastenflanke. Der Puls steht deshalb laenger als bei Nachladen und
+    // Granate, damit Retail ihn ueber mehrere Bilder als gehalten sieht.
+    constexpr ULONGLONG kMeleePulseMs = 200;
+    g_meleePulseUntil = now + kMeleePulseMs;
+    if (request.action == MeleeAction::SlideKick) {
+        BeginSlideKickViewStabilization();
+        if (request.needsDuckEdge) {
+            g_slideDuckPulseUntil = now + kMeleePulseMs;
+        }
+        if (request.needsForwardHold) {
+            g_slideForwardPulseUntil = now + kMeleePulseMs;
+        }
+        Report(
+            "INFO", "melee_slide_kick",
+            request.needsDuckEdge
+                ? "Slide kick triggered from a physical crouch; DUCK, "
+                  "FORWARD and secondary attack are pulsed for 200 ms."
+                : "Slide kick triggered inside Retail's stick-DUCK posture "
+                  "window; FORWARD and secondary attack are pulsed for "
+                  "200 ms.");
+    } else if (request.action == MeleeAction::JumpKick) {
+        Report(
+            "INFO", "melee_jump_kick",
+            "Jump kick (secondary attack) triggered from Retail's existing "
+            "airborne state; no jump command was injected.");
+    } else if (request.action == MeleeAction::OffHandStrike) {
+        Report(
+            "INFO", "melee_off_hand_strike",
+            "Melee (secondary attack) triggered by a forward thrust of the "
+            "free hand.");
+    } else {
+        Report(
+            "INFO", "melee_weapon_strike",
+            "Melee (secondary attack) triggered by a forward thrust of the "
+            "weapon hand.");
+    }
+}
+
+// Adresse des LadderMgr-Singletons, einmal aufgeloest und ueber das
+// Bytemuster des Accessors abgesichert. Stimmt etwas nicht, bleibt das
+// Klettern aus und das Spiel unveraendert.
+const void* ResolveRetailLadderManager() noexcept {
+    static const void* resolved = nullptr;
+    static bool attempted = false;
+    if (attempted) {
+        return resolved;
+    }
+    attempted = true;
+
+    HMODULE module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr) {
+        return nullptr;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(module);
+    __try {
+        const unsigned char* const accessor =
+            base + kRetailLadderInstanceRva;
+        if (std::memcmp(
+                accessor, kRetailLadderInstancePrefix,
+                sizeof(kRetailLadderInstancePrefix)) != 0 ||
+            std::memcmp(
+                accessor + 6, kRetailLadderInstanceGuard,
+                sizeof(kRetailLadderInstanceGuard)) != 0) {
+            Report(
+                "WARN", "ladder_manager_pattern_mismatch",
+                "LadderMgr::Instance did not match the verified Retail 1.08 "
+                "pattern; hand climbing stays disabled.");
+            return nullptr;
+        }
+        const unsigned char* const tail =
+            accessor + kRetailLadderInstanceReturnOffset;
+        // mov eax, <Objekt> / ret
+        if (tail[0] != 0xB8 || tail[5] != 0xC3) {
+            Report(
+                "WARN", "ladder_manager_pattern_mismatch",
+                "LadderMgr::Instance does not end in the expected "
+                "magic-static return; hand climbing stays disabled.");
+            return nullptr;
+        }
+        // Die Adresse im Code ist bereits relokiert. Stimmt sie mit der
+        // erwarteten RVA ueberein, ist das Objekt zweifelsfrei bestimmt.
+        const auto* const encoded =
+            *reinterpret_cast<const unsigned char* const*>(tail + 1);
+        if (encoded != base + kRetailLadderObjectRva) {
+            Report(
+                "WARN", "ladder_manager_address_mismatch",
+                "LadderMgr's static object is not at the verified offset; "
+                "hand climbing stays disabled.");
+            return nullptr;
+        }
+        resolved = encoded;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        resolved = nullptr;
+        Report(
+            "WARN", "ladder_manager_unreadable",
+            "LadderMgr::Instance was not readable; hand climbing stays "
+            "disabled.");
+    }
+    if (resolved != nullptr) {
+        Report(
+            "INFO", "ladder_manager_resolved",
+            "Retail LadderMgr located and verified; hand climbing is "
+            "available.");
+    }
+    return resolved;
+}
+
+// `LadderMgr::IsClimbing()`: m_pLadder liegt als erster Member im Objekt.
+bool RetailPlayerIsOnLadder() noexcept {
+    const void* const manager = ResolveRetailLadderManager();
+    if (manager == nullptr) {
+        return false;
+    }
+    __try {
+        return *reinterpret_cast<const void* const*>(manager) != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Handklettern an Leitern.
+//
+// Greifen und Ziehen wertet `climb_grip.h` aus, ohne Headset geprueft. Hier
+// kommt die Spielbedingung dazu: Nur waehrend `LadderMgr` eine Leiter fuehrt,
+// bekommen die Grabknoepfe ihre Kletterbedeutung — ueberall sonst bleiben sie
+// Sprint und Benutzen.
+//
+// Bewegt wird ueber die Kommandos, die Retail an der Leiter ohnehin auswertet
+// (`CMoveMgr`: FORWARD bzw. REVERSE, siehe `UpdateControlFlags`). Die
+// Klettergeschwindigkeit ist dort fest; der Zugwert entscheidet nur ueber die
+// Richtung. Ein Schreibzugriff auf die Spielerphysik ist nicht noetig.
+void UpdateClimbMotion() noexcept {
+    if (!g_climbingEnabled) {
+        if (g_climbActive || g_climbOnLadder) {
+            g_climbActive = false;
+            g_climbOnLadder = false;
+            g_climbAxis = 0.0F;
+            ResetClimbGrip(g_climbGrip);
+        }
+        return;
+    }
+    const bool onLadder = RetailPlayerIsOnLadder();
+    const ClimbPull pull = UpdateClimbGrip(
+        g_climbGrip, g_currentInput, MonotonicNanoseconds(), onLadder);
+    // An der Leiter gehoert die Vorwaertsbewegung den Haenden — auch wenn
+    // gerade niemand greift. Sonst klettert der Stick weiter mit, und die
+    // Einstellung „HANDS" waere nur eine zusaetzliche Moeglichkeit statt
+    // einer Entscheidung.
+    g_climbOnLadder = onLadder;
+    g_climbActive = onLadder && pull.gripping;
+    g_climbAxis = g_climbActive ? pull.axis : 0.0F;
+
+    if (g_climbActive != g_climbWasGripping) {
+        Report(
+            "INFO",
+            g_climbActive ? "climb_grip_engaged" : "climb_grip_released",
+            g_climbActive
+                ? "A hand grabbed the ladder; the grab buttons now climb."
+                : "The ladder grab was released.");
+        g_climbWasGripping = g_climbActive;
+    }
+}
+
+// Retails Kameraneigung ueber die linke Handneigung. Sie faellt weg, sobald
+// physisch gelehnt wird: Beides zusammen kippte das Bild zusaetzlich zu einer
+// Bewegung, die der Spieler ohnehin selbst macht.
+bool HandLeanSuppressed(std::uint32_t command) noexcept {
+    return g_physicalLeanEnabled &&
+           (command == FEARVR_CMD_LEAN_LEFT ||
+            command == FEARVR_CMD_LEAN_RIGHT);
+}
+
+// Kletterbewegung als Kommandowert. Liefert `false`, wenn dieses Kommando
+// gerade nichts mit dem Klettern zu tun hat.
+bool ClimbCommandOverride(
+    std::uint32_t command, FearVrCommandValue& value) noexcept {
+    if (!g_climbingEnabled || !g_climbOnLadder) {
+        return false;
+    }
+    switch (command) {
+    case FEARVR_CMD_FORWARD:
+        value = {1.0F, g_climbAxis > 0.0F};
+        return true;
+    case FEARVR_CMD_REVERSE:
+        value = {1.0F, g_climbAxis < 0.0F};
+        return true;
+    case FEARVR_CMD_FORWARD_AXIS:
+        value = {g_climbAxis, g_climbAxis != 0.0F};
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Die einzige Bewegung, die das Kampfsystem synthetisch erzeugt. Beide Pulse
+// sind kurz und entstehen nur nach den Guards im reinen Melee-Classifier.
+bool SlideKickCommandOverride(
+    std::uint32_t command, FearVrCommandValue& value) noexcept {
+    const ULONGLONG now = GetTickCount64();
+    if (command == FEARVR_CMD_DUCK &&
+        now < g_slideDuckPulseUntil) {
+        value = {1.0F, true};
+        return true;
+    }
+    if (now >= g_slideForwardPulseUntil) {
+        return false;
+    }
+    if (command == FEARVR_CMD_FORWARD) {
+        value = {1.0F, true};
+        return true;
+    }
+    if (command == FEARVR_CMD_FORWARD_AXIS) {
+        value = {1.0F, true};
+        return true;
+    }
+    return false;
+}
+
 bool IsWeaponSwitchPulse(std::uint32_t command) noexcept {
     const ULONGLONG now = GetTickCount64();
     switch (command) {
@@ -2964,6 +4365,8 @@ bool IsWeaponSwitchPulse(std::uint32_t command) noexcept {
         return now < g_reloadPulseUntil;
     case FEARVR_CMD_THROW_GRENADE:
         return now < g_grenadePulseUntil;
+    case FEARVR_CMD_ALT_FIRING:
+        return now < g_meleePulseUntil;
     default:
         return false;
     }
@@ -2975,7 +4378,40 @@ bool IsPulseDrivenCommand(std::uint32_t command) noexcept {
     return command == FEARVR_CMD_NEXT_WEAPON ||
            command == FEARVR_CMD_PREV_WEAPON ||
            command == FEARVR_CMD_RELOAD ||
-           command == FEARVR_CMD_THROW_GRENADE;
+           command == FEARVR_CMD_THROW_GRENADE ||
+           command == FEARVR_CMD_ALT_FIRING;
+}
+
+// Ein Kommandowert fuer die Injektion: Klettern hat Vorrang, danach die
+// Pulsgesten, sonst die zustandslose Zuordnung.
+//
+// FORWARD und REVERSE werden ausserhalb des Kletterns bewusst nicht
+// injiziert. Retail bewegt normal ueber die Achse; ein zusaetzlich gesetztes
+// Richtungsbit wuerde aus jedem kleinen Stickausschlag volle Geschwindigkeit
+// machen.
+FearVrCommandValue ResolveInjectedCommand(
+    std::uint32_t command) noexcept {
+    FearVrCommandValue value{0.0F, false};
+    if (ClimbCommandOverride(command, value)) {
+        return value;
+    }
+    if (SlideKickCommandOverride(command, value)) {
+        return value;
+    }
+    if (HandLeanSuppressed(command)) {
+        return {0.0F, false};
+    }
+    if (command == FEARVR_CMD_FORWARD ||
+        command == FEARVR_CMD_REVERSE ||
+        command == FEARVR_CMD_STRAFE_LEFT ||
+        command == FEARVR_CMD_STRAFE_RIGHT) {
+        return {0.0F, false};
+    }
+    if (IsPulseDrivenCommand(command)) {
+        return {1.0F, IsWeaponSwitchPulse(command)};
+    }
+    return MapControllerCommand(
+        g_currentInput, command, g_twoHandedGripActive);
 }
 
 void LogRegressionCommandTransition(
@@ -3064,6 +4500,12 @@ void InjectSemanticCommandBits(
     constexpr std::uint32_t kDigitalCommands[] = {
         FEARVR_CMD_YAW_POS,
         FEARVR_CMD_YAW_NEG,
+        // Nur fuer das Klettern an Leitern; sonst liefert
+        // ResolveInjectedCommand fuer beide dauerhaft inaktiv.
+        FEARVR_CMD_FORWARD,
+        FEARVR_CMD_REVERSE,
+        FEARVR_CMD_STRAFE_LEFT,
+        FEARVR_CMD_STRAFE_RIGHT,
         FEARVR_CMD_DUCK,
         FEARVR_CMD_JUMP,
         FEARVR_CMD_RUN,
@@ -3074,6 +4516,7 @@ void InjectSemanticCommandBits(
         FEARVR_CMD_ACTIVATE,
         FEARVR_CMD_RELOAD,
         FEARVR_CMD_THROW_GRENADE,
+        FEARVR_CMD_ALT_FIRING,
         FEARVR_CMD_SLOWMO,
         FEARVR_CMD_MEDKIT,
         FEARVR_CMD_LEAN_LEFT,
@@ -3094,12 +4537,7 @@ void InjectSemanticCommandBits(
 
         for (const std::uint32_t command : kDigitalCommands) {
             const FearVrCommandValue controller =
-                IsPulseDrivenCommand(command)
-                    ? FearVrCommandValue{
-                          1.0F, IsWeaponSwitchPulse(command)}
-                    : MapControllerCommand(
-                          g_currentInput, command,
-                          g_twoHandedGripActive);
+                ResolveInjectedCommand(command);
             if (command < sizeof(g_injectedCommandActive) /
                               sizeof(g_injectedCommandActive[0])) {
                 bool& wasActive =
@@ -3156,13 +4594,23 @@ float __fastcall HookRetailGetBindingValue(
         g_seenStrafeAxisBinding = true;
     }
 
-    const FearVrCommandValue controller =
-        IsPulseDrivenCommand(binding->command)
-            ? FearVrCommandValue{
-                  1.0F, IsWeaponSwitchPulse(binding->command)}
-            : MapControllerCommand(
-                  g_currentInput, binding->command,
-                  g_twoHandedGripActive);
+    // An der Leiter ziehen die Haende; beim Slide Kick haelt der kurze
+    // Sequencer DUCK/FORWARD; sonst gilt die gewohnte Zuordnung inklusive der
+    // normalen, analogen Stickbewegung.
+    FearVrCommandValue controller{0.0F, false};
+    if (HandLeanSuppressed(binding->command)) {
+        controller = {0.0F, false};
+    } else if (
+        !ClimbCommandOverride(binding->command, controller) &&
+        !SlideKickCommandOverride(binding->command, controller)) {
+        controller =
+            IsPulseDrivenCommand(binding->command)
+                ? FearVrCommandValue{
+                      1.0F, IsWeaponSwitchPulse(binding->command)}
+                : MapControllerCommand(
+                      g_currentInput, binding->command,
+                      g_twoHandedGripActive);
+    }
     if (binding->command <
         sizeof(g_controllerCommandActive) /
             sizeof(g_controllerCommandActive[0])) {
@@ -3256,6 +4704,11 @@ bool ResolveRetailWeaponTargets(
     constexpr unsigned char kSetVisiblePrefix[] = {
         0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x1C, 0x85, 0xC0,
         0x75, 0x0E, 0x8B, 0x86, 0xD4, 0x00, 0x00, 0x00};
+    // `mov al, byte ptr [esi+0x223]` in SetVisible, direkt gefolgt vom
+    // Ruecksprung: das ist `m_bVisible = bVis; if (m_bDisabled) return;`.
+    // Damit ist der Ort des Deaktiviert-Flags belegt.
+    constexpr unsigned char kSetVisibleDisabledProbe[] = {
+        0x8A, 0x86, 0x23, 0x02, 0x00, 0x00};
     constexpr unsigned char kFireVectorsPrefix[] = {
         0x83, 0xEC, 0x58, 0xA1};
     constexpr unsigned char kFireVectorsBody[] = {
@@ -3271,6 +4724,10 @@ bool ResolveRetailWeaponTargets(
         !MatchesCode(
             setVisible, kSetVisiblePrefix,
             sizeof(kSetVisiblePrefix)) ||
+        !MatchesCode(
+            setVisible + kRetailSetWeaponVisibleDisabledProbeOffset,
+            kSetVisibleDisabledProbe,
+            sizeof(kSetVisibleDisabledProbe)) ||
         !MatchesCode(
             fireVectors, kFireVectorsPrefix,
             sizeof(kFireVectorsPrefix)) ||
@@ -3314,10 +4771,17 @@ bool BuildTrackedHandTransform(
         return false;
     }
 
+    // Derselbe Versatz wie beim Blickpunkt: Die Handpose ist relativ zum HMD
+    // gerechnet, haengt aber an der Spielerposition. Ohne diesen Ausgleich
+    // klafft beim Lehnen genau die Luecke zwischen Kopf und Koerper, und die
+    // Waffe scheint aus der Hand zu wandern.
     const LTVector localPosition(
-        relative.positionMeters.x * kGameUnitsPerMeter,
-        relative.positionMeters.y * kGameUnitsPerMeter,
-        relative.positionMeters.z * kGameUnitsPerMeter);
+        relative.positionMeters.x * kGameUnitsPerMeter +
+            g_leanViewOffsetUnits.x,
+        relative.positionMeters.y * kGameUnitsPerMeter +
+            g_leanViewOffsetUnits.y,
+        relative.positionMeters.z * kGameUnitsPerMeter +
+            g_leanViewOffsetUnits.z);
     const LTRotation localRotation(
         relative.rotation.x, relative.rotation.y,
         relative.rotation.z, relative.rotation.w);
@@ -3325,6 +4789,80 @@ bool BuildTrackedHandTransform(
         basePosition + baseRotation.RotateVector(localPosition);
     transform.m_rRot = baseRotation * localRotation;
     return true;
+}
+
+// Retail reicht dem Weapon-Manager CPlayerCamera::m_vPos weiter. Dieser Wert
+// entsteht vor der abschliessenden Hoehen-, Effekt- und Kollisionskorrektur,
+// waehrend die VR-Augen das danach gesetzte Kameraobjekt rendern. Besonders
+// bei Sprung und Ducken laufen beide Y-Positionen kurz auseinander. Fuer
+// OpenXR-Haende und die daran verriegelte Waffe wird deshalb in nativer
+// 3D-VR normalerweise die finale Objektposition verwendet. Treppab und in der
+// Luft wird lediglich die visuelle Y-Achse auf Retails Rohhoehe umgeschaltet,
+// bis der Filter aufgeholt hat. Retails eigener Updateaufruf erhaelt weiterhin
+// unveraendert seine urspruengliche Basis.
+LTVector ResolveTrackedHandBasePosition(
+    const LTVector& retailBasePosition) noexcept {
+    if (g_client == nullptr ||
+        g_playerCameraObject == nullptr ||
+        g_isStereoEnabled == nullptr ||
+        g_isFlatPanelActive == nullptr) {
+        ResetVerticalCameraHeight(g_verticalCameraHeight);
+        g_visualCameraHeightValid = false;
+        return retailBasePosition;
+    }
+
+    __try {
+        if (g_isStereoEnabled() == FALSE ||
+            g_isFlatPanelActive() != FALSE) {
+            ResetVerticalCameraHeight(g_verticalCameraHeight);
+            g_visualCameraHeightValid = false;
+            return retailBasePosition;
+        }
+        LTRigidTransform cameraTransform;
+        if (g_client->GetObjectTransform(
+                g_playerCameraObject, &cameraTransform) != LT_OK) {
+            ResetVerticalCameraHeight(g_verticalCameraHeight);
+            g_visualCameraHeightValid = false;
+            return retailBasePosition;
+        }
+        const bool ducking =
+            g_retailMovement.available &&
+            (g_retailMovement.controlFlags &
+             kRetailControlFlagDuck) != 0;
+        const VerticalCameraHeightOutput height =
+            UpdateVerticalCameraHeight(
+                g_verticalCameraHeight,
+                retailBasePosition.y,
+                cameraTransform.m_vPos.y,
+                g_retailMovement.airborne,
+                ducking,
+                g_retailMovement.available);
+        g_visualCameraHeight = height.visualHeight;
+        g_visualCameraHeightSampleTick = GetTickCount64();
+        g_visualCameraHeightValid = true;
+        if (InterlockedCompareExchange(
+                &g_weaponCameraBaseSyncActiveLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "weapon_camera_base_sync_active",
+                "Tracked hands and weapon use the final rendered camera "
+                "position after Retail height and collision correction.");
+        }
+        if (height.bypassActive &&
+            InterlockedCompareExchange(
+                &g_directionalCameraHeightBypassLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "directional_camera_height_bypass_active",
+                "Descending stairs and airborne motion use Retail's raw "
+                "visual height until its smoothing filter catches up.");
+        }
+        LTVector resolvedPosition = cameraTransform.m_vPos;
+        resolvedPosition.y = height.visualHeight;
+        return resolvedPosition;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ResetVerticalCameraHeight(g_verticalCameraHeight);
+        g_visualCameraHeightValid = false;
+        return retailBasePosition;
+    }
 }
 
 bool BuildStableTrackedHandTransform(
@@ -3380,6 +4918,97 @@ void* CurrentRetailWeapon(void* weaponManager) noexcept {
     return weapon;
 }
 
+// Ist die Waffe von Retail abgeschaltet? Dann ist ihr Modell unsichtbar —
+// an der Leiter, in Zwischensequenzen und am Geschuetz.
+bool RetailWeaponIsDisabled(const void* weapon) noexcept {
+    if (weapon == nullptr) {
+        return false;
+    }
+    __try {
+        return *(static_cast<const unsigned char*>(weapon) +
+                 kRetailWeaponDisabledOffset) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Das sichtbare Modell der rechten (bei Doppelwaffen: der ersten) Waffe.
+HOBJECT RetailRightWeaponModel(const void* weapon) noexcept {
+    if (weapon == nullptr) {
+        return nullptr;
+    }
+    HOBJECT model = nullptr;
+    __try {
+        model = *reinterpret_cast<HOBJECT const*>(
+            static_cast<const unsigned char*>(weapon) +
+            kRetailRightWeaponModelObjectOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+    return model;
+}
+
+// Das zweite Waffenmodell (`CClientWeapon::m_LeftHandWeapon`) und der Grund,
+// warum es hier ueberhaupt vorkommt:
+//
+// Jede Waffe legt in `Init` beide Modelle an, das rechte *und* das linke —
+// letzteres existiert also auch fuer eine ganz normale Einhandwaffe, es
+// steht bei Retail nur nirgends im Bild. `SetWeaponTransform` setzt jedoch
+// *beide* Modelle auf dieselbe Transformation. Unser Aufruf, der die
+// sichtbare Waffe mit dem korrigierten Handsocket zusammenhaelt, holt das
+// zweite Modell damit an genau dieselbe Stelle. Weil es fuer die linke Hand
+// modelliert ist, steckt es dort schraeg im Lauf der gefuehrten Waffe: die
+// beobachtete "zweite Pistole".
+//
+// Der Offset dieses Modells in der Retail-Struktur ist nicht dokumentiert
+// und wird deshalb nicht geraten, sondern gemessen: Direkt nach dem eigenen
+// `SetWeaponTransform`-Aufruf steht genau an der gesetzten Position, was
+// dieser Aufruf selbst gesetzt hat — das rechte Modell (bekannter Offset)
+// und das zweite. Ein Kandidat, der ueber die Engine-API ein gueltiges
+// Objekt an exakt dieser Position ist, kann daher nichts anderes sein.
+volatile LONG g_secondaryWeaponHiddenLogged = 0;
+
+// Entfernt das zweite Waffenmodell endgueltig.
+//
+// Verstecken reichte nicht: Retail spielt Feuer- und Nachladeanimationen
+// weiterhin auf diesem Modell ab, wenn ein Model-Key die linke Hand nennt.
+// Sichtbar war das als Schuss ohne Animation — die Bewegung lief am
+// unsichtbaren Zwilling. `m_hObject` ist ein `LTObjRef`, also eine Referenz,
+// die beim Entfernen des Objekts von der Engine selbst genullt wird. Danach
+// scheitern alle `if (m_LeftHandWeapon.m_hObject)`-Pruefungen in Retail, und
+// jedes Schussereignis kommt aus der gefuehrten Waffe.
+void RemoveSecondaryWeaponModel(
+    const void* weapon, HOBJECT rightModel) noexcept {
+    if (g_client == nullptr || weapon == nullptr) {
+        return;
+    }
+    // Jedes Bild geprueft, nicht nur beim Waffenwechsel: Retail legt das
+    // Modell beim Selektieren einer Waffe neu an.
+    HOBJECT secondary = nullptr;
+    __try {
+        secondary = *reinterpret_cast<HOBJECT const*>(
+            static_cast<const unsigned char*>(weapon) +
+            kRetailLeftWeaponModelObjectOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (secondary == nullptr || secondary == rightModel) {
+        return;
+    }
+    __try {
+        g_client->RemoveObject(secondary);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (InterlockedCompareExchange(
+            &g_secondaryWeaponHiddenLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "secondary_weapon_model_removed",
+            "The second, left-hand weapon model was removed; every shot "
+            "event now comes from the carried weapon.");
+    }
+}
+
 bool UpdateRetailMuzzlePosition(const void* weapon) noexcept {
     if (weapon != g_weaponAim.muzzleWeapon) {
         g_weaponAim.muzzleWeapon = weapon;
@@ -3392,12 +5021,9 @@ bool UpdateRetailMuzzlePosition(const void* weapon) noexcept {
         return false;
     }
 
-    HOBJECT weaponModel = nullptr;
+    HOBJECT weaponModel = RetailRightWeaponModel(weapon);
     HMODELSOCKET muzzleSocket = INVALID_MODEL_SOCKET;
     __try {
-        weaponModel = *reinterpret_cast<HOBJECT const*>(
-            static_cast<const unsigned char*>(weapon) +
-            kRetailRightWeaponModelObjectOffset);
         muzzleSocket = *reinterpret_cast<HMODELSOCKET const*>(
             static_cast<const unsigned char*>(weapon) +
             kRetailRightWeaponMuzzleSocketOffset);
@@ -3761,6 +5387,8 @@ int __fastcall HookRetailWeaponManagerUpdate(
         // Engine hat die Objekte beim Weltwechsel bereits selbst zerstoert.
         ForgetWorldObjectsAfterLevelChange();
     }
+    const LTVector trackedBasePosition =
+        ResolveTrackedHandBasePosition(basePosition);
     if (!g_autoStereoActivationAttempted && !g_disableStereoRender &&
         g_isStereoAvailable != nullptr &&
         g_isStereoEnabled != nullptr &&
@@ -3783,25 +5411,29 @@ int __fastcall HookRetailWeaponManagerUpdate(
         }
     }
     g_weaponAim.valid = BuildStableTrackedHandTransform(
-        baseRotation, basePosition, g_currentInput.aimPoseValidHands,
+        baseRotation, trackedBasePosition,
+        g_currentInput.aimPoseValidHands,
         FEARVR_HAND_MASK_RIGHT,
         g_currentInput.handAimPose[FEARVR_HAND_RIGHT],
         g_aimPoseCache[FEARVR_HAND_RIGHT],
         g_weaponAim.fireTransform);
     g_weaponAim.gripValid = BuildStableTrackedHandTransform(
-        baseRotation, basePosition, g_currentInput.gripPoseValidHands,
+        baseRotation, trackedBasePosition,
+        g_currentInput.gripPoseValidHands,
         FEARVR_HAND_MASK_RIGHT,
         g_currentInput.handGripPose[FEARVR_HAND_RIGHT],
         g_gripPoseCache[FEARVR_HAND_RIGHT],
         g_weaponAim.gripTransform);
     g_weaponAim.leftAimValid = BuildStableTrackedHandTransform(
-        baseRotation, basePosition, g_currentInput.aimPoseValidHands,
+        baseRotation, trackedBasePosition,
+        g_currentInput.aimPoseValidHands,
         FEARVR_HAND_MASK_LEFT,
         g_currentInput.handAimPose[FEARVR_HAND_LEFT],
         g_aimPoseCache[FEARVR_HAND_LEFT],
         g_weaponAim.leftAimTransform);
     g_weaponAim.leftGripValid = BuildStableTrackedHandTransform(
-        baseRotation, basePosition, g_currentInput.gripPoseValidHands,
+        baseRotation, trackedBasePosition,
+        g_currentInput.gripPoseValidHands,
         FEARVR_HAND_MASK_LEFT,
         g_currentInput.handGripPose[FEARVR_HAND_LEFT],
         g_gripPoseCache[FEARVR_HAND_LEFT],
@@ -3904,8 +5536,23 @@ int __fastcall HookRetailWeaponManagerUpdate(
     if (g_weaponAim.valid) {
         UpdateRetailMuzzlePosition(weapon);
     }
-    if (weapon != nullptr && g_retailSetWeaponVisible != nullptr) {
+    // Retails Deaktivierung gilt vor unserer Sichtbarkeit: Waehrend die Waffe
+    // abgeschaltet ist (Leiter, Zwischensequenz, Geschuetz), gehoert auch der
+    // Zielstrahl nicht ins Bild. `SetVisible` selbst kehrt in diesem Zustand
+    // ohnehin folgenlos zurueck.
+    g_weaponDisabled = RetailWeaponIsDisabled(weapon);
+    if (weapon != nullptr && !g_weaponDisabled &&
+        g_retailSetWeaponVisible != nullptr) {
         g_retailSetWeaponVisible(weapon, true, true);
+    }
+    // Zwingend NACH `SetWeaponVisible`: Das schaltet beide Modelle sichtbar,
+    // also auch das zweite, fuer die linke Hand modellierte, das unser
+    // `SetWeaponTransform` schraeg in die gefuehrte Waffe gelegt hat. Wird es
+    // vorher versteckt, hebt der Sichtbarkeitsaufruf das sofort wieder auf —
+    // genau daran ist die erste Fassung gescheitert.
+    if (weapon != nullptr && !g_disableWeaponTransform) {
+        RemoveSecondaryWeaponModel(
+            weapon, RetailRightWeaponModel(weapon));
     }
     if (weapon != nullptr && g_weaponAim.valid) {
         if (InterlockedCompareExchange(
@@ -4280,6 +5927,7 @@ void RemoveHandNodeControls() noexcept {
     InterlockedExchange(&g_armGeometryInspectedLogged, 0);
     InterlockedExchange(&g_armGeometryEmptyAttempts, 0);
     InterlockedExchange(&g_armGeometryNeverAvailableLogged, 0);
+    InterlockedExchange(&g_bodyMaterialOverrideLogged, 0);
 }
 
 bool InstallHandNodeControl(
@@ -4544,8 +6192,8 @@ void PollBodyPieceProbeKey() noexcept {
         std::snprintf(
             message, sizeof(message),
             "F11 body piece probe: only player-body piece #%u is visible "
-            "(mask 0x%X). Keep this step if it shows hands and weapon "
-            "without arms.",
+            "(mask 0x%X). This is a diagnostic isolation step; return to "
+            "step 0 for the VR body material.",
             visible, g_hiddenBodyPieceMask);
     }
     WriteVrSetting(
@@ -4560,6 +6208,27 @@ void ConfigureRetailArmPieceVisibility(
         return;
     }
     PollBodyPieceProbeKey();
+    const char* const bodyMaterial = g_showPlayerArms
+        ? "chars\\materials\\player_new.Mat00"
+        : "fearvr\\player_body.Mat00";
+    const LTRESULT bodyMaterialResult = model->SetMaterialFilename(
+        playerBody, 0, bodyMaterial);
+    if (InterlockedCompareExchange(
+            &g_bodyMaterialOverrideLogged, 1, 0) == 0) {
+        char materialMessage[192]{};
+        std::snprintf(
+            materialMessage, sizeof(materialMessage),
+            "Player body material slot 0 was explicitly set to "
+            "%s (result %ld; arms %s).",
+            bodyMaterial, static_cast<long>(bodyMaterialResult),
+            g_showPlayerArms ? "visible" : "hidden");
+        Report(
+            bodyMaterialResult == LT_OK ? "INFO" : "WARN",
+            bodyMaterialResult == LT_OK
+                ? "vr_body_material_override"
+                : "vr_body_material_override_failed",
+            materialMessage);
+    }
     if (InterlockedCompareExchange(
             &g_armGeometryInspectedLogged, 0, 0) != 0) {
         std::uint32_t currentCount = 0;
@@ -4636,8 +6305,6 @@ void ConfigureRetailArmPieceVisibility(
              std::strstr(lowerName, "shoulder") != nullptr);
         char entry[96]{};
         if (isArm) {
-            // A named arm piece is authoritative and seeds the mask.
-            g_hiddenBodyPieceMask |= 1U << index;
             namedArmPiece = true;
             std::snprintf(
                 entry, sizeof(entry), "#%u=%s(arm)", index, name);
@@ -4652,18 +6319,20 @@ void ConfigureRetailArmPieceVisibility(
     char message[768]{};
     std::snprintf(
         message, sizeof(message),
-        "%s Hidden piece mask 0x%X. Retail player-body pieces: %s",
+        "%s Diagnostic hidden-piece mask 0x%X. "
+        "Arm visibility is controlled by the Show arms material switch. "
+        "Retail player-body pieces: %s",
         namedArmPiece
-            ? "Named arm pieces hidden; hand pieces remain visible."
-            : "No separately named arm pieces were available; use the F11 "
-              "probe to identify them by index.",
+            ? "Named arm pieces were found."
+            : "No separately named arm pieces were available; Retail "
+              "Body_Group combines arms, torso and legs.",
         g_hiddenBodyPieceMask,
         pieceList[0] != '\0' ? pieceList : "<none>");
     Report(
-        namedArmPiece ? "INFO" : "WARN",
+        "INFO",
         namedArmPiece
-            ? "vr_arm_pieces_hidden"
-            : "vr_arm_pieces_unavailable",
+            ? "vr_arm_pieces_available"
+            : "vr_arm_material_required",
         message);
 }
 
@@ -4876,6 +6545,21 @@ void RemoveWeaponAimHooks() noexcept {
     g_grenadePulseUntil = 0;
     g_secondaryWasDown = false;
     g_grenadeConsumed = false;
+    g_meleePulseUntil = 0;
+    g_slideDuckPulseUntil = 0;
+    g_slideForwardPulseUntil = 0;
+    ResetMeleeActions(g_meleeActions);
+    g_retailMovement = {};
+    g_retailMovementHadSnapshot = false;
+    g_retailDuckWasDown = false;
+    g_retailPostureDownUntil = 0;
+    g_retailPostureDownVariable = nullptr;
+    g_slideKickView = {};
+    ResetClimbGrip(g_climbGrip);
+    g_climbWasGripping = false;
+    g_climbActive = false;
+    g_climbOnLadder = false;
+    g_climbAxis = 0.0F;
 }
 
 bool InstallWeaponAimHooks() noexcept {
@@ -5239,26 +6923,6 @@ void PollControllerInput() noexcept {
         g_lastInputButtons = input.buttons;
     }
 
-    const bool recenterDown =
-        (input.buttons & FEARVR_IB_RIGHT_STICK) != 0;
-    bool stereoEnabled = false;
-    if (g_isStereoEnabled != nullptr) {
-        __try {
-            stereoEnabled = g_isStereoEnabled() != FALSE;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            stereoEnabled = false;
-        }
-    }
-    if (recenterDown && !g_controllerRecenterWasDown &&
-        stereoEnabled) {
-        InterlockedIncrement(&g_trackingResetGeneration);
-        Report(
-            "INFO", "controller_recenter_requested",
-            "Right stick click requested head-tracking recenter "
-            "while stereo is active.");
-    }
-    g_controllerRecenterWasDown = recenterDown;
-
 }
 
 void TapMenuKey(int key) noexcept {
@@ -5535,6 +7199,19 @@ void PollControllerMenuInput() noexcept {
         }
     }
     if (!menuActive) {
+        if ((pressed & FEARVR_IB_RIGHT_STICK) != 0) {
+            constexpr ULONGLONG kManualMeleePulseMs = 200;
+            // Retail exposes the slide-kick posture only after this input
+            // frame. Capture the camera before every manual melee pulse so a
+            // same-frame slide can never evade stabilization.
+            BeginSlideKickViewStabilization();
+            g_meleePulseUntil = std::max(
+                g_meleePulseUntil, now + kManualMeleePulseMs);
+            Report(
+                "INFO", "controller_melee_requested",
+                "Right stick click captured the camera basis and pulsed "
+                "Retail melee; Retail selects the strike or kick variant.");
+        }
         for (std::size_t index = 0; index < 4; ++index) {
             g_menuAxisDown[index] = false;
             g_menuAxisRepeatTick[index] = 0;
@@ -5609,6 +7286,8 @@ void __fastcall HookClientShellUpdate(
     if (!g_disableClientUpdateWork) {
         PrepareWeaponSwitchPulse();
         PrepareGrenadeAndReloadPulse();
+        UpdateMeleeActions();
+        UpdateClimbMotion();
         PollControllerMenuInput();
     }
     if (g_vrSettingsPageActive) {
@@ -5619,9 +7298,14 @@ void __fastcall HookClientShellUpdate(
     }
     if (!g_disableClientUpdateWork) {
         UpdateCrosshairOverride();
+        UpdateVrCameraCollisionPath();
     }
     g_semanticBitsInjected = false;
     g_clientShellUpdate(clientShell);
+    if (!g_disableClientUpdateWork) {
+        MaintainSlideKickViewBase();
+        UpdateRetailMeleeDiagnostics();
+    }
 }
 
 bool InstallClientInputHook(void* masterDatabase) noexcept {
@@ -5749,6 +7433,7 @@ bool TryInstallRendererHook() noexcept {
 
 bool TryRemoveRendererHook() noexcept {
     RestoreFlashlightCameraOverride();
+    RestoreRetailCameraCollisionPath();
     AcquireSRWLockExclusive(&g_hookLock);
     if (!g_hookInstalled ||
         g_renderCameraSlot == nullptr ||
@@ -5936,6 +7621,9 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     g_setStereoEnabled =
         Resolve<SetStereoEnabledFunction>(
             bridge, "FearVr_SetStereoEnabled");
+    g_setFovScalePercent =
+        Resolve<SetFovScalePercentFunction>(
+            bridge, "FearVr_SetFovScalePercent");
     g_isTranslationEnabled =
         Resolve<GetBooleanOptionFunction>(
             bridge, "FearVr_IsTranslationEnabled");
@@ -5988,6 +7676,7 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
         g_isStereoAvailable == nullptr ||
         g_isStereoEnabled == nullptr ||
         g_setStereoEnabled == nullptr ||
+        g_setFovScalePercent == nullptr ||
         g_isTranslationEnabled == nullptr ||
         g_setTranslationEnabled == nullptr ||
         g_isStereoHudEnabled == nullptr ||

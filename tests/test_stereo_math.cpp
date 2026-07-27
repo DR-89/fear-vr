@@ -3,6 +3,7 @@
 #include <iostream>
 
 #include "stereo_math.h"
+#include "vertical_camera_height.h"
 
 namespace {
 
@@ -69,8 +70,22 @@ int main() {
         !Near(protocol.angleDown, -0.83F)) {
         return Fail("symmetric FOV conversion is incorrect");
     }
-
     const FearVrFov invalid{};
+    const fearvr::SymmetricFov scaled =
+        fearvr::ScaleSymmetricFov(symmetric, 1.2F);
+    if (!scaled.valid ||
+        !Near(scaled.halfHorizontal,
+              std::atan(std::tan(0.81F) * 1.2F)) ||
+        !Near(scaled.halfVertical,
+              std::atan(std::tan(0.83F) * 1.2F))) {
+        return Fail("FOV scale must multiply projection tangents");
+    }
+    if (fearvr::ScaleSymmetricFov(symmetric, NAN).valid ||
+        fearvr::ScaleSymmetricFov(
+            fearvr::SymmetricFov{}, 1.2F).valid) {
+        return Fail("invalid FOV scale inputs must fail closed");
+    }
+
     if (fearvr::SharedSymmetricFov(invalid, right).valid) {
         return Fail("invalid FOV must be rejected");
     }
@@ -79,6 +94,73 @@ int main() {
     if (!Near(fearvr::EyeOffsetGameUnits(
                   request, FEARVR_EYE_LEFT), 0.0F)) {
         return Fail("non-finite eye poses must fail closed");
+    }
+
+    {
+        fearvr::VerticalCameraHeightState height;
+        fearvr::UpdateVerticalCameraHeight(
+            height, 100.0F, 100.0F, false, false, true);
+        const auto upward = fearvr::UpdateVerticalCameraHeight(
+            height, 110.0F, 104.0F, false, false, true);
+        if (upward.bypassActive ||
+            !Near(upward.visualHeight, 104.0F)) {
+            return Fail("upward stair steps must keep Retail smoothing");
+        }
+    }
+    {
+        fearvr::VerticalCameraHeightState height;
+        fearvr::UpdateVerticalCameraHeight(
+            height, 100.0F, 100.0F, false, true, true);
+        const auto duck = fearvr::UpdateVerticalCameraHeight(
+            height, 90.0F, 96.0F, false, true, true);
+        if (duck.bypassActive || !Near(duck.visualHeight, 96.0F)) {
+            return Fail("ducking must keep Retail smoothing");
+        }
+    }
+    {
+        fearvr::VerticalCameraHeightState height;
+        fearvr::UpdateVerticalCameraHeight(
+            height, 100.0F, 100.0F, false, false, true);
+        const auto downward = fearvr::UpdateVerticalCameraHeight(
+            height, 90.0F, 97.0F, false, false, true);
+        if (!downward.bypassActive ||
+            !Near(downward.visualHeight, 90.0F)) {
+            return Fail("downward stair steps must use raw height");
+        }
+        const auto waiting = fearvr::UpdateVerticalCameraHeight(
+            height, 90.0F, 92.0F, false, false, true);
+        if (!waiting.bypassActive ||
+            !Near(waiting.visualHeight, 90.0F)) {
+            return Fail("downward bypass must wait for Retail catch-up");
+        }
+        const auto caughtUp = fearvr::UpdateVerticalCameraHeight(
+            height, 90.0F, 90.1F, false, false, true);
+        if (caughtUp.bypassActive ||
+            !Near(caughtUp.visualHeight, 90.1F)) {
+            return Fail("caught-up height must return to Retail seamlessly");
+        }
+    }
+    {
+        fearvr::VerticalCameraHeightState height;
+        fearvr::UpdateVerticalCameraHeight(
+            height, 100.0F, 100.0F, false, false, true);
+        const auto airborne = fearvr::UpdateVerticalCameraHeight(
+            height, 120.0F, 110.0F, true, false, true);
+        if (!airborne.bypassActive ||
+            !Near(airborne.visualHeight, 120.0F)) {
+            return Fail("airborne camera must ignore an old smoothing tail");
+        }
+    }
+    {
+        fearvr::VerticalCameraHeightState height;
+        fearvr::UpdateVerticalCameraHeight(
+            height, 100.0F, 100.0F, false, false, true);
+        const auto guarded = fearvr::UpdateVerticalCameraHeight(
+            height, 50.0F, 90.0F, false, false, true);
+        if (guarded.bypassActive ||
+            !Near(guarded.visualHeight, 90.0F)) {
+            return Fail("large collision correction must keep final height");
+        }
     }
 
     std::cout << "test_stereo_math: OK\n";

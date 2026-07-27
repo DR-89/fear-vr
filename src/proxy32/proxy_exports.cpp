@@ -137,6 +137,10 @@ extern "C" void FearVr_SetStereoEnabled(BOOL enabled) {
     fearvr::SetStereoEnabled(enabled);
 }
 
+extern "C" void FearVr_SetFovScalePercent(std::uint32_t percent) {
+    fearvr::SetFovScalePercent(percent);
+}
+
 extern "C" BOOL FearVr_IsTranslationEnabled() {
     return fearvr::IsTranslationEnabled();
 }

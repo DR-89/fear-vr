@@ -175,6 +175,10 @@ volatile LONG* AtomicFlags(FearVrSharedHeader& header) noexcept {
     return reinterpret_cast<volatile LONG*>(&header.bridgeFlags);
 }
 
+volatile LONG* Atomic32(std::uint32_t& value) noexcept {
+    return reinterpret_cast<volatile LONG*>(&value);
+}
+
 volatile LONG64* Atomic64(std::uint64_t& value) noexcept {
     return reinterpret_cast<volatile LONG64*>(&value);
 }
@@ -1007,6 +1011,25 @@ public:
         }
     }
 
+    void SetFovScalePercent(std::uint32_t percent) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const std::uint32_t requested =
+            NormalizeFovScalePercent(percent);
+        if (fovScalePercent_ == requested) {
+            return;
+        }
+        fovScalePercent_ = requested;
+        if (shared_ != nullptr) {
+            InterlockedExchange(
+                Atomic32(shared_->fovScalePercent),
+                static_cast<LONG>(fovScalePercent_));
+        }
+        logger_.Write(
+            "INFO", "fov_scale_set",
+            "Stereo FOV scale set to " +
+                std::to_string(fovScalePercent_) + "%.");
+    }
+
     BOOL TranslationEnabled() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         return config_.translationEnabled ? TRUE : FALSE;
@@ -1088,10 +1111,10 @@ public:
 
     void RequestRecenter() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
-        IncrementRecenterGeneration();
+        IncrementPanelRecenterGeneration();
         logger_.Write(
-            "INFO", "recenter_requested",
-            "The in-game VR menu requested a new neutral HMD pose.");
+            "INFO", "panel_recenter_requested",
+            "The in-game VR menu requested a new 2D panel anchor.");
     }
 
     BOOL StereoAvailable() const noexcept {
@@ -1298,6 +1321,18 @@ private:
         }
     }
 
+    void IncrementPanelRecenterGeneration() noexcept {
+        if (shared_ == nullptr) {
+            return;
+        }
+        LONG generation = InterlockedIncrement(
+            Atomic32(shared_->panelRecenterGeneration));
+        if (generation == 0) {
+            InterlockedIncrement(
+                Atomic32(shared_->panelRecenterGeneration));
+        }
+    }
+
     void PollStereoToggle() noexcept {
         if (!config_.stereoToggleAllowed) {
             return;
@@ -1333,10 +1368,19 @@ private:
             const bool recenterKeyDown =
                 (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
             if (recenterKeyDown && !recenterKeyWasDown_) {
-                IncrementRecenterGeneration();
-                logger_.Write(
-                    "INFO", "recenter_requested",
-                    "F9 requested a new neutral HMD orientation.");
+                const bool flatView =
+                    menuActive_ || comfortModeEnabled_ ||
+                    !config_.stereoEnabled;
+                if (flatView) {
+                    IncrementPanelRecenterGeneration();
+                    logger_.Write(
+                        "INFO", "panel_recenter_requested",
+                        "F9 requested a new 2D panel anchor.");
+                } else {
+                    logger_.Write(
+                        "INFO", "world_recenter_ignored",
+                        "F9 has no recenter function in the 3D world.");
+                }
             }
             recenterKeyWasDown_ = recenterKeyDown;
 
@@ -1418,6 +1462,9 @@ private:
         }
 
         shared_->gameProcessId = GetCurrentProcessId();
+        InterlockedExchange(
+            Atomic32(shared_->fovScalePercent),
+            static_cast<LONG>(fovScalePercent_));
         InterlockedOr(AtomicFlags(*shared_), FEARVR_BF_GAME_READY);
         logger_.Write("INFO", "ipc_created",
                       "Named mapping and bounded ring ready.");
@@ -2498,6 +2545,8 @@ private:
     bool comfortModeEnabled_{false};
     bool menuActive_{false};
     std::uint32_t recenterGeneration_{0};
+    std::uint32_t fovScalePercent_{
+        FEARVR_FOV_SCALE_DEFAULT_PERCENT};
     StereoToggleCallback stereoToggleCallback_{nullptr};
 };
 
@@ -2950,6 +2999,10 @@ BOOL IsStereoEnabled() noexcept {
 
 void SetStereoEnabled(BOOL enabled) noexcept {
     GetBridge().SetStereoEnabled(enabled);
+}
+
+void SetFovScalePercent(std::uint32_t percent) noexcept {
+    GetBridge().SetFovScalePercent(percent);
 }
 
 BOOL IsTranslationEnabled() noexcept {

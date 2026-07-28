@@ -134,7 +134,8 @@ Der Host:
 - prüft vor dem Import die exakte Adapter-LUID;
 - beansprucht nur zusammengehörige READY-Slots beider Augen;
 - validiert Handles, Dimension, Format, Mips, Array- und Sample-Eigenschaften;
-- öffnet die Shared Textures mit `ID3D11Device::OpenSharedResource`;
+- öffnet jede Shared Texture **einmal** mit `ID3D11Device::OpenSharedResource`
+  und merkt sie unter ihrem Handle (siehe „Kosten im Bildtakt“);
 - kopiert sie GPU-seitig in private D3D11-Texturen;
 - interpretiert die von D3D9 als `B8G8R8A8_UNORM` bereitgestellten
   Backbufferwerte beim Sampling als sRGB. FEARs Fenster enthält bereits
@@ -149,6 +150,57 @@ Der Host:
 
 Die private Kopie verhindert, dass eine bereits wiederverwendete
 D3D9-Shared-Texture noch von einer OpenXR-Swapchain gelesen wird.
+
+### Kosten im Bildtakt
+
+Der Host hatte drei Treiberaufrufe pro Bild, die dort nicht hingehören. Befund
+aus `logs/m5-fear-20260728-114031`: `copy_avg_us` 310–440 mit Spitzen bis
+3772 µs, und die XR-Displayrate brach in einzelnen Messfenstern auf 72,8 statt
+90 ein — die kurzen Ruckler, bei denen die Welt sichtbar nachhing.
+
+- **`OpenSharedResource` je Auge und Spielbild.** Das ist ein Kernelaufruf mit
+  Treiber-Sperre, kein Zeigerkopieren. Es gibt genau sechs Slots (drei je
+  Auge); sie werden jetzt einmal geöffnet und unter ihrem Handle gemerkt.
+  Ändert der Proxy seine Slots, trägt derselbe Slot ein neues Handle — der
+  Vergleich öffnet dann von selbst neu. Am Bildinhalt ändert das nichts: Wer
+  welchen Slot lesen darf, klärt allein das Claim-Protokoll.
+- **`CreateRenderTargetView` je Auge und XR-Bild.** Die Swapchain-Bildmenge
+  steht nach dem Aufzählen fest; die Sichten werden jetzt einmal je Bild
+  angelegt und mit der Swapchain wieder freigegeben — vor den Bildern, weil
+  eine Sicht eine Referenz auf die Textur hält.
+- **`Flush` je Auge.** Einmal pro Bild genügt; wichtig ist allein, dass alles
+  vor `xrEndFrame` eingereicht ist.
+
+### Was `perf_frame` seitdem meldet
+
+`frame_cpu_max_us` ist die **eigene** Arbeit: alles zwischen `xrBeginFrame`
+und `xrEndFrame`, abzüglich der Wartezeiten, die der Kompositor bestimmt
+(`xrWaitSwapchainImage` und `xrEndFrame` selbst). `long_frames` zählt davon
+die Bilder über 8 ms von 11,1 ms Budget. Dazu kommen die Abschnittsspitzen
+`swap_wait_max_us`, `input_max_us`, `locate_max_us`, `flush_max_us` und
+`endframe_max_us` — zusammen decken sie das Bild ab.
+
+`pose_fallback` zählt den Fall, dass zu einem importierten Bild keine
+gemerkte Renderpose gefunden wurde: Dann bekommt ein altes Bild die aktuelle
+Pose aufgedrückt, der Kompositor hält es für frisch und korrigiert nichts
+mehr — die Welt hängt sichtbar nach. Bisher wurde nur der *erste* Treffer
+geloggt, der Fehlschlag also gar nicht.
+
+### Messergebnis vom 28.07.2026
+
+Lauf `logs/m5-fear-20260728-165106`, 102 Spielfenster (30 600 Bilder):
+
+- `xr_fps` fiel in **keinem** Fenster unter 89,4 (vorher 72,8 und 75,1);
+- `copy_avg_us` 82–106 statt 310–440, `copy_max_us` 612 statt 3772;
+- die größte **eigene** Spitze lag bei 576 µs, im Mittel 180 µs je Fenster;
+- 19 Fenster hatten ein Bild über 11,1 ms — **alle 19** gingen zu über 90 %
+  auf `xrEndFrame` zurück, also auf das Entgegennehmen durch den Kompositor;
+- `pose_fallback` durchgehend 0.
+
+Zwei Vermutungen unterwegs waren falsch und sind hier festgehalten, damit sie
+niemand wiederholt: Weder der Logger (asynchron gemacht, Wirkung im Rauschen:
+0,89 → 0,80 lange Bilder je Fenster) noch der `Flush` (272 µs) hatten mit den
+Spitzen zu tun. Erst die Abschnittsmessung hat es entschieden.
 
 ## Automatisierte und isolierte Tests
 

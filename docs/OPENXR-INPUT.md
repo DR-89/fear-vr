@@ -340,11 +340,24 @@ Die Rampe läuft von 0 bei 0,20 m auf 0,75 ab 0,35 m (`TwoHandedAimBlend`).
 Gedreht wird über die kürzeste Drehung zwischen alter und neuer Vorwärtsachse.
 Damit bleibt die Neigung der rechten Hand erhalten — die Waffe kippt in der
 Hand, statt sich um die eigene Achse zu verdrehen. Zwei Sicherungen begrenzen
-das: unter 0,12 m Handabstand ist die Linie nur noch Trackingrauschen. Weicht
-sie mehr als 50° von der Zielachse ab, wird sie am Rand dieses Kegels
-festgehalten. Früher setzte die Zweihandkorrektur dort für ein Bild vollständig
-aus; die frisch berechnete Einhandpose ließ die Waffe dadurch sichtbar in die
-Bildmitte springen.
+das: unter 0,12 m Handabstand ist die Linie nur noch Trackingrauschen. Und der
+Lenkwinkel wird weich gedämpft (`SoftLimitedSteerAngle`): bis 55° folgt die
+Waffe eins zu eins, darüber wächst der Winkel nur noch gedämpft weiter und
+läuft asymptotisch gegen 90°, ohne sie je zu erreichen. Die Steigung am
+Übergang ist 1, der Verlauf also knickfrei.
+
+Zwei Fehler dieser Begrenzung sind im echten Lauf aufgefallen:
+
+- Früher setzte die Zweihandkorrektur jenseits der Grenze für ein Bild
+  vollständig aus; die frisch berechnete Einhandpose ließ die Waffe dadurch
+  sichtbar in die Bildmitte springen.
+- Danach hielt sie die Richtung am Rand eines harten 50°-Kegels fest — und
+  benutzte dafür `forward.Cross(target)` als Drehachse. `LTVector::Cross`
+  dreht die Operandenreihenfolge aber um (COORDINATE-SYSTEM.md §1), die Achse
+  zeigte also in die Gegenrichtung: Sobald die Stützhand den Kegel verließ,
+  kippte die Waffe schlagartig auf die **falsche** Seite der Zielachse
+  (Benutzerbefund vom 28.07.2026, „plötzlich nach links"). Das Kreuzprodukt
+  wird jetzt von Hand gerechnet, wie in `RotationBetweenDirections`.
 
 Die Korrektur sitzt in `ApplyTwoHandedAimSupport` und läuft im
 Weapon-Manager-Update **nach** der Mündungskorrektur, also auf der fertigen

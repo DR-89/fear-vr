@@ -17,7 +17,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\_fearvr-env.ps1"
-$cfg = Get-FearVrConfig
 
 if (-not (Test-Path -LiteralPath $SettingsPath -PathType Leaf)) {
     throw "SteamVR-Konfiguration fehlt: $SettingsPath"
@@ -53,9 +52,24 @@ if ([Text.RegularExpressions.Regex]::IsMatch($text, $valuePattern)) {
 }
 
 if ($changed) {
-    $backupDirectory = Assert-UnderProjectRoot (
-        Join-Path $cfg.ProjectRoot 'logs\steamvr-settings-backups'
+    # Der Sicherungsort kommt aus dem eigenen Skriptort, nicht aus einer
+    # Projektkonfiguration.
+    #
+    # Vorher stand hier `$cfg.ProjectRoot`. Im Repo gibt es das; im
+    # ausgelieferten Paket bringt `_fearvr-release.ps1` aber gar keine
+    # Projektwurzel mit, `$cfg.ProjectRoot` war dort also $null und
+    # `Join-Path` brach mit "Cannot bind argument to parameter 'Path'" ab.
+    # Aufgefallen erst bei einem Nutzer, weil dieser Zweig nur laeuft, wenn
+    # der Theatermodus tatsaechlich noch an ist — wer ihn ohnehin aus hatte,
+    # kam nie hierher. `..\logs` trifft in beiden Faellen: im Repo die
+    # Projektwurzel, im Paket dessen eigenes Verzeichnis.
+    $backupDirectory = [IO.Path]::GetFullPath(
+        (Join-Path $PSScriptRoot '..\logs\steamvr-settings-backups')
     )
+    # Die Wurzelpruefung aus §12 gilt nur im Repo; im Paket gibt es sie nicht.
+    if (Get-Command Assert-UnderProjectRoot -ErrorAction SilentlyContinue) {
+        $backupDirectory = Assert-UnderProjectRoot $backupDirectory
+    }
     New-Item -ItemType Directory -Force -Path $backupDirectory |
         Out-Null
     $backupPath = Join-Path $backupDirectory (

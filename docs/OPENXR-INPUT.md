@@ -56,7 +56,7 @@ fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
 - A: Waffenwechsel; B kurz: Nachladen; B gehalten: Granate werfen;
 - X: Taschenlampe; Y: Pause;
 - rechter Grip: Benutzen; rechter Trigger: Feuern; linker Trigger:
-  Zeitlupe und Fokus;
+  Zeitlupe;
 - rechter Stick-Klick: in der 3D-Welt manueller Nahkampfangriff, in Menüs und
   anderen 2D-Ansichten den Flachbildschirm neu verankern;
 - linker Stick-Klick: Medkit benutzen (`COMMAND_ID_MEDKIT` = 70). Retail wertet
@@ -89,13 +89,14 @@ Beide Augenposen enthalten den Kopfversatz als denselben Summanden, deshalb
 genügt **ein** Strahl pro Bild statt einem pro Auge; der gesperrte Anteil wird
 anschließend von beiden Posen abgezogen.
 
-Der Körper wird bewusst **nicht** nachgezogen. Frühere Fassungen speisten
-kleine Bewegungsachsen ein, damit Retails Kollisionskapsel dem Lean folgte.
-Das erzeugte beim Anhalten und Zurücklehnen eine Rückkopplung, konnte pendeln
-und den Blick selten hinter das Körpermodell setzen. Der aktuelle Pfad bewegt
-deshalb nur Blickpunkt, Hände, Waffe, Mündung und Schussursprung um denselben
-weltbegrenzten Versatz. Körpermodell und Retail-Kollisionskapsel bleiben an der
-normalen Spielerposition; es werden keinerlei Lean-Bewegungsachsen injiziert.
+Das sichtbare Körpermodell folgt beim Rendern dem horizontalen Anteil dieses
+Versatzes. Dadurch bleibt der Kopf natürlich über dem Torso, statt bei realer
+Raumbewegung vor, hinter oder neben das eigene Modell zu gelangen. Retails
+Spielerobjekt und Kollisionskapsel bleiben dennoch an der normalen
+Spielerposition; es werden keinerlei Lean-Bewegungsachsen injiziert. So
+entsteht weder die Rückkopplung noch das Pendeln früherer Nachführversuche.
+Blickpunkt, Hände, Waffe, Mündung und Schussursprung verwenden denselben
+weltbegrenzten Versatz.
 
 Der gemessene Kopfversatz wird verstärkt, bevor Blickpunkt und Hände ihm
 folgen: `LeanScale` in `fearvr.ini`, Standard 200 Prozent, erlaubt sind 100

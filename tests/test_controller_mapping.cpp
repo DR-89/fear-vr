@@ -129,6 +129,11 @@ int main() {
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_SLOWMO)
                .active);
+    // Slow-mo and focus must not share the same controller edge. Retail's
+    // focus detector otherwise redirects the first shot after slow-mo starts.
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_FOCUS)
+                .active);
     input.buttons &= ~static_cast<std::uint32_t>(
         FEARVR_IB_LEFT_PRIMARY);
     assert(fearvr::MapControllerCommand(

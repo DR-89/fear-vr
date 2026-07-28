@@ -275,10 +275,11 @@ something is built but not yet verified in-game, it's noted.
   the viewpoint never leaves the player position. Physical head movement now
   moves the viewpoint too, limited by a ray against the world so you cannot
   lean through a wall. Hands, weapon, muzzle and shot origin follow the same
-  offset, while Retail's body and collision capsule remain at the player
-  position. No locomotion axes are injected, preventing counter-steering,
-  oscillation or a view behind the body. Switchable as `Physical lean` in the
-  VR settings.
+  offset. The visible body follows its horizontal component during rendering,
+  keeping the viewer naturally above the torso, while Retail's player object
+  and collision capsule remain at the player position. No locomotion axes are
+  injected, preventing counter-steering or oscillation. Switchable as
+  `Physical lean` in the VR settings.
 - **Leaning via hand tilt.** Tilting the left hand sideways leans around
   corners; inverted and hanging hands are handled.
 - **Haptics per shot**, including full-auto — triggered on the retail shot,
@@ -488,7 +489,7 @@ Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click performs a melee attack in the 3D world and re-anchors the panel in 2D.
 A switches weapons, B reloads (short press) or
 throws a grenade (hold), X toggles the flashlight, Y opens pause. Right grip
-uses, the left trigger toggles slow-mo and focuses, and the right trigger
+uses, the left trigger toggles slow-mo, and the right trigger
 fires. Tilting the left hand sideways leans around corners.
 Holding the weapon with both hands steers longer weapons along the line
 between the hands; sprinting and leaning rest while that grab is held.

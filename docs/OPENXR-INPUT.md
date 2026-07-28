@@ -334,14 +334,16 @@ der rechten Hand, ein Gewehr liegt in beiden. Als Länge dient der gemessene
 Abstand zwischen Waffenursprung und Mündungssockel (`muzzleOffsetInWeapon`,
 derselbe Wert, aus dem auch die Mündungskorrektur entsteht); er ist der
 einzige Waffenkennwert, den wir ohne Retail-Waffendatenbank verlässlich haben.
-Die Rampe läuft von 0 bei 0,28 m auf 0,85 ab 0,55 m (`TwoHandedAimBlend`).
+Die Rampe läuft von 0 bei 0,20 m auf 0,75 ab 0,35 m (`TwoHandedAimBlend`).
 
 Gedreht wird über die kürzeste Drehung zwischen alter und neuer Vorwärtsachse.
 Damit bleibt die Neigung der rechten Hand erhalten — die Waffe kippt in der
 Hand, statt sich um die eigene Achse zu verdrehen. Zwei Sicherungen begrenzen
-das: unter 0,12 m Handabstand ist die Linie nur noch Trackingrauschen, und
-weicht sie mehr als 50° von der Zielachse ab, hält die Hand offensichtlich
-nicht dieselbe Waffe. In beiden Fällen bleibt die Feuerachse unverändert.
+das: unter 0,12 m Handabstand ist die Linie nur noch Trackingrauschen. Weicht
+sie mehr als 50° von der Zielachse ab, wird sie am Rand dieses Kegels
+festgehalten. Früher setzte die Zweihandkorrektur dort für ein Bild vollständig
+aus; die frisch berechnete Einhandpose ließ die Waffe dadurch sichtbar in die
+Bildmitte springen.
 
 Die Korrektur sitzt in `ApplyTwoHandedAimSupport` und läuft im
 Weapon-Manager-Update **nach** der Mündungskorrektur, also auf der fertigen

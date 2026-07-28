@@ -5329,6 +5329,38 @@ bool CurrentSupportDirection(LTVector& direction) noexcept {
     return true;
 }
 
+// Haelt die Stuetzhand die Handlinie weiter als den zulaessigen Lenkwinkel
+// seitlich, darf die Zweihandkorrektur nicht einfach aussetzen. Die
+// Waffenpose wurde fuer dieses Bild bereits aus der rechten Hand aufgebaut;
+// ein `return` wuerde sie deshalb schlagartig auf Einhand-Zielen und damit in
+// die Bildmitte zuruecksetzen. Stattdessen bleibt die Richtung am Rand des
+// erlaubten Kegels stehen.
+bool ClampTwoHandedTargetDirection(
+    const LTVector& forward, LTVector& target) noexcept {
+    const float dot = std::clamp(forward.Dot(target), -1.0F, 1.0F);
+    if (dot >= kTwoHandMinSteerAlignment) {
+        return true;
+    }
+
+    LTVector axis = forward.Cross(target);
+    if (axis.MagSqr() < 0.0001F) {
+        const LTVector reference =
+            std::fabs(forward.y) < 0.9F
+                ? LTVector(0.0F, 1.0F, 0.0F)
+                : LTVector(1.0F, 0.0F, 0.0F);
+        axis = forward.Cross(reference);
+    }
+    if (axis.MagSqr() < 0.0001F) {
+        return false;
+    }
+    axis.Normalize();
+
+    LTRotation limit;
+    limit.Init(axis, std::acos(kTwoHandMinSteerAlignment));
+    target = limit.RotateVector(forward);
+    return target.MagSqr() > 0.0001F;
+}
+
 void UpdateTwoHandedGrip() noexcept {
     const bool usable =
         g_twoHandedGripEnabled && g_weaponAim.valid &&
@@ -5417,9 +5449,11 @@ void ApplyTwoHandedAimSupport() noexcept {
     }
     target.Normalize();
     // Zwei Haende an derselben Waffe koennen nicht beliebig zueinander
-    // stehen. Laeuft die Stuetzhand zu weit weg, bleibt die Waffe bei der
-    // Waffenhand, statt ihr hinterherzuschwenken.
-    if (forward.Dot(target) < kTwoHandMinSteerAlignment) {
+    // stehen. Laeuft die Stuetzhand zu weit weg, wird die Lenkung am Rand des
+    // erlaubten Kegels begrenzt. Ein harter Abbruch hier wuerde auf die zuvor
+    // berechnete Einhandpose zurueckfallen und die Waffe in die Bildmitte
+    // springen lassen.
+    if (!ClampTwoHandedTargetDirection(forward, target)) {
         return;
     }
 

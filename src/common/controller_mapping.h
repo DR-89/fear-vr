@@ -193,7 +193,8 @@ inline FearVrCommandValue MapControllerCommand(
         return {
             1.0F,
             leftActive &&
-                (input.buttons & FEARVR_IB_LEFT_PRIMARY) != 0};
+                input.trigger[FEARVR_HAND_LEFT] >=
+                    kTriggerThreshold};
     case FEARVR_CMD_LEAN_LEFT:
         return {
             1.0F,

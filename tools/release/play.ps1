@@ -294,10 +294,12 @@ if ($usesSteamVr -and (Test-Path -LiteralPath $guardScript -PathType Leaf)) {
 
 Write-Host "F.E.A.R. laeuft (PID $($fear.Id))." -ForegroundColor Green
 Write-Host ''
-Write-Host 'Steuerung: linker Stick bewegt, rechter Stick dreht, hoch/runter waehlt Waffe.'
-Write-Host 'A springt, B laedt nach, X duckt, Y schaltet Zeitlupe.'
-Write-Host 'Linker Grip rennt, linker Stick-Klick oeffnet Pause, rechter Grip benutzt.'
-Write-Host 'Trigger zielen und feuern; rechter Stick-Klick greift in 3D im Nahkampf an.'
+Write-Host 'Steuerung: linker Stick bewegt, rechter Stick dreht; hoch springt, runter duckt.'
+Write-Host 'A wechselt die Waffe; B laedt nach oder wirft gehalten eine Granate.'
+Write-Host 'X schaltet die Lampe, Y pausiert.'
+Write-Host 'Linker Trigger schaltet Zeitlupe und Fokus; rechter Trigger feuert.'
+Write-Host 'Linker Grip rennt, linker Stick-Klick nutzt Medkit, rechter Grip benutzt.'
+Write-Host 'Rechter Stick-Klick greift in 3D im Nahkampf an.'
 Write-Host 'Die linke Hand seitlich neigen lehnt um die Ecke.'
 Write-Host 'F8 Stereo an/aus, F9 richtet nur 2D-Bildschirme neu aus, F10 Komfortbildschirm.'
 Write-Host 'VR-Einstellungen stehen im ESC-Menue unter "VR SETTINGS".'

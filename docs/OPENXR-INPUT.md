@@ -54,8 +54,9 @@ fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
 - rechter Stick links/rechts: Drehen; hoch: Springen; runter: Ducken
   (jeweils ab 80 % Ausschlag);
 - A: Waffenwechsel; B kurz: Nachladen; B gehalten: Granate werfen;
-- X: Zeitlupe; Y: Pause;
-- rechter Grip: Benutzen; rechter Trigger: Feuern; linker Trigger: Fokus;
+- X: Taschenlampe; Y: Pause;
+- rechter Grip: Benutzen; rechter Trigger: Feuern; linker Trigger:
+  Zeitlupe und Fokus;
 - rechter Stick-Klick: in der 3D-Welt manueller Nahkampfangriff, in Menüs und
   anderen 2D-Ansichten den Flachbildschirm neu verankern;
 - linker Stick-Klick: Medkit benutzen (`COMMAND_ID_MEDKIT` = 70). Retail wertet

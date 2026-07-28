@@ -424,7 +424,7 @@ if ($Milestone -ne 'M2') {
                 'M5-Controller: linker Stick bewegt, rechter Stick dreht; ' +
                 'rechts hoch springt, runter duckt (ab 80 Prozent). ' +
                 'A wechselt die Waffe, B kurz lädt nach, B gehalten wirft ' +
-                'eine Granate, X schaltet Zeitlupe, Y öffnet Pause.'
+                'eine Granate, X schaltet die Lampe, Y öffnet Pause.'
             )
             Write-Host (
                 'Linker Grip rennt — oder haelt, mit der Hand an der Waffe, ' +

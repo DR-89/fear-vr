@@ -126,7 +126,7 @@ SteamVR itself does not have to run when using Virtual Desktop.
 | left stick | move |
 | left grip | sprint — or, with the hand on the weapon, hold it two-handed |
 | left stick click | use medkit |
-| left trigger | focus |
+| left trigger | slow-mo / focus |
 | right stick left/right | turn |
 | right stick up/down | jump / crouch (from 80 % deflection) |
 | right stick click | melee attack in 3D / re-anchor panel in 2D |
@@ -134,7 +134,7 @@ SteamVR itself does not have to run when using Virtual Desktop.
 | right trigger | fire |
 | A | weapon switch |
 | B | short: reload — held: throw grenade |
-| X | slow-mo |
+| X | flashlight |
 | Y | pause menu |
 | tilt left hand sideways | lean around corners (only with *Physical lean: OFF*) |
 | physically lean your head | move the viewpoint, stopped by walls (*Physical lean: ON*) |

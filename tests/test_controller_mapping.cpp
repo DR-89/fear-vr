@@ -119,6 +119,18 @@ int main() {
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_MENU)
                .active);
+    // X ist jetzt allein der Taschenlampenschalter. Zeitlupe folgt dem linken
+    // Trigger und darf durch X nicht mehr als Spielkommando aktiviert werden.
+    input.trigger[FEARVR_HAND_LEFT] = 0.54F;
+    assert(!fearvr::MapControllerCommand(
+                input, fearvr::FEARVR_CMD_SLOWMO)
+                .active);
+    input.trigger[FEARVR_HAND_LEFT] = 0.55F;
+    assert(fearvr::MapControllerCommand(
+               input, fearvr::FEARVR_CMD_SLOWMO)
+               .active);
+    input.buttons &= ~static_cast<std::uint32_t>(
+        FEARVR_IB_LEFT_PRIMARY);
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_SLOWMO)
                .active);

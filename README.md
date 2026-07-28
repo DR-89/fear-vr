@@ -257,7 +257,7 @@ something is built but not yet verified in-game, it's noted.
 - **Point instead of look.** Activate and pick-up follow the weapon laser
   with approx. 1.5 m range, instead of head direction.
 - **Hand flashlight in the left hand.** It follows the hand's position and aim
-  direction and toggles with a click on the left trigger. The second,
+  direction and toggles with X. The second,
   non-toggleable retail flashlight is removed.
 - **Full gesture melee.** A forward thrust of either available hand produces
   the weapon or off-hand strike. The same thrust becomes a jump kick during a
@@ -487,14 +487,15 @@ the weapon, holds it as a second hand; left stick click uses a medkit.
 Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click performs a melee attack in the 3D world and re-anchors the panel in 2D.
 A switches weapons, B reloads (short press) or
-throws a grenade (hold), X toggles slow-mo, Y opens pause. Right grip uses,
-triggers aim and fire. Tilting the left hand sideways leans around corners.
+throws a grenade (hold), X toggles the flashlight, Y opens pause. Right grip
+uses, the left trigger toggles slow-mo and focuses, and the right trigger
+fires. Tilting the left hand sideways leans around corners.
 Holding the weapon with both hands steers longer weapons along the line
 between the hands; sprinting and leaning rest while that grab is held.
 `Controls: LEFT-HANDED` in the VR menu mirrors every binding between the
 hands.
 The flashlight is in the left hand, follows its position and aim direction,
-and toggles with a click on the left trigger. Every shot vibrates. Mouse,
+and toggles with X. Every shot vibrates. Mouse,
 keyboard and gamepad remain usable in parallel. Details:
 `docs/OPENXR-INPUT.md`.
 

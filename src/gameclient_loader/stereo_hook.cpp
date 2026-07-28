@@ -350,7 +350,7 @@ bool g_flashlightCameraOverridePending = false;
 // Transform nicht in ein fremdes oder totes Objekt zurueckgeschrieben werden.
 HLOCALOBJ g_flashlightOverrideObject = nullptr;
 bool g_flashlightEnabled = true;
-bool g_leftTriggerWasDown = false;
+bool g_flashlightButtonWasDown = false;
 struct TrackedPoseCache {
     FearVrPose pose{};
     ULONGLONG lastValidTick{0};
@@ -6622,7 +6622,7 @@ void RemoveWeaponAimHooks() noexcept {
     g_twoHandedGrip = TwoHandedGripState{};
     g_lastWeaponManagerUpdateTick = 0;
     g_flashlightEnabled = true;
-    g_leftTriggerWasDown = false;
+    g_flashlightButtonWasDown = false;
     g_weaponSwitchPulseUntil = 0;
     g_weaponSwitchTriggered = false;
     g_secondaryHoldStartTick = 0;
@@ -7048,20 +7048,20 @@ void UpdateMenuAxis(
 }
 
 void PollFlashlightToggle() noexcept {
-    const bool leftTriggerDown =
+    const bool flashlightButtonDown =
         (g_currentInput.activeHands & FEARVR_HAND_MASK_LEFT) != 0 &&
-        g_currentInput.trigger[FEARVR_HAND_LEFT] >= 0.55F;
-    if (leftTriggerDown && !g_leftTriggerWasDown) {
+        (g_currentInput.buttons & FEARVR_IB_LEFT_PRIMARY) != 0;
+    if (flashlightButtonDown && !g_flashlightButtonWasDown) {
         g_flashlightEnabled = !g_flashlightEnabled;
         Report(
             "INFO", "left_flashlight_toggled",
             g_flashlightEnabled
-                ? "Left Trigger click enabled the flashlight."
-                : "Left Trigger click disabled the flashlight.");
+                ? "X enabled the flashlight."
+                : "X disabled the flashlight.");
     }
-    // Edge-triggered on purpose: holding Trigger keeps the selected state and
+    // Edge-triggered on purpose: holding X keeps the selected state and
     // does not retrigger the toggle every frame.
-    g_leftTriggerWasDown = leftTriggerDown;
+    g_flashlightButtonWasDown = flashlightButtonDown;
 }
 
 // Sucht den Zeiger auf `CInterfaceMgr` und belegt dabei, dass der

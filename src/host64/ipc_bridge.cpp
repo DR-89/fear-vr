@@ -551,6 +551,16 @@ bool IpcBridge::EnsurePrivateTexture(std::uint32_t eye,
 
     destination = {};
     D3D11_TEXTURE2D_DESC privateDescription = sourceDescription;
+    // FEAR's D3D9 backbuffer stores display-referred sRGB colour values even
+    // though the shared resource is exposed as plain UNORM. Sampling that
+    // resource as linear and then writing it into an sRGB OpenXR swapchain
+    // gamma-encodes it a second time, making shaded surfaces much brighter in
+    // VR than in the game window.
+    //
+    // Keep the copied bits unchanged in a typeless resource and interpret
+    // them as sRGB only in the shader view. CopyResource permits this within
+    // the BGRA8 format family, while the shader receives linear-light values.
+    privateDescription.Format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
     privateDescription.Usage = D3D11_USAGE_DEFAULT;
     privateDescription.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     privateDescription.CPUAccessFlags = 0;
@@ -562,8 +572,13 @@ bool IpcBridge::EnsurePrivateTexture(std::uint32_t eye,
         LogHresult("private_texture_create_failed", result);
         return false;
     }
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDescription{};
+    viewDescription.Format = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    viewDescription.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    viewDescription.Texture2D.MostDetailedMip = 0;
+    viewDescription.Texture2D.MipLevels = 1;
     result = device_->CreateShaderResourceView(
-        destination.texture.Get(), nullptr,
+        destination.texture.Get(), &viewDescription,
         destination.view.ReleaseAndGetAddressOf());
     if (FAILED(result)) {
         LogHresult("private_srv_create_failed", result);
@@ -576,7 +591,8 @@ bool IpcBridge::EnsurePrivateTexture(std::uint32_t eye,
     std::ostringstream message;
     message << "eye=" << eye << " size=" << destination.width << 'x'
             << destination.height << " format="
-            << static_cast<unsigned>(destination.format);
+            << static_cast<unsigned>(destination.format)
+            << " sampling=srgb";
     log_("INFO", "private_texture", message.str());
     return true;
 }

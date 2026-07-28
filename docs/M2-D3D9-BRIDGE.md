@@ -136,6 +136,10 @@ Der Host:
 - validiert Handles, Dimension, Format, Mips, Array- und Sample-Eigenschaften;
 - öffnet die Shared Textures mit `ID3D11Device::OpenSharedResource`;
 - kopiert sie GPU-seitig in private D3D11-Texturen;
+- interpretiert die von D3D9 als `B8G8R8A8_UNORM` bereitgestellten
+  Backbufferwerte beim Sampling als sRGB. FEARs Fenster enthält bereits
+  gamma-kodierte Farben; ohne diese Dekodierung würde die bevorzugte
+  sRGB-OpenXR-Swapchain sie ein zweites Mal aufhellen;
 - gibt einen Slot erst nach einer D3D11-Event-Query wieder frei;
 - rendert die letzte vollständige Textur per Fullscreen-Triangle;
 - konsumiert Frames auch im OpenXR-Zustand `SYNCHRONIZED`, damit beim

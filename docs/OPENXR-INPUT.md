@@ -43,6 +43,18 @@ Vorgeschlagene Interaction Profiles:
 - HTC Vive Controller;
 - KHR Simple Controller.
 
+Wenn die Runtime `XR_KHR_generic_controller` anbietet, aktiviert der Host die
+Erweiterung unter Beibehaltung des OpenXR-1.0-Anwendungsniveaus und schlägt
+zusätzlich das KHR Generic Controller Profile vor. SteamVR kann damit
+Controller aus neueren Treibern automatisch auf Sticks, Trigger, Grip,
+Primär-/Sekundärtasten, Posen und Haptik abbilden.
+
+Nach `xrSyncActions` und bei jedem
+`XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED` fragt der Host
+`xrGetCurrentInteractionProfile` für beide Hände ab. Das Ereignis
+`input_interaction_profile` im Hostlog zeigt daher nicht nur akzeptierte
+Vorschläge, sondern das tatsächlich aktive beziehungsweise emulierte Profil.
+
 Die Zustände bleiben im Transport zunächst physisch und werden erst im
 GameClient semantisch auf F.E.A.R.-Befehle abgebildet. Dadurch kann kein
 fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
@@ -67,6 +79,27 @@ fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
 - linke Hand seitlich neigen: um die Ecke lehnen;
 - Waffenhand schnell nach vorne stoßen: Nahkampf (`COMMAND_ID_ALT_FIRING`
   = 19 — die Sekundärattacke, die Retail im Optionsmenü „Melee Attack" nennt).
+
+### SteamVR-native Controller
+
+Valve Index Controller besitzen für alle obigen Aktionen eigene Eingaben:
+Thumbsticks und Klicks, A/B, analoge Trigger und Grips sowie Posen und Haptik.
+
+HTC Vive Wands verwenden stattdessen:
+
+- linkes/rechtes Trackpad für Bewegung und Drehung sowie hoch/runter für
+  Springen und Ducken;
+- Trackpad-Klick als physische Primärtaste;
+- den digitalen Grip-Klick als Float-Squeeze (OpenXR konvertiert `click` zu
+  `0.0` beziehungsweise `1.0`) für Rennen/Zweihandgriff und Benutzen;
+- linke Menütaste für Pause;
+- rechte Menütaste kurz für Nachladen, gehalten für Granate;
+- Trigger, Aim-/Grip-Pose und Haptik unverändert.
+
+Vive Wands besitzen keine Stick-Klicks. Medkit bleibt deshalb über die
+Tastatur erreichbar; der manuelle Stick-Klick-Nahkampf wird durch die bereits
+vorhandene Waffenhand-/Off-Hand-Geste ersetzt. Maus, Tastatur und Gamepad
+bleiben parallel aktiv.
 
 ### Physisches Lehnen (`Physical lean`, Standard an)
 

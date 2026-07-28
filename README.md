@@ -40,7 +40,9 @@ them and shows examples — nothing has to be edited by hand.
   below 1.08 are rejected, because the Public Tools modules do not match them.
 - The official **Public Tools 1.08**, installed on this machine (see step 1).
 - A headset with **SteamVR** or **Virtual Desktop (VDXR)** as the active
-  OpenXR runtime.
+  OpenXR runtime. Native SteamVR hardware is covered by explicit Valve Index
+  and HTC Vive Wand controller profiles; Lighthouse headsets without bundled
+  controllers use whichever of those controllers is connected.
 - Windows 10/11, 64-bit.
 
 ### Must-have mod: F.E.A.R. HD Textures v2.0.2
@@ -247,7 +249,10 @@ something is built but not yet verified in-game, it's noted.
 
 - **Full game control via OpenXR controllers** — move, turn, jump, crouch,
   sprint, weapon switch, reload, grenade, slow-mo, use, aim, fire, pause and
-  melee. Mouse, keyboard and gamepad remain usable in parallel.
+  melee. Touch and Valve Index controllers expose every dedicated button.
+  Vive Wands map their two menu buttons to pause and reload/grenade; their
+  digital grip clicks are converted to the squeeze actions used by analog
+  controllers. Mouse, keyboard and gamepad remain usable in parallel.
 - **Weapon follows the right hand.** Shot origin and fire vectors come from
   the muzzle transform, not from gaze direction. View, hands and weapon share
   one directional camera-height basis: Retail smoothing remains for upward
@@ -462,6 +467,12 @@ pwsh -File tools\launch-m5-fear.ps1
 The mod is not bound to any specific runtime — the x64 host only speaks
 OpenXR. **SteamVR** and **VirtualDesktopXR (VDXR)** are confirmed.
 
+For native SteamVR hardware the host supplies dedicated bindings for Valve
+Index controllers and HTC Vive Wands. When SteamVR advertises
+`XR_KHR_generic_controller`, the host also enables that profile so SteamVR can
+automatically remap newer driver-provided controllers. The selected profile is
+written to the host log as `input_interaction_profile` for each hand.
+
 ```powershell
 pwsh -File tools\launch-m5-fear.ps1                    # active runtime
 pwsh -File tools\launch-m5-fear.ps1 -Runtime vdxr      # Virtual Desktop
@@ -483,7 +494,7 @@ entirely, and no SteamVR file is touched.
 launched via `steam.exe -applaunch 21090`. This is independent of which VR
 runtime renders. SteamVR itself does not need to run under VDXR.
 
-Bindings: left stick moves, left grip sprints — or, with that hand placed on
+Touch/Index bindings: left stick moves, left grip sprints — or, with that hand placed on
 the weapon, holds it as a second hand; left stick click uses a medkit.
 Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click performs a melee attack in the 3D world and re-anchors the panel in 2D.
@@ -491,6 +502,11 @@ A switches weapons, B reloads (short press) or
 throws a grenade (hold), X toggles the flashlight, Y opens pause. Right grip
 uses, the left trigger toggles slow-mo, and the right trigger
 fires. Tilting the left hand sideways leans around corners.
+On Vive Wands, the trackpads replace the sticks, trackpad clicks replace the
+primary face buttons, grip clicks provide sprint/use, the left menu button
+opens pause and the right menu button reloads on a short press or throws a
+grenade when held. Vive Wands have no physical stick clicks: medkit remains
+available on the keyboard, while the normal motion gesture provides melee.
 Holding the weapon with both hands steers longer weapons along the line
 between the hands; sprinting and leaning rest while that grab is held.
 `Controls: LEFT-HANDED` in the VR menu mirrors every binding between the
@@ -582,8 +598,9 @@ it sees SteamVR running.
   hook stays disabled and the game continues flat. `FEAR.exe` itself is only
   hooked through its import table, which is why other 1.08 builds are expected
   to work (see [Game editions](#game-editions)).
-- The left system/menu button cannot be bound: SteamVR captures it for its
-  own system menu.
+- On Touch controllers SteamVR captures the left system/menu button; Y remains
+  the pause binding. Vive Wand application-menu buttons remain available and
+  are mapped explicitly.
 - The weapon jump when climbing stairs is not conclusively solved and
   deliberately deferred.
 - "Motion-controlled aiming" is verified via aim laser and hit point; a

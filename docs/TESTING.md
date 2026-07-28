@@ -359,8 +359,31 @@ Benutzerabnahme am 24.07.2026:
 Die semantische Spielbelegung wurde anschließend nachgereicht und vom Benutzer
 im Spiel bestätigt: Bewegen, Drehen, Waffenwahl, Springen, Nachladen, Ducken,
 Zeitlupe, Rennen, Benutzen, Zielen/Feuern, Recenter und Pausenmenü. Die linke
-System-/Menütaste ist nicht nutzbar, weil SteamVR sie für das eigene
-Systemmenü abfängt.
+System-/Menütaste des getesteten Quest-Touch-Controllers ist nicht nutzbar,
+weil SteamVR sie für das eigene Systemmenü abfängt. Das gilt nicht für die
+Application-Menu-Tasten der Vive Wands.
+
+### SteamVR-native Controllerabdeckung, Implementierungsprüfung 28.07.2026
+
+- Valve Index: Thumbsticks, Trigger, analoge Grips, A/B, beide Stick-Klicks,
+  Aim-/Grip-Posen und Haptik besitzen explizite Bindings.
+- HTC Vive Wands: Trackpads, Trigger, digitale Grip-Klicks, beide
+  Application-Menu-Tasten, Aim-/Grip-Posen und Haptik besitzen explizite
+  Bindings. OpenXR konvertiert den digitalen Grip in die gemeinsame
+  Float-Squeeze-Action.
+- `XR_KHR_generic_controller` wird optional aktiviert und nur vorgeschlagen,
+  wenn die Runtime die Erweiterung meldet.
+- Das aktive beziehungsweise von SteamVR emulierte Interaction Profile wird
+  nach der Action-Synchronisierung und bei Profilwechsel pro Hand geloggt.
+- x86 und x64 bauen mit `/W4 /WX`; jeweils 13/13 CTest-Tests sind grün.
+- VDXR 1.0.10 akzeptierte die erweiterten Vive- und WMR-Vorschläge jeweils mit
+  `result=0`; die Runtime meldete den generischen KHR-Fallback als nicht
+  verfügbar. Ein Headset war bei dieser Initialisierungsprüfung nicht
+  verbunden.
+
+Ein physischer Index-/Vive-Wand-Lauf steht weiterhin aus. Bis dahin bedeutet
+„unterstützt“ eine vollständige Implementierungsabdeckung, nicht dieselbe
+Hardwarebestätigung wie bei Quest 3.
 
 ## 11. Native VR-Einstellungen im ESC-Menü
 

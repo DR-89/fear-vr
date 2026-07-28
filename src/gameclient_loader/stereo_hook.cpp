@@ -4592,16 +4592,13 @@ void PrepareWeaponSwitchPulse() noexcept {
     g_weaponSwitchTriggered = down;
 }
 
-// Rechte Sekundaertaste: kurz laedt nach, gehalten wirft eine Granate. Der
-// Wurf loest bereits beim Erreichen der Haltezeit aus und nicht erst beim
-// Loslassen, damit die Taste sich wie ein Auslöser anfuehlt. Nachladen kommt
-// dagegen zwangslaeufig erst beim Loslassen, denn vorher ist nicht bekannt,
-// ob es ein kurzer Druck war.
+// Rechte Sekundaer- bzw. Menütaste: kurz lädt nach, gehalten wirft eine
+// Granate. Der Wurf löst bereits beim Erreichen der Haltezeit aus und nicht
+// erst beim Loslassen, damit die Taste sich wie ein Auslöser anfühlt.
+// Nachladen kommt erst beim Loslassen, weil vorher die Haltedauer unbekannt ist.
 void PrepareGrenadeAndReloadPulse() noexcept {
     constexpr ULONGLONG kGrenadeHoldMs = 350;
-    const bool down =
-        (g_currentInput.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
-        (g_currentInput.buttons & FEARVR_IB_RIGHT_SECONDARY) != 0;
+    const bool down = RightSecondaryButtonDown(g_currentInput);
     const ULONGLONG now = GetTickCount64();
 
     if (down && !g_secondaryWasDown) {
@@ -4613,12 +4610,12 @@ void PrepareGrenadeAndReloadPulse() noexcept {
         g_grenadeConsumed = true;
         Report(
             "INFO", "grenade_throw_gesture",
-            "Grenade thrown after holding the right secondary button.");
+            "Grenade thrown after holding the right secondary/menu button.");
     } else if (!down && g_secondaryWasDown && !g_grenadeConsumed) {
         g_reloadPulseUntil = now + kCommandPulseMs;
         Report(
             "INFO", "reload_gesture",
-            "Reload triggered by a short press of the right secondary "
+            "Reload triggered by a short press of the right secondary/menu "
             "button.");
     }
     g_secondaryWasDown = down;
@@ -7851,7 +7848,7 @@ void PollControllerMenuInput() noexcept {
     const bool triggerPressed =
         triggerDown && !g_lastMenuTriggerDown;
     const bool menuRequested =
-        (pressed & FEARVR_IB_LEFT_SECONDARY) != 0;
+        (pressed & kLeftPauseButtonMask) != 0;
     const bool escapeDown =
         (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     const bool escapePressed = escapeDown && !g_escapeWasDown;
@@ -7876,7 +7873,7 @@ void PollControllerMenuInput() noexcept {
             TapMenuKey(VK_ESCAPE);
             Report(
                 "INFO", "controller_pause_requested",
-                "Left stick click sent one Escape key edge.");
+                "Left secondary/menu button sent one Escape key edge.");
         }
     }
     // Main screens are intentionally mono until F8, so render coverage alone
@@ -7952,7 +7949,7 @@ void PollControllerMenuInput() noexcept {
         triggerPressed) {
         TapMenuKey(VK_RETURN);
     }
-    if ((pressed & FEARVR_IB_RIGHT_SECONDARY) != 0) {
+    if ((pressed & kRightSecondaryButtonMask) != 0) {
         if (g_vrSettingsPageActive) {
             LeaveRetailVrSettingsPage();
         } else {

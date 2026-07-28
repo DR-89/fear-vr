@@ -400,7 +400,8 @@ public:
                        const std::string& message) {
                     logger_.Write(level, event, message);
                 });
-            xrInput_->Initialize(instance_);
+            xrInput_->Initialize(
+                instance_, genericControllerExtensionEnabled_);
             CreateSystemAndDevice();
 
             bool restartSession = false;
@@ -469,9 +470,18 @@ private:
                 "an.");
         }
 
-        const char* enabledExtensions[] = {
-            XR_KHR_D3D11_ENABLE_EXTENSION_NAME,
-        };
+        genericControllerExtensionEnabled_ =
+            std::find_if(
+                extensions.begin(), extensions.end(), [](const auto& p) {
+                    return std::string(p.extensionName) ==
+                           XR_KHR_GENERIC_CONTROLLER_EXTENSION_NAME;
+                }) != extensions.end();
+        std::vector<const char*> enabledExtensions{
+            XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+        if (genericControllerExtensionEnabled_) {
+            enabledExtensions.push_back(
+                XR_KHR_GENERIC_CONTROLLER_EXTENSION_NAME);
+        }
         XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
         strncpy_s(createInfo.applicationInfo.applicationName, "F.E.A.R. VR",
                   _TRUNCATE);
@@ -483,8 +493,8 @@ private:
         // Khronos hello_xr deliberately makes the same compatibility choice.
         createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
         createInfo.enabledExtensionCount =
-            static_cast<std::uint32_t>(std::size(enabledExtensions));
-        createInfo.enabledExtensionNames = enabledExtensions;
+            static_cast<std::uint32_t>(enabledExtensions.size());
+        createInfo.enabledExtensionNames = enabledExtensions.data();
 
         CheckXr(XR_NULL_HANDLE, xrCreateInstance(&createInfo, &instance_),
                 "xrCreateInstance");
@@ -498,6 +508,12 @@ private:
                 << XR_VERSION_MINOR(properties.runtimeVersion) << '.'
                 << XR_VERSION_PATCH(properties.runtimeVersion);
         logger_.Write("INFO", "runtime", runtime.str());
+        logger_.Write(
+            "INFO", "controller_fallback",
+            genericControllerExtensionEnabled_
+                ? "XR_KHR_generic_controller enabled."
+                : "XR_KHR_generic_controller unavailable; hardware-specific "
+                  "profiles remain active.");
     }
 
     void CreateSystemAndDevice() {
@@ -863,6 +879,18 @@ private:
                     reinterpret_cast<const XrEventDataEventsLost*>(&event);
                 logger_.Write("WARN", "events_lost",
                               "count=" + std::to_string(lost->lostEventCount));
+            }
+            if (event.type ==
+                    XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED &&
+                xrInput_) {
+                const auto* changed =
+                    reinterpret_cast<
+                        const XrEventDataInteractionProfileChanged*>(
+                        &event);
+                if (changed->session == session_) {
+                    xrInput_->MarkInteractionProfileChanged();
+                    xrInput_->LogInteractionProfiles(session_);
+                }
             }
             if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
                 const auto* changed =
@@ -1574,6 +1602,7 @@ private:
     TextureRenderer textureRenderer_;
     std::unique_ptr<IpcBridge> ipcBridge_;
     std::unique_ptr<XrInput> xrInput_;
+    bool genericControllerExtensionEnabled_{false};
     std::vector<XrViewConfigurationView> viewConfiguration_;
     std::vector<XrView> locatedViews_;
     std::vector<XrCompositionLayerProjectionView> projectionViews_;

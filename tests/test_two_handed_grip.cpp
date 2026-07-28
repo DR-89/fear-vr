@@ -95,6 +95,34 @@ int main() {
     assert(fearvr::TwoHandedAimBlend(
                std::numeric_limits<float>::quiet_NaN()) == 0.0F);
 
+    // Der Lenkwinkel: bis zur weichen Grenze eins zu eins, darueber gedaempft
+    // weiterlaufend statt an einer Wand stehenzubleiben.
+    assert(fearvr::SoftLimitedSteerAngle(0.0F) == 0.0F);
+    assert(std::fabs(fearvr::SoftLimitedSteerAngle(0.5F) - 0.5F) < 0.0001F);
+    assert(std::fabs(
+               fearvr::SoftLimitedSteerAngle(
+                   fearvr::kTwoHandSoftSteerRadians) -
+               fearvr::kTwoHandSoftSteerRadians) < 0.0001F);
+    // Knickfrei: direkt hinter der weichen Grenze bleibt die Steigung bei 1.
+    const float justAbove = fearvr::kTwoHandSoftSteerRadians + 0.001F;
+    assert(std::fabs(
+               fearvr::SoftLimitedSteerAngle(justAbove) - justAbove) <
+           0.0001F);
+    // Darueber steigt der Winkel weiter an, aber langsamer als die Hand.
+    const float wide = fearvr::kTwoHandSoftSteerRadians + 0.4F;
+    assert(fearvr::SoftLimitedSteerAngle(wide) >
+           fearvr::kTwoHandSoftSteerRadians);
+    assert(fearvr::SoftLimitedSteerAngle(wide) < wide);
+    assert(fearvr::SoftLimitedSteerAngle(wide) <
+           fearvr::SoftLimitedSteerAngle(wide + 0.2F));
+    // Und laeuft nie ueber die harte Grenze hinaus, auch nicht bei 180 Grad.
+    assert(fearvr::SoftLimitedSteerAngle(3.14159F) <
+           fearvr::kTwoHandMaxSteerRadians);
+    // Ein ungueltiger Winkel lenkt nicht weiter als die weiche Grenze.
+    assert(fearvr::SoftLimitedSteerAngle(
+               std::numeric_limits<float>::quiet_NaN()) <=
+           fearvr::kTwoHandSoftSteerRadians);
+
     // Solange die Waffe mitgehalten wird, gehoeren linker Grabknopf und
     // linke Handneigung der Waffe.
     FearVrInputState leaning = TwoHandInput(0.35F, 0.03F, 0.9F);

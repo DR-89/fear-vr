@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -99,6 +100,19 @@ std::string UtcTimestamp(bool fileSafe) {
     return output.str();
 }
 
+// Geschrieben wird auf einem eigenen Faden.
+//
+// Vorher stand in `Write` beides: ein `flush` auf die Logdatei und ein
+// `std::endl` auf die Konsole — zwei synchrone Ein-/Ausgaben mitten im
+// 90-Hz-Takt, denn der Bildfaden loggt selbst (Eingabeproben, Sitzungs-
+// wechsel, Slotimporte). Ein Konsolenschreibvorgang unter Windows kostet
+// Millisekunden, wenn die Gegenstelle gerade nicht liest. Im Lauf vom
+// 28.07.2026 blieben nach dem Beseitigen der Treiberaufrufe noch 216 Bilder
+// ueber 8 ms uebrig, bei 335 Logzeilen im selben Zeitraum.
+//
+// Jetzt baut der Aufrufer nur die Zeile und haengt sie an; geschrieben und
+// geleert wird hinten. Der Faden leert nach jedem Schwung, ein harter
+// Absturz verliert also hoechstens die letzten Millisekunden.
 class Logger {
 public:
     explicit Logger(const std::filesystem::path& directory) {
@@ -114,21 +128,40 @@ public:
         if (!stream_) {
             throw std::runtime_error("Hostlog konnte nicht geoeffnet werden.");
         }
+        worker_ = std::thread([this] { Drain(); });
     }
+
+    ~Logger() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        signal_.notify_one();
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
 
     void Write(const char* level, const char* event,
                const std::string& message) {
-        const std::string timestamp = UtcTimestamp(false);
-        const std::string line =
-            "{\"time\":\"" + timestamp + "\",\"level\":\"" +
-            JsonEscape(level) + "\",\"event\":\"" + JsonEscape(event) +
-            "\",\"message\":\"" + JsonEscape(message) + "\"}";
-
-        std::lock_guard<std::mutex> lock(mutex_);
-        stream_ << line << '\n';
-        stream_.flush();
-        std::cout << '[' << level << "] " << event << ": " << message
-                  << std::endl;
+        // Der Zeitstempel gehoert hierher, nicht auf den Schreibfaden: sonst
+        // stuende in der Zeile, wann sie geschrieben wurde, statt wann das
+        // Ereignis eintrat.
+        Entry entry;
+        entry.file = "{\"time\":\"" + UtcTimestamp(false) +
+                     "\",\"level\":\"" + JsonEscape(level) +
+                     "\",\"event\":\"" + JsonEscape(event) +
+                     "\",\"message\":\"" + JsonEscape(message) + "\"}";
+        entry.console = std::string("[") + level + "] " + event + ": " +
+                        message;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_.push_back(std::move(entry));
+        }
+        signal_.notify_one();
     }
 
     [[nodiscard]] const std::filesystem::path& Path() const noexcept {
@@ -136,9 +169,41 @@ public:
     }
 
 private:
+    struct Entry {
+        std::string file;
+        std::string console;
+    };
+
+    void Drain() {
+        std::vector<Entry> batch;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                signal_.wait(lock, [this] {
+                    return stopping_ || !pending_.empty();
+                });
+                if (pending_.empty() && stopping_) {
+                    return;
+                }
+                batch.swap(pending_);
+            }
+            for (const Entry& entry : batch) {
+                stream_ << entry.file << '\n';
+                std::cout << entry.console << '\n';
+            }
+            batch.clear();
+            stream_.flush();
+            std::cout.flush();
+        }
+    }
+
     std::filesystem::path path_;
     std::ofstream stream_;
     std::mutex mutex_;
+    std::condition_variable signal_;
+    std::vector<Entry> pending_;
+    std::thread worker_;
+    bool stopping_{false};
 };
 
 class XrException final : public std::runtime_error {
@@ -270,6 +335,10 @@ struct Swapchain {
     std::int32_t width{0};
     std::int32_t height{0};
     std::vector<XrSwapchainImageD3D11KHR> images;
+    // Je Swapchain-Bild eine Rendersicht, einmal angelegt. Die Bildmenge
+    // steht nach dem Aufzaehlen fest; sie pro Bild neu zu erzeugen waere eine
+    // Treiberallokation im 90-Hz-Takt.
+    std::vector<ComPtr<ID3D11RenderTargetView>> renderTargets;
 };
 
 struct RenderPoseSample {
@@ -279,6 +348,20 @@ struct RenderPoseSample {
 };
 
 constexpr std::size_t kRenderPoseHistorySize = 256;
+
+// Ab hier ist ein Bild verloren: 8 ms von 11,1 ms bei 90 Hz. Was darueber
+// liegt, schafft den naechsten Takt nicht mehr.
+constexpr std::uint64_t kLongFrameMicroseconds = 8000;
+
+using SteadyClock = std::chrono::steady_clock;
+
+std::uint64_t MicrosecondsSince(
+    const SteadyClock::time_point start) noexcept {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            SteadyClock::now() - start)
+            .count());
+}
 
 enum class LoopResult {
     Exit,
@@ -711,6 +794,8 @@ private:
                     reinterpret_cast<XrSwapchainImageBaseHeader*>(
                         swapchain.images.data())),
                 "xrEnumerateSwapchainImages");
+            swapchain.renderTargets.clear();
+            swapchain.renderTargets.resize(imageCount);
 
             XrCompositionLayerProjectionView& projection =
                 projectionViews_[eye];
@@ -738,6 +823,9 @@ private:
         locatedViews_.clear();
         viewConfiguration_.clear();
         for (Swapchain& swapchain : swapchains_) {
+            // Erst die Sichten, dann die Bilder: eine Rendersicht haelt eine
+            // Referenz auf die Swapchain-Textur.
+            swapchain.renderTargets.clear();
             swapchain.images.clear();
             if (swapchain.handle != XR_NULL_HANDLE) {
                 xrDestroySwapchain(swapchain.handle);
@@ -842,6 +930,14 @@ private:
         XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
         CheckXr(instance_, xrBeginFrame(session_, &beginInfo), "xrBeginFrame");
 
+        // Ab hier gehoert die Zeit uns: `xrWaitFrame` blockiert absichtlich
+        // bis zum naechsten Takt, alles danach ist eigene Arbeit. Genau die
+        // muss unter dem Bildbudget bleiben, sonst faellt ein Frame aus und
+        // der Kompositor zeigt das letzte Bild ein zweites Mal.
+        const auto frameCpuStart = std::chrono::steady_clock::now();
+        frameSwapWaitMicroseconds_ = 0;
+
+        const auto inputStart = SteadyClock::now();
         if (ipcBridge_ && xrInput_) {
             FearVrInputState input{};
             xrInput_->Sync(
@@ -869,6 +965,9 @@ private:
             }
         }
 
+        inputMaxMicroseconds_ =
+            (std::max)(inputMaxMicroseconds_, MicrosecondsSince(inputStart));
+
         const XrCompositionLayerBaseHeader* layers[1]{};
         std::uint32_t layerCount = 0;
         XrCompositionLayerProjection layer{
@@ -884,12 +983,15 @@ private:
             locateInfo.space = appSpace_;
             XrViewState viewState{XR_TYPE_VIEW_STATE};
             std::uint32_t viewCount = 0;
+            const auto locateStart = SteadyClock::now();
             CheckXr(instance_,
                     xrLocateViews(session_, &locateInfo, &viewState,
                                   static_cast<std::uint32_t>(
                                       locatedViews_.size()),
                                   &viewCount, locatedViews_.data()),
                     "xrLocateViews");
+            locateMaxMicroseconds_ = (std::max)(
+                locateMaxMicroseconds_, MicrosecondsSince(locateStart));
 
             const XrViewStateFlags requiredFlags =
                 XR_VIEW_STATE_POSITION_VALID_BIT |
@@ -1021,6 +1123,14 @@ private:
                                     "the rendered pose.");
                             imagePoseMatchLogged_ = true;
                         }
+                    }
+                    if (imagePose == nullptr && imageFrameId != 0) {
+                        // Ohne Treffer bekommt das alte Bild die *aktuelle*
+                        // Pose aufgedrueckt. Der Kompositor haelt es dann
+                        // faelschlich fuer frisch und korrigiert nichts mehr
+                        // — die Welt haengt sichtbar nach. Zaehlen, damit
+                        // dieser Fall nicht unbemerkt bleibt.
+                        ++poseFallbacks_;
                     }
                 }
                 if (nativeStereo) {
@@ -1157,12 +1267,60 @@ private:
             }
         }
 
+        // Einmal pro Bild statt einmal pro Auge: `Flush` reicht die
+        // Befehlsliste an den Treiber weiter, und zwei Uebergaben pro Bild
+        // sind zwei Synchronisationspunkte, wo einer genuegt. Wichtig ist
+        // allein, dass alles vor `xrEndFrame` eingereicht ist.
+        if (layerCount != 0) {
+            // Verdaechtig Nummer eins: `Flush` kann blockieren, wenn die
+            // Befehlswarteschlange des Treibers voll ist — und der grosse
+            // GPU-Verbraucher auf diesem Rechner ist das Spiel selbst.
+            const auto flushStart = SteadyClock::now();
+            deviceContext_->Flush();
+            flushMaxMicroseconds_ = (std::max)(
+                flushMaxMicroseconds_, MicrosecondsSince(flushStart));
+        }
+
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
         endInfo.displayTime = frameState.predictedDisplayTime;
         endInfo.environmentBlendMode = blendMode_;
         endInfo.layerCount = layerCount;
         endInfo.layers = layerCount == 0 ? nullptr : layers;
+        const auto endFrameStart = SteadyClock::now();
         CheckXr(instance_, xrEndFrame(session_, &endInfo), "xrEndFrame");
+        const std::uint64_t endFrameMicroseconds =
+            MicrosecondsSince(endFrameStart);
+        endFrameMaxMicroseconds_ =
+            (std::max)(endFrameMaxMicroseconds_, endFrameMicroseconds);
+
+        const auto frameTotalMicroseconds =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - frameCpuStart)
+                    .count());
+        // Fremde Wartezeit gehoert nicht in die eigene Bilanz. Neben dem
+        // Swapchain-Warten faellt auch `xrEndFrame` darunter: Dort nimmt der
+        // Kompositor das Bild entgegen und drosselt uns auf seinen Takt.
+        //
+        // Der Lauf vom 28.07.2026 hat das entschieden: In 102 Spielfenstern
+        // lag die groesste *eigene* Spitze bei 576 µs, im Mittel 180 µs —
+        // und jedes der 19 Fenster mit einem Bild ueber 11,1 ms ging zu ueber
+        // 90 % auf `xrEndFrame` zurueck. Wuerde man das mitzaehlen, meldete
+        // `long_frames` genau das als Ruckler, was ein VR-Programm tun soll,
+        // wenn es frueher fertig ist als der Takt.
+        const std::uint64_t foreignMicroseconds =
+            frameSwapWaitMicroseconds_ + endFrameMicroseconds;
+        const std::uint64_t frameCpuMicroseconds =
+            frameTotalMicroseconds > foreignMicroseconds
+                ? frameTotalMicroseconds - foreignMicroseconds
+                : 0;
+        frameCpuMaxMicroseconds_ =
+            (std::max)(frameCpuMaxMicroseconds_, frameCpuMicroseconds);
+        swapWaitMaxMicroseconds_ =
+            (std::max)(swapWaitMaxMicroseconds_, frameSwapWaitMicroseconds_);
+        if (frameCpuMicroseconds > kLongFrameMicroseconds) {
+            ++longFrames_;
+        }
 
         if (submittedFrames_ != 0 && submittedFrames_ % 300 == 0) {
             logger_.Write("INFO", "frame_progress",
@@ -1221,9 +1379,25 @@ private:
                 << " copy_avg_us="
                 << average(copy.totalMicroseconds, copy.samples)
                 << " copy_max_us=" << copy.maxMicroseconds
+                << " frame_cpu_max_us=" << frameCpuMaxMicroseconds_
+                << " swap_wait_max_us=" << swapWaitMaxMicroseconds_
+                << " input_max_us=" << inputMaxMicroseconds_
+                << " locate_max_us=" << locateMaxMicroseconds_
+                << " flush_max_us=" << flushMaxMicroseconds_
+                << " endframe_max_us=" << endFrameMaxMicroseconds_
+                << " long_frames=" << longFrames_
+                << " pose_fallback=" << poseFallbacks_
                 << " handles=" << CurrentHandleCount();
         logger_.Write("INFO", "perf_frame", message.str());
         reusedFrames_ = 0;
+        frameCpuMaxMicroseconds_ = 0;
+        swapWaitMaxMicroseconds_ = 0;
+        inputMaxMicroseconds_ = 0;
+        locateMaxMicroseconds_ = 0;
+        flushMaxMicroseconds_ = 0;
+        endFrameMaxMicroseconds_ = 0;
+        longFrames_ = 0;
+        poseFallbacks_ = 0;
     }
 
     static std::uint32_t CurrentHandleCount() noexcept {
@@ -1258,27 +1432,42 @@ private:
                                         &imageIndex),
                 "xrAcquireSwapchainImage");
 
+        // Dieses Warten ist fremde Zeit: Es haengt daran, wann der Kompositor
+        // das Bild freigibt, nicht an unserer Arbeit. Getrennt gemessen,
+        // damit `frame_cpu_max_us` nicht faelschlich uns anlastet, was die
+        // Gegenseite verursacht.
+        const auto waitStart = std::chrono::steady_clock::now();
         XrSwapchainImageWaitInfo waitInfo{
             XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         waitInfo.timeout = 1'000'000'000;
         CheckXr(instance_, xrWaitSwapchainImage(swapchain.handle, &waitInfo),
                 "xrWaitSwapchainImage(1s)");
+        frameSwapWaitMicroseconds_ +=
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - waitStart)
+                    .count());
 
         if (imageIndex >= swapchain.images.size() ||
+            imageIndex >= swapchain.renderTargets.size() ||
             swapchain.images[imageIndex].texture == nullptr) {
             throw std::runtime_error(
                 "OpenXR lieferte einen ungueltigen Swapchain-Image-Index.");
         }
 
-        D3D11_RENDER_TARGET_VIEW_DESC viewDescription{};
-        viewDescription.Format = swapchainFormat_;
-        viewDescription.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-        viewDescription.Texture2D.MipSlice = 0;
-        ComPtr<ID3D11RenderTargetView> renderTarget;
-        CheckHr(device_->CreateRenderTargetView(
-                    swapchain.images[imageIndex].texture, &viewDescription,
-                    renderTarget.ReleaseAndGetAddressOf()),
-                "ID3D11Device::CreateRenderTargetView");
+        ComPtr<ID3D11RenderTargetView>& renderTarget =
+            swapchain.renderTargets[imageIndex];
+        if (!renderTarget) {
+            D3D11_RENDER_TARGET_VIEW_DESC viewDescription{};
+            viewDescription.Format = swapchainFormat_;
+            viewDescription.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            viewDescription.Texture2D.MipSlice = 0;
+            CheckHr(device_->CreateRenderTargetView(
+                        swapchain.images[imageIndex].texture,
+                        &viewDescription,
+                        renderTarget.ReleaseAndGetAddressOf()),
+                    "ID3D11Device::CreateRenderTargetView");
+        }
 
         if (ipcBridge_ && ipcBridge_->HasImage(eye)) {
             textureRenderer_.Draw(
@@ -1295,7 +1484,6 @@ private:
             deviceContext_->ClearRenderTargetView(renderTarget.Get(),
                                                   color.data());
         }
-        deviceContext_->Flush();
 
         XrSwapchainImageReleaseInfo releaseInfo{
             XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
@@ -1405,6 +1593,18 @@ private:
     std::chrono::steady_clock::time_point perfWindowStart_{
         std::chrono::steady_clock::now()};
     std::uint64_t reusedFrames_{0};
+    std::uint64_t frameCpuMaxMicroseconds_{0};
+    std::uint64_t frameSwapWaitMicroseconds_{0};
+    std::uint64_t swapWaitMaxMicroseconds_{0};
+    // Die vier bisher unbeobachteten Abschnitte des Bildes. Render- und
+    // Copyzeit sind mit wenigen hundert Mikrosekunden zu klein fuer die
+    // gemessenen Spitzen — die Zeit muss in einem von diesen sitzen.
+    std::uint64_t inputMaxMicroseconds_{0};
+    std::uint64_t locateMaxMicroseconds_{0};
+    std::uint64_t flushMaxMicroseconds_{0};
+    std::uint64_t endFrameMaxMicroseconds_{0};
+    std::uint64_t longFrames_{0};
+    std::uint64_t poseFallbacks_{0};
     std::uint64_t lastSubmittedImageFrameId_{0};
     std::uint64_t submittedFrames_{0};
     std::uint64_t requestFrameId_{0};

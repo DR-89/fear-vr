@@ -30,9 +30,20 @@ constexpr float kTwoHandMaxLateralMeters = 0.22F;
 // Below this hand separation the line between both hands is dominated by
 // tracking noise and must not steer anything.
 constexpr float kTwoHandMinSteerSeparationMeters = 0.12F;
-// cos(50 degrees). The support direction has to stay roughly on the barrel;
-// a wilder angle means the hands are not on one weapon.
-constexpr float kTwoHandMinSteerAlignment = 0.64F;
+// Wie weit die Handlinie von der Waffenachse abweichen darf.
+//
+// Vorher war das ein einziger harter Wert bei 50 Grad: Wanderte die
+// Stuetzhand darueber hinaus, blieb die Waffe schlagartig stehen — eine Wand
+// mitten in der Bewegung, obwohl niemand beim Halten eines Gewehrs zentimeter-
+// genau arbeitet. Benutzerbefund vom 28.07.2026.
+//
+// Jetzt sind es zwei Werte. Bis `Soft` folgt die Waffe eins zu eins. Darueber
+// wird der Ueberschuss weich zusammengedrueckt und laeuft asymptotisch gegen
+// `Max`, ohne ihn je zu erreichen. Schlechtes Halten wirkt dadurch immer noch
+// weniger, blockiert aber nichts mehr, und es gibt keinen Punkt, an dem die
+// Waffe stehenbleibt oder zurueckspringt.
+constexpr float kTwoHandSoftSteerRadians = 0.96F;  // rund 55 Grad
+constexpr float kTwoHandMaxSteerRadians = 1.57F;   // rund 90 Grad
 
 // How much the line between both hands takes over the aim direction, by
 // weapon length. A pistol keeps following the right hand alone; a rifle is
@@ -134,6 +145,25 @@ inline bool ShouldReleaseTwoHandedGrip(
     const float squeeze = state.squeeze[FEARVR_HAND_LEFT];
     return !std::isfinite(squeeze) ||
            squeeze < kTwoHandReleaseSqueeze;
+}
+
+// Der zulaessige Lenkwinkel zu einem gemessenen Winkel zwischen Handlinie und
+// Waffenachse. Unterhalb der weichen Grenze bleibt der Winkel unveraendert,
+// darueber waechst er nur noch gedaempft weiter — die Steigung am Uebergang
+// ist genau 1, der Verlauf also knickfrei.
+inline float SoftLimitedSteerAngle(float angleRadians) noexcept {
+    if (!std::isfinite(angleRadians)) {
+        return kTwoHandSoftSteerRadians;
+    }
+    if (angleRadians <= kTwoHandSoftSteerRadians) {
+        return angleRadians;
+    }
+    const float range =
+        kTwoHandMaxSteerRadians - kTwoHandSoftSteerRadians;
+    const float excess =
+        (angleRadians - kTwoHandSoftSteerRadians) / range;
+    return kTwoHandSoftSteerRadians +
+           range * (1.0F - std::exp(-excess));
 }
 
 // Weight of the hand-to-hand line in the aim direction, from the distance

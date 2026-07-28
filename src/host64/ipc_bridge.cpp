@@ -54,6 +54,15 @@ struct IpcBridge::PrivateEye {
     DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
 };
 
+// Eine geoeffnete Shared-Texture, gemerkt unter dem Handle, aus dem sie
+// stammt. Aendert der Proxy seine Slots (Geraetereset, neue Aufloesung),
+// bekommt derselbe Slot ein neues Handle — der Vergleich unten oeffnet dann
+// von selbst neu.
+struct IpcBridge::SharedSource {
+    std::uint64_t handle{0};
+    ComPtr<ID3D11Texture2D> texture;
+};
+
 struct IpcBridge::PendingCopy {
     bool active{false};
     std::uint32_t slotIndex{0};
@@ -69,7 +78,9 @@ IpcBridge::IpcBridge(std::uint64_t sessionId, ID3D11Device* device,
     : sessionId_(sessionId), device_(device), context_(context),
       adapterLuid_(adapterLuid), log_(std::move(log)),
       privateEye_(new PrivateEye[FEARVR_EYE_COUNT]),
-      pending_(new PendingCopy) {
+      pending_(new PendingCopy),
+      sharedSource_(
+          new SharedSource[FEARVR_EYE_COUNT * FEARVR_SLOTS_PER_EYE]) {
     if (Enabled()) {
         std::ostringstream message;
         message << "session=0x" << std::hex << std::uppercase << sessionId_;
@@ -81,6 +92,7 @@ IpcBridge::~IpcBridge() {
     Disconnect();
     delete[] privateEye_;
     delete pending_;
+    delete[] sharedSource_;
 }
 
 bool IpcBridge::Enabled() const noexcept {
@@ -168,6 +180,7 @@ bool IpcBridge::TryConnect() {
 }
 
 void IpcBridge::Disconnect() noexcept {
+    ReleaseSharedSources();
     if (shared_ != nullptr) {
         InterlockedAnd(AtomicFlags(*shared_),
                        static_cast<LONG>(~FEARVR_BF_HOST_READY));
@@ -498,6 +511,25 @@ bool IpcBridge::ValidateAndOpenSource(std::uint32_t eye,
              "Invalid handle, dimensions, or format.");
         return false;
     }
+    // Dasselbe Handle wie beim letzten Mal: die Textur ist bereits offen.
+    //
+    // Vorher wurde hier jedes Spielbild zweimal `OpenSharedResource`
+    // aufgerufen und die Textur danach sofort wieder freigegeben. Das ist ein
+    // Kernelaufruf mit Treiber-Sperre, kein Zeigerkopieren: im Log vom
+    // 28.07.2026 lag `copy_avg_us` deshalb bei 310–440 µs mit Spitzen bis
+    // 3772 µs, und die XR-Displayrate brach in einzelnen Fenstern auf 72,8
+    // statt 90 ein — die kurzen Ruckler, bei denen die Welt sichtbar
+    // nachhing. Der Inhalt der Textur aendert sich davon nicht: Wer welchen
+    // Slot lesen darf, klaert allein das Claim-Protokoll.
+    SharedSource& cached =
+        sharedSource_[eye * FEARVR_SLOTS_PER_EYE + slotIndex];
+    if (cached.texture && cached.handle == slot.sharedHandle) {
+        pending_->source[eye] = cached.texture;
+        return true;
+    }
+    cached.texture.Reset();
+    cached.handle = 0;
+
     const HANDLE handle = reinterpret_cast<HANDLE>(
         static_cast<std::uintptr_t>(slot.sharedHandle));
     ComPtr<ID3D11Resource> resource;
@@ -534,7 +566,23 @@ bool IpcBridge::ValidateAndOpenSource(std::uint32_t eye,
         pending_->source[eye].Reset();
         return false;
     }
+    cached.texture = pending_->source[eye];
+    cached.handle = slot.sharedHandle;
     return true;
+}
+
+// Die gemerkten Texturen gehoeren zum Proxyprozess. Faellt die Verbindung
+// weg, sind die Handles nichts mehr wert und muessen vor einem neuen Aufbau
+// vergessen werden.
+void IpcBridge::ReleaseSharedSources() noexcept {
+    if (sharedSource_ == nullptr) {
+        return;
+    }
+    for (std::uint32_t index = 0;
+         index < FEARVR_EYE_COUNT * FEARVR_SLOTS_PER_EYE; ++index) {
+        sharedSource_[index].texture.Reset();
+        sharedSource_[index].handle = 0;
+    }
 }
 
 bool IpcBridge::EnsurePrivateTexture(std::uint32_t eye,

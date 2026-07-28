@@ -5848,22 +5848,38 @@ bool CurrentSupportDirection(LTVector& direction) noexcept {
 // seitlich, darf die Zweihandkorrektur nicht einfach aussetzen. Die
 // Waffenpose wurde fuer dieses Bild bereits aus der rechten Hand aufgebaut;
 // ein `return` wuerde sie deshalb schlagartig auf Einhand-Zielen und damit in
-// die Bildmitte zuruecksetzen. Stattdessen bleibt die Richtung am Rand des
-// erlaubten Kegels stehen.
+// die Bildmitte zuruecksetzen. Stattdessen wird der Winkel weich gedaempft.
 bool ClampTwoHandedTargetDirection(
     const LTVector& forward, LTVector& target) noexcept {
     const float dot = std::clamp(forward.Dot(target), -1.0F, 1.0F);
-    if (dot >= kTwoHandMinSteerAlignment) {
+    const float angle = std::acos(dot);
+    const float limited = SoftLimitedSteerAngle(angle);
+    if (!std::isfinite(limited) || limited >= angle - 0.0001F) {
         return true;
     }
 
-    LTVector axis = forward.Cross(target);
+    // Das Kreuzprodukt von Hand: `LTVector::Cross` dreht die Operanden-
+    // reihenfolge gegenueber dem rechtshaendigen Kreuzprodukt um
+    // (COORDINATE-SYSTEM.md §1). Mit `forward.Cross(target)` zeigte die
+    // Drehachse deshalb genau in die Gegenrichtung, und die begrenzte Waffe
+    // kippte auf die falsche Seite der Zielachse — der Sprung, den der
+    // Benutzer am 28.07.2026 als "ploetzlich nach links" gemeldet hat.
+    // `RotationBetweenDirections` rechnet aus demselben Grund von Hand.
+    LTVector axis(
+        forward.y * target.z - forward.z * target.y,
+        forward.z * target.x - forward.x * target.z,
+        forward.x * target.y - forward.y * target.x);
     if (axis.MagSqr() < 0.0001F) {
+        // Handlinie und Waffenachse sind (anti)parallel: jede senkrechte
+        // Achse taugt, die Richtung ist hier ohnehin nicht bestimmt.
         const LTVector reference =
             std::fabs(forward.y) < 0.9F
                 ? LTVector(0.0F, 1.0F, 0.0F)
                 : LTVector(1.0F, 0.0F, 0.0F);
-        axis = forward.Cross(reference);
+        axis.Init(
+            forward.y * reference.z - forward.z * reference.y,
+            forward.z * reference.x - forward.x * reference.z,
+            forward.x * reference.y - forward.y * reference.x);
     }
     if (axis.MagSqr() < 0.0001F) {
         return false;
@@ -5871,7 +5887,7 @@ bool ClampTwoHandedTargetDirection(
     axis.Normalize();
 
     LTRotation limit;
-    limit.Init(axis, std::acos(kTwoHandMinSteerAlignment));
+    limit.Init(axis, limited);
     target = limit.RotateVector(forward);
     return target.MagSqr() > 0.0001F;
 }

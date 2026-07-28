@@ -58,6 +58,7 @@ public:
 private:
     struct PrivateEye;
     struct PendingCopy;
+    struct SharedSource;
 
     bool TryConnect();
     void Disconnect() noexcept;
@@ -72,6 +73,7 @@ private:
     bool EnsurePrivateTexture(std::uint32_t eye,
                               ID3D11Texture2D* source);
     void ReleaseClaim(std::uint32_t slotIndex) noexcept;
+    void ReleaseSharedSources() noexcept;
     void LogHresult(const char* event, HRESULT result);
 
     std::uint64_t sessionId_{0};
@@ -87,6 +89,10 @@ private:
     FearVrSharedHeader* shared_{nullptr};
     PrivateEye* privateEye_{nullptr};
     PendingCopy* pending_{nullptr};
+    // Je Auge und Slot genau eine geoeffnete Shared-Texture. Siehe
+    // ValidateAndOpenSource: OpenSharedResource ist ein Kernelaufruf und
+    // gehoert nicht in den Bildtakt.
+    SharedSource* sharedSource_{nullptr};
     ULONGLONG nextConnectAttempt_{0};
     ULONGLONG lastGameHeartbeatTick_{0};
     std::uint64_t lastGameHeartbeat_{0};

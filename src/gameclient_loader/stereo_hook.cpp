@@ -184,6 +184,13 @@ struct HandNodeControlState {
 };
 HandNodeControlState g_rightHandControl;
 HandNodeControlState g_leftHandControl;
+struct BodyPresentationNodeControlState {
+    HMODELNODE node{INVALID_MODEL_NODE};
+    bool installed{false};
+};
+BodyPresentationNodeControlState g_bodyPresentationNodeControl;
+thread_local LTVector g_bodyPresentationWorldOffset;
+thread_local bool g_bodyPresentationOffsetActive = false;
 SRWLOCK g_hookLock = SRWLOCK_INIT;
 bool g_hookInstalled = false;
 thread_local bool g_inStereoRender = false;
@@ -306,6 +313,9 @@ RetailMovementSnapshot g_retailMovement{};
 bool g_retailMovementHadSnapshot = false;
 bool g_retailDuckWasDown = false;
 ULONGLONG g_retailPostureDownUntil = 0;
+ULONGLONG g_retailUnsupportedSince = 0;
+ULONGLONG g_retailSupportedSince = 0;
+bool g_retailPersistentUnsupported = false;
 HCONSOLEVAR g_retailPostureDownVariable = nullptr;
 thread_local bool g_semanticBitsInjected = false;
 FearVrInputState g_currentInput{};
@@ -315,6 +325,7 @@ struct WeaponAimState {
     LTRigidTransform leftAimTransform;
     LTRigidTransform leftGripTransform;
     LTRigidTransform muzzleTransform;
+    LTRigidTransform trackingBase;
     LTVector muzzleForwardInWeapon;
     // Mündung als starrer Versatz im Waffenraum. Damit lässt sich der
     // Schussursprung aus unserer eigenen Waffentransformation rekonstruieren,
@@ -322,6 +333,7 @@ struct WeaponAimState {
     LTVector muzzleOffsetInWeapon;
     LTRotation muzzleRotationInWeapon;
     const void* muzzleWeapon{nullptr};
+    void* retailWeapon{nullptr};
     bool valid{false};
     bool gripValid{false};
     bool leftAimValid{false};
@@ -330,6 +342,7 @@ struct WeaponAimState {
     bool muzzleDirectionValid{false};
     bool muzzleLocalValid{false};
     bool muzzleDiagnosticLogged{false};
+    bool trackingBaseValid{false};
 };
 thread_local WeaponAimState g_weaponAim;
 HLOCALOBJ g_playerCameraObject = nullptr;
@@ -338,6 +351,15 @@ float g_visualCameraHeight = 0.0F;
 ULONGLONG g_visualCameraHeightSampleTick = 0;
 bool g_visualCameraHeightValid = false;
 constexpr ULONGLONG kVisualCameraHeightFreshMilliseconds = 100;
+thread_local bool g_cutsceneCameraStateKnown = false;
+thread_local bool g_cutsceneCameraState = false;
+thread_local ULONGLONG g_cutsceneCameraActivationTick = 0;
+struct CutsceneBodyPresentationState {
+    LTVector bodyOffsetFromCamera;
+    HLOCALOBJ bodyObject{nullptr};
+    bool valid{false};
+};
+thread_local CutsceneBodyPresentationState g_cutsceneBodyPresentation;
 HLOCALOBJ g_leftFlashlightModel = nullptr;
 HLOCALOBJ g_leftFlashlightLight = nullptr;
 const void* g_leftFlashlightWeapon = nullptr;
@@ -412,9 +434,9 @@ float g_leanTranslationScale = 1.0F;
 // Der Versatz, um den der Blickpunkt gegenueber dem Spielerkoerper steht.
 // Die Handposen bekommen ihn ebenfalls: Sie sind relativ zum HMD gerechnet,
 // werden aber an die Spielerposition gehaengt — ohne diesen Ausgleich wandert
-// die Waffe beim Lehnen aus der Hand. Der Retail-Koerper und seine
-// Kollisionskapsel bleiben bewusst stehen: automatisches Nachziehen erzeugte
-// Gegensteuern, Pendeln und konnte den Blick hinter den Koerper setzen.
+// die Waffe beim Lehnen aus der Hand. Das sichtbare Koerpermodell folgt dem
+// horizontalen Anteil erst beim Rendern; Retails Spielerobjekt und seine
+// Kollisionskapsel bleiben stehen, damit keine Rueckkopplung entsteht.
 LTVector g_leanViewOffsetUnits;
 bool g_climbingEnabled = false;
 ClimbGripState g_climbGrip;
@@ -639,6 +661,10 @@ constexpr std::uintptr_t kRetailCheckForIntersectRva = 0x001CC150U;
 constexpr std::uintptr_t kRetailObjectDetectorUpdateRva = 0x001205A0U;
 constexpr std::uintptr_t kRetailPlayerMgrPointerRva = 0x002E2C3CU;
 constexpr std::size_t kRetailPlayerMgrCameraOffset = 0x28;
+// CPlayerMgr::AllowPlayerMovement is a verified Retail function at
+// GameOrig+0x146F90. It copies the old byte from +0x88 to +0x89 and stores
+// its boolean argument at +0x88.
+constexpr std::size_t kRetailPlayerMgrAllowMovementOffset = 0x88;
 constexpr std::size_t kRetailPlayerMgrPickupDetectorOffset = 0x3CC;
 constexpr std::size_t kRetailCameraObjectOffset = 0x0C;
 constexpr std::size_t kRetailCameraPositionOffset = 0x10;
@@ -650,6 +676,19 @@ constexpr std::size_t kRetailCameraRotationFirstOffset = 0xB8;
 // member is the animated camera-socket rotation which Retail copies back into
 // m_rLocalRotation when an attached camera animation ends.
 constexpr std::size_t kRetailCameraTargetAttachRotationOffset = 0xC8;
+// `CClientWeapon::GetFireVectors` reads CPlayerCamera::m_eCameraMode at
+// +0x114 and compares it with kCM_FirstPerson before choosing its firing
+// path. The public 1.08 enum assigns kCM_Cinematic the value 2.
+constexpr std::size_t kRetailCameraModeOffset = 0x114;
+constexpr std::int32_t kRetailCameraModeCinematic = 2;
+// CPlayerCamera::UpdateFirstPerson writes the current PlayerBody camera
+// descriptor to +0x190 after comparing it against kAD_CAM_Rotation (0x1D)
+// and kAD_CAM_RotationAim (0x1E). Seated/attached sequences such as the
+// helicopter can use these descriptors while the camera mode and player
+// movement both remain normal first person.
+constexpr std::size_t kRetailCameraLastDescriptorOffset = 0x190;
+constexpr std::int32_t kRetailCameraDescriptorRotation = 0x1D;
+constexpr std::int32_t kRetailCameraDescriptorRotationAim = 0x1E;
 constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
 // Retail CClientWeapon starts m_RightHandWeapon at +0x10. Its first LTObjRef
 // occupies 16 bytes on x86 (vptr, list links, HOBJECT), putting the model
@@ -701,6 +740,12 @@ constexpr std::size_t kRetailMoveControlFlagsOffset = 0x28;
 constexpr std::size_t kRetailMoveOnGroundOffset = 0x64;
 constexpr std::size_t kRetailMoveFallingOffset = 0x66;
 constexpr std::size_t kRetailMoveJumpedOffset = 0x78;
+// CMoveMgr's constructor stores the newly allocated CVehicleMgr at +0x3D8.
+// CVehicleMgr::m_ePPhysicsModel is the dword at +0x1C; PPM_LURE (1) binds
+// the player to a scripted moving lure such as a vehicle/passenger seat.
+constexpr std::size_t kRetailMoveVehicleManagerOffset = 0x3D8;
+constexpr std::size_t kRetailVehiclePhysicsModelOffset = 0x1C;
+constexpr std::int32_t kRetailPlayerPhysicsModelLure = 1;
 constexpr std::uint32_t kRetailControlFlagForward = 1U << 0;
 constexpr std::uint32_t kRetailControlFlagDuck = 1U << 5;
 constexpr std::uint32_t kRetailControlFlagRun = 1U << 9;
@@ -2610,6 +2655,116 @@ bool RotationToPitchYawRoll(
            std::isfinite(roll);
 }
 
+bool IsRetailCinematicCamera() noexcept {
+    unsigned char* const camera = ResolveRetailPlayerCamera();
+    if (camera == nullptr) {
+        return false;
+    }
+    __try {
+        std::int32_t mode = -1;
+        std::memcpy(
+            &mode, camera + kRetailCameraModeOffset, sizeof(mode));
+        return mode == kRetailCameraModeCinematic;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool ReadRetailAnimatedCamera(bool& animated, std::int32_t& descriptor) noexcept {
+    unsigned char* const camera = ResolveRetailPlayerCamera();
+    if (camera == nullptr) {
+        return false;
+    }
+    __try {
+        std::memcpy(
+            &descriptor,
+            camera + kRetailCameraLastDescriptorOffset,
+            sizeof(descriptor));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (descriptor < -1 || descriptor > 0xFF) {
+        return false;
+    }
+    animated =
+        descriptor == kRetailCameraDescriptorRotation ||
+        descriptor == kRetailCameraDescriptorRotationAim;
+    return true;
+}
+
+bool ReadRetailDesiredCameraPosition(LTVector& position) noexcept {
+    unsigned char* const camera = ResolveRetailPlayerCamera();
+    if (camera == nullptr) {
+        return false;
+    }
+    __try {
+        std::memcpy(
+            &position, camera + kRetailCameraPositionOffset,
+            sizeof(position));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return std::isfinite(position.x) &&
+           std::isfinite(position.y) &&
+           std::isfinite(position.z);
+}
+
+bool ReadRetailPlayerMovementAllowed(bool& allowed) noexcept {
+    if (g_retailPlayerMgrPointer == nullptr) {
+        return false;
+    }
+    __try {
+        const auto* const playerMgr =
+            static_cast<const unsigned char*>(
+                *g_retailPlayerMgrPointer);
+        if (playerMgr == nullptr) {
+            return false;
+        }
+        const unsigned char value =
+            playerMgr[kRetailPlayerMgrAllowMovementOffset];
+        if (value > 1) {
+            return false;
+        }
+        allowed = value != 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+const void* const* ResolveRetailMoveManagerSlot() noexcept;
+
+bool ReadRetailMovingLure(bool& movingLure, std::int32_t& physicsModel) noexcept {
+    const void* const* const slot = ResolveRetailMoveManagerSlot();
+    if (slot == nullptr) {
+        return false;
+    }
+    __try {
+        const auto* const move =
+            static_cast<const unsigned char*>(*slot);
+        if (move == nullptr) {
+            return false;
+        }
+        const auto* const vehicle =
+            *reinterpret_cast<const unsigned char* const*>(
+                move + kRetailMoveVehicleManagerOffset);
+        if (vehicle == nullptr) {
+            return false;
+        }
+        std::memcpy(
+            &physicsModel,
+            vehicle + kRetailVehiclePhysicsModelOffset,
+            sizeof(physicsModel));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (physicsModel < 0 || physicsModel > 1) {
+        return false;
+    }
+    movingLure = physicsModel == kRetailPlayerPhysicsModelLure;
+    return true;
+}
+
 void BeginSlideKickViewStabilization() noexcept {
     const ULONGLONG now = GetTickCount64();
     if (g_slideKickView.active) {
@@ -3247,6 +3402,151 @@ float UpdateLeanTranslationScale(
         g_leanCollision, target, MonotonicNanoseconds());
 }
 
+float CurrentCutsceneCameraBlend(ULONGLONG now) noexcept {
+    if (!g_cutsceneCameraState ||
+        g_cutsceneCameraActivationTick == 0 ||
+        now < g_cutsceneCameraActivationTick) {
+        return 0.0F;
+    }
+    constexpr float kCutsceneTransitionMilliseconds = 350.0F;
+    const float linear = std::clamp(
+        static_cast<float>(now - g_cutsceneCameraActivationTick) /
+            kCutsceneTransitionMilliseconds,
+        0.0F, 1.0F);
+    return linear * linear * (3.0F - 2.0F * linear);
+}
+
+LTRotation ResolveCutsceneCameraBaseRotation(
+    const LTRotation& retailRotation, float blend) noexcept {
+    LTRotation resolved = retailRotation;
+    ResolveSlideKickViewBase(retailRotation, resolved);
+    if (blend <= 0.0F) {
+        return resolved;
+    }
+
+    float ignoredPitch = 0.0F;
+    float cinematicYaw = 0.0F;
+    float ignoredRoll = 0.0F;
+    if (!RotationToPitchYawRoll(
+            retailRotation, ignoredPitch,
+            cinematicYaw, ignoredRoll)) {
+        return resolved;
+    }
+    LTRotation stabilized(0.0F, cinematicYaw, 0.0F);
+    stabilized.Normalize();
+    LTRotation blended;
+    blended.Slerp(resolved, stabilized, blend);
+    blended.Normalize();
+    return blended;
+}
+
+void RebaseCutsceneWeaponPresentation(
+    const LTRigidTransform& stableCameraBase) noexcept {
+    if (!g_retailPersistentUnsupported ||
+        !g_cutsceneCameraState ||
+        !g_weaponAim.trackingBaseValid) {
+        return;
+    }
+
+    const LTRigidTransform worldCorrection =
+        stableCameraBase * g_weaponAim.trackingBase.GetInverse();
+    if (g_weaponAim.valid) {
+        g_weaponAim.fireTransform =
+            worldCorrection * g_weaponAim.fireTransform;
+    }
+    if (g_weaponAim.gripValid) {
+        g_weaponAim.gripTransform =
+            worldCorrection * g_weaponAim.gripTransform;
+    }
+    if (g_weaponAim.leftAimValid) {
+        g_weaponAim.leftAimTransform =
+            worldCorrection * g_weaponAim.leftAimTransform;
+    }
+    if (g_weaponAim.leftGripValid) {
+        g_weaponAim.leftGripTransform =
+            worldCorrection * g_weaponAim.leftGripTransform;
+    }
+    if (g_weaponAim.muzzleValid) {
+        g_weaponAim.muzzleTransform =
+            worldCorrection * g_weaponAim.muzzleTransform;
+    }
+    g_weaponAim.trackingBase = stableCameraBase;
+
+    // Retail placed the visible weapon during its earlier gameplay update.
+    // Refresh it from the same late-latched basis as the hand bones so a
+    // moving helicopter cannot leave the model one frame behind.
+    if (g_weaponAim.retailWeapon != nullptr &&
+        g_weaponAim.valid && g_weaponAim.gripValid &&
+        g_retailSetWeaponTransform != nullptr) {
+        const LTTransform synchronizedTransform(
+            g_weaponAim.gripTransform.m_vPos,
+            g_weaponAim.fireTransform.m_rRot, 1.0F);
+        __try {
+            g_retailSetWeaponTransform(
+                g_weaponAim.retailWeapon,
+                synchronizedTransform);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+}
+
+void StageBodyPresentation(
+    const LTRigidTransform& retailCameraBase,
+    const LTRigidTransform& stableCameraBase,
+    const LTVector& gameplayWorldOffset) noexcept {
+    g_bodyPresentationWorldOffset = LTVector(0.0F, 0.0F, 0.0F);
+    g_bodyPresentationOffsetActive = false;
+    if (g_playerBodyObject == nullptr ||
+        !g_bodyPresentationNodeControl.installed) {
+        g_cutsceneBodyPresentation = {};
+        return;
+    }
+
+    __try {
+        LTRigidTransform originalBodyTransform;
+        if (g_client->GetObjectTransform(
+                g_playerBodyObject,
+                &originalBodyTransform) != LT_OK) {
+            g_cutsceneBodyPresentation = {};
+            return;
+        }
+        if (g_retailPersistentUnsupported &&
+            g_cutsceneCameraState) {
+            if (!g_cutsceneBodyPresentation.valid ||
+                g_cutsceneBodyPresentation.bodyObject !=
+                    g_playerBodyObject) {
+                // Keep a world-space positional offset from the stable
+                // camera. It deliberately contains no camera rotation:
+                // node controls already solved the real controller poses.
+                g_cutsceneBodyPresentation.bodyOffsetFromCamera =
+                    originalBodyTransform.m_vPos -
+                    retailCameraBase.m_vPos;
+                g_cutsceneBodyPresentation.bodyObject =
+                    g_playerBodyObject;
+                g_cutsceneBodyPresentation.valid = true;
+            }
+            g_bodyPresentationWorldOffset =
+                stableCameraBase.m_vPos +
+                g_cutsceneBodyPresentation.bodyOffsetFromCamera -
+                originalBodyTransform.m_vPos;
+        } else {
+            g_cutsceneBodyPresentation = {};
+            if (gameplayWorldOffset.MagSqr() < 0.0001F) {
+                return;
+            }
+            // Only the visible body follows room-scale head translation.
+            // The player object and its collision capsule stay untouched.
+            g_bodyPresentationWorldOffset = gameplayWorldOffset;
+        }
+        g_bodyPresentationOffsetActive =
+            g_bodyPresentationWorldOffset.MagSqr() >= 0.0001F;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_cutsceneBodyPresentation = {};
+        g_bodyPresentationWorldOffset = LTVector(0.0F, 0.0F, 0.0F);
+        g_bodyPresentationOffsetActive = false;
+    }
+}
+
 LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
                       const char* techniqueOverride) {
     g_stereoStep = "check_arguments";
@@ -3330,18 +3630,93 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         return g_renderCameraWithOverride(
             renderer, camera, techniqueOverride);
     }
+    const bool cinematicCamera = IsRetailCinematicCamera();
+    const ULONGLONG renderTick = GetTickCount64();
+    const bool playingFrameFresh =
+        g_lastWeaponManagerUpdateTick != 0 &&
+        renderTick >= g_lastWeaponManagerUpdateTick &&
+        renderTick - g_lastWeaponManagerUpdateTick <=
+            kPlayingFrameFreshMilliseconds;
+    bool playerMovementAllowed = true;
+    const bool playerMovementKnown =
+        ReadRetailPlayerMovementAllowed(playerMovementAllowed);
+    bool animatedCamera = false;
+    std::int32_t cameraDescriptor = -1;
+    const bool cameraDescriptorKnown =
+        ReadRetailAnimatedCamera(animatedCamera, cameraDescriptor);
+    bool movingLure = false;
+    std::int32_t physicsModel = -1;
+    const bool physicsModelKnown =
+        ReadRetailMovingLure(movingLure, physicsModel);
+    // Not every in-engine cutscene switches to kCM_Cinematic. Scripted
+    // PlayerCamera sequences can keep their old mode, but stop the weapon
+    // manager for their whole duration. This is the same verified boundary
+    // already used to suspend command injection safely.
+    const bool cutsceneCamera =
+        cinematicCamera || animatedCamera || movingLure ||
+        g_retailPersistentUnsupported || !playingFrameFresh ||
+        (playerMovementKnown && !playerMovementAllowed);
+    if (!g_cutsceneCameraStateKnown ||
+        cutsceneCamera != g_cutsceneCameraState) {
+        g_cutsceneCameraStateKnown = true;
+        g_cutsceneCameraState = cutsceneCamera;
+        g_cutsceneCameraActivationTick =
+            cutsceneCamera ? renderTick : 0;
+        char message[320]{};
+        std::snprintf(
+            message, sizeof(message),
+            "active=%d cinematic_mode=%d playing_frame_fresh=%d "
+            "movement_known=%d movement_allowed=%d "
+            "descriptor_known=%d descriptor=%d animated_camera=%d "
+            "physics_known=%d physics_model=%d moving_lure=%d "
+            "persistent_unsupported=%d",
+            cutsceneCamera ? 1 : 0,
+            cinematicCamera ? 1 : 0,
+            playingFrameFresh ? 1 : 0,
+            playerMovementKnown ? 1 : 0,
+            playerMovementAllowed ? 1 : 0,
+            cameraDescriptorKnown ? 1 : 0,
+            cameraDescriptor,
+            animatedCamera ? 1 : 0,
+            physicsModelKnown ? 1 : 0,
+            physicsModel,
+            movingLure ? 1 : 0,
+            g_retailPersistentUnsupported ? 1 : 0);
+        Report(
+            "INFO", "vr_cutscene_camera_stabilization", message);
+    }
+    const float cutsceneBlend =
+        CurrentCutsceneCameraBlend(renderTick);
 
     // Der Weapon-Manager sieht sowohl CPlayerCamera::m_vPos als auch die
     // anschliessend geglaettete Kameraobjekt-Hoehe. Seine Wahl wird fuer die
     // Augen wiederverwendet, damit Blick, Haende und Waffe auf Treppen oder im
     // Sprung niemals verschiedene vertikale Bezugspositionen erhalten.
     LTVector visualBasePosition = originalTransform.m_vPos;
-    if (g_visualCameraHeightValid) {
+    if (!cutsceneCamera && g_visualCameraHeightValid) {
         const ULONGLONG now = GetTickCount64();
         if (now >= g_visualCameraHeightSampleTick &&
             now - g_visualCameraHeightSampleTick <=
                 kVisualCameraHeightFreshMilliseconds) {
             visualBasePosition.y = g_visualCameraHeight;
+        }
+    }
+    if (cutsceneCamera && !cinematicCamera) {
+        // PlayerCamera::UpdateFirstPerson/UpdateFollow calls CalcNonClipPos
+        // after storing the requested camera position in m_vPos. Collision
+        // correction can alternate between nearby wall-safe positions and
+        // becomes visible as cutscene wobble. Render VR from the requested
+        // pre-collision position while leaving the engine camera, player
+        // physics and every gameplay collision untouched.
+        LTVector desiredPosition;
+        if (ReadRetailDesiredCameraPosition(desiredPosition)) {
+            // Blend the collision correction out instead of switching bases
+            // in one frame. Once complete, no collision result remains in the
+            // rendered VR position, so alternating ray hits cannot jitter it.
+            visualBasePosition =
+                originalTransform.m_vPos +
+                (desiredPosition - originalTransform.m_vPos) *
+                    cutsceneBlend;
         }
     }
 
@@ -3361,14 +3736,44 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     g_stereoRecovery.valid = true;
 
     LTRotation viewBaseRotation = originalTransform.m_rRot;
-    ResolveSlideKickViewBase(
-        originalTransform.m_rRot, viewBaseRotation);
+    if (cutsceneCamera) {
+        // A cinematic camera owns a scripted orientation containing authored
+        // shake, pitch and roll. In a headset those components fight the
+        // physical head pose and appear as camera wobble. Preserve only the
+        // scene's yaw so camera cuts and horizontal staging still work; pitch
+        // and roll remain exclusively under HMD control.
+        viewBaseRotation = ResolveCutsceneCameraBaseRotation(
+            originalTransform.m_rRot, cutsceneBlend);
+    } else {
+        ResolveSlideKickViewBase(
+            originalTransform.m_rRot, viewBaseRotation);
+    }
+    const LTRigidTransform stableCameraBase(
+        visualBasePosition, viewBaseRotation);
+    LTVector bodyPresentationWorldOffset(
+        0.0F, 0.0F, 0.0F);
 
     // Physisches Lehnen: Der gemeinsame Kopfversatz beider Augen wird an der
     // Welt begrenzt. Beide Augenposen enthalten ihn als denselben Summanden,
     // deshalb genuegt es, den gesperrten Anteil hier wieder abzuziehen.
     g_stereoStep = "limit_physical_lean";
-    if (g_physicalLeanEnabled) {
+    if (cutsceneCamera) {
+        // A scripted camera already owns the viewer's world-space position.
+        // Keeping the common HMD center translation here moves the eyes away
+        // from a helicopter seat or other authored anchor, eventually behind
+        // the player body. Remove only that shared translation; the
+        // per-eye IPD and full HMD rotation remain active.
+        const TrackingVector rawDelta =
+            HeadTranslationRelativeToRecenter(
+                g_headTracking.recenter,
+                g_headTracking.currentCenter);
+        for (RelativeEyePose& tracked : trackedEye) {
+            tracked.positionMeters.x -= rawDelta.x * cutsceneBlend;
+            tracked.positionMeters.y -= rawDelta.y * cutsceneBlend;
+            tracked.positionMeters.z -= rawDelta.z * cutsceneBlend;
+        }
+        g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
+    } else if (g_physicalLeanEnabled) {
         // `rawDelta` steckt so in den Augenposen und ist deshalb die Groesse,
         // die unten wieder herausgerechnet wird. Gewollt ist dagegen der
         // verstaerkte Versatz fuer Blickpunkt, Haende und Waffe.
@@ -3400,6 +3805,11 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             remaining.x * g_leanTranslationScale * kGameUnitsPerMeter,
             remaining.y * g_leanTranslationScale * kGameUnitsPerMeter,
             remaining.z * g_leanTranslationScale * kGameUnitsPerMeter);
+        bodyPresentationWorldOffset =
+            viewBaseRotation.RotateVector(
+                LTVector(
+                    g_leanViewOffsetUnits.x, 0.0F,
+                    g_leanViewOffsetUnits.z));
 
         // Beide Augenposen tragen den rohen Kopfversatz als denselben
         // Summanden. Ersetzt wird er durch den verstaerkten und an der Welt
@@ -3412,9 +3822,28 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             tracked.positionMeters.z -=
                 rawDelta.z - remaining.z * g_leanTranslationScale;
         }
+    } else if (
+        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0) {
+        const TrackingVector rawDelta =
+            HeadTranslationRelativeToRecenter(
+                g_headTracking.recenter,
+                g_headTracking.currentCenter);
+        g_leanViewOffsetUnits = LTVector(
+            rawDelta.x * kGameUnitsPerMeter,
+            rawDelta.y * kGameUnitsPerMeter,
+            rawDelta.z * kGameUnitsPerMeter);
+        bodyPresentationWorldOffset =
+            viewBaseRotation.RotateVector(
+                LTVector(
+                    g_leanViewOffsetUnits.x, 0.0F,
+                    g_leanViewOffsetUnits.z));
     } else {
         g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
     }
+    RebaseCutsceneWeaponPresentation(stableCameraBase);
+    StageBodyPresentation(
+        originalTransform, stableCameraBase,
+        bodyPresentationWorldOffset);
 
     const float stereoFovX = symmetric.halfHorizontal * 2.0F;
     const float stereoFovY = symmetric.halfVertical * 2.0F;
@@ -3481,6 +3910,7 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         ++renderedEyes;
     }
 
+    g_bodyPresentationOffsetActive = false;
     g_stereoStep = "restore_camera_transform";
     g_client->SetObjectTransform(camera, originalTransform);
     g_stereoStep = "restore_camera_fov";
@@ -3541,6 +3971,7 @@ LTRESULT InvokeStereoProtected(
     if (g_stereoRecovery.valid && g_client != nullptr &&
         camera != nullptr) {
         __try {
+            g_bodyPresentationOffsetActive = false;
             g_client->SetObjectTransform(
                 camera, g_stereoRecovery.transform);
             g_client->SetCameraFOV(
@@ -3549,6 +3980,7 @@ LTRESULT InvokeStereoProtected(
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
+    g_bodyPresentationOffsetActive = false;
     g_stereoRecovery.valid = false;
 
     char message[192]{};
@@ -3585,13 +4017,22 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     g_visualCameraHeight = 0.0F;
     g_visualCameraHeightSampleTick = 0;
     g_visualCameraHeightValid = false;
+    g_retailUnsupportedSince = 0;
+    g_retailSupportedSince = 0;
+    g_retailPersistentUnsupported = false;
+    g_cutsceneCameraStateKnown = false;
+    g_cutsceneCameraState = false;
+    g_cutsceneCameraActivationTick = 0;
+    g_cutsceneBodyPresentation = {};
     g_playerBodyObject = nullptr;
     g_rightHandControl = HandNodeControlState{};
     g_leftHandControl = HandNodeControlState{};
     g_weaponAim.muzzleWeapon = nullptr;
+    g_weaponAim.retailWeapon = nullptr;
     g_weaponAim.muzzleValid = false;
     g_weaponAim.muzzleDirectionValid = false;
     g_weaponAim.muzzleLocalValid = false;
+    g_weaponAim.trackingBaseValid = false;
 
     if (hadState) {
         Report(
@@ -4042,10 +4483,58 @@ void UpdateRetailMeleeDiagnostics() noexcept {
         g_retailMovementHadSnapshot = false;
         g_retailDuckWasDown = false;
         g_retailPostureDownUntil = 0;
+        g_retailUnsupportedSince = 0;
+        g_retailSupportedSince = 0;
+        g_retailPersistentUnsupported = false;
         return;
     }
 
     const ULONGLONG now = GetTickCount64();
+    // The helicopter passenger sequence never enters Cinematic mode, never
+    // selects PPM_LURE and never publishes a camera animation descriptor.
+    // Retail does, however, leave the player falling without a jump or ground
+    // contact for the entire ride. A real jump/fall is short; require this
+    // state to persist before treating it as an unsupported moving carrier,
+    // then use a short grounded hysteresis on exit to avoid a one-frame pop.
+    const bool unsupported =
+        snapshot.falling && !snapshot.jumped && !snapshot.onGround;
+    if (unsupported) {
+        g_retailSupportedSince = 0;
+        if (g_retailUnsupportedSince == 0) {
+            g_retailUnsupportedSince = now;
+        }
+        if (!g_retailPersistentUnsupported &&
+            now >= g_retailUnsupportedSince &&
+            now - g_retailUnsupportedSince >= 500) {
+            g_retailPersistentUnsupported = true;
+            Report(
+                "INFO", "persistent_unsupported_camera_detected",
+                "Retail has reported falling without a jump or ground "
+                "contact for 500ms; moving-carrier camera stabilization "
+                "is active.");
+        }
+    } else {
+        g_retailUnsupportedSince = 0;
+        const bool stablySupported =
+            snapshot.onGround && !snapshot.falling;
+        if (g_retailPersistentUnsupported && stablySupported) {
+            if (g_retailSupportedSince == 0) {
+                g_retailSupportedSince = now;
+            }
+            if (now >= g_retailSupportedSince &&
+                now - g_retailSupportedSince >= 250) {
+                g_retailPersistentUnsupported = false;
+                g_retailSupportedSince = 0;
+                Report(
+                    "INFO", "persistent_unsupported_camera_cleared",
+                    "Stable ground contact restored; moving-carrier camera "
+                    "stabilization is inactive.");
+            }
+        } else {
+            g_retailSupportedSince = 0;
+        }
+    }
+
     const bool duckDown =
         (snapshot.controlFlags & kRetailControlFlagDuck) != 0;
     if (duckDown && !g_retailDuckWasDown &&
@@ -4886,7 +5375,10 @@ bool BuildTrackedHandTransform(
 // bis der Filter aufgeholt hat. Retails eigener Updateaufruf erhaelt weiterhin
 // unveraendert seine urspruengliche Basis.
 LTVector ResolveTrackedHandBasePosition(
-    const LTVector& retailBasePosition) noexcept {
+    const LTVector& retailBasePosition,
+    const LTRotation& retailBaseRotation,
+    LTRotation& resolvedBaseRotation) noexcept {
+    resolvedBaseRotation = retailBaseRotation;
     if (g_client == nullptr ||
         g_playerCameraObject == nullptr ||
         g_isStereoEnabled == nullptr ||
@@ -4909,6 +5401,29 @@ LTVector ResolveTrackedHandBasePosition(
             ResetVerticalCameraHeight(g_verticalCameraHeight);
             g_visualCameraHeightValid = false;
             return retailBasePosition;
+        }
+        if (g_retailPersistentUnsupported &&
+            g_cutsceneCameraState) {
+            // The eyes render from the requested pre-collision camera basis
+            // during a moving-carrier sequence. Build both controller hands
+            // and the weapon from that exact same basis; otherwise the
+            // collision-corrected Retail camera keeps shaking them below an
+            // already stable headset view.
+            ResetVerticalCameraHeight(g_verticalCameraHeight);
+            g_visualCameraHeightValid = false;
+            g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
+            const float blend =
+                CurrentCutsceneCameraBlend(GetTickCount64());
+            resolvedBaseRotation =
+                ResolveCutsceneCameraBaseRotation(
+                    cameraTransform.m_rRot, blend);
+            LTVector resolvedPosition = cameraTransform.m_vPos;
+            LTVector desiredPosition;
+            if (ReadRetailDesiredCameraPosition(desiredPosition)) {
+                resolvedPosition +=
+                    (desiredPosition - cameraTransform.m_vPos) * blend;
+            }
+            return resolvedPosition;
         }
         const bool ducking =
             g_retailMovement.available &&
@@ -5506,8 +6021,10 @@ int __fastcall HookRetailWeaponManagerUpdate(
         // Engine hat die Objekte beim Weltwechsel bereits selbst zerstoert.
         ForgetWorldObjectsAfterLevelChange();
     }
+    LTRotation trackedBaseRotation = baseRotation;
     const LTVector trackedBasePosition =
-        ResolveTrackedHandBasePosition(basePosition);
+        ResolveTrackedHandBasePosition(
+            basePosition, baseRotation, trackedBaseRotation);
     if (!g_autoStereoActivationAttempted && !g_disableStereoRender &&
         g_isStereoAvailable != nullptr &&
         g_isStereoEnabled != nullptr &&
@@ -5530,39 +6047,45 @@ int __fastcall HookRetailWeaponManagerUpdate(
         }
     }
     g_weaponAim.valid = BuildStableTrackedHandTransform(
-        baseRotation, trackedBasePosition,
+        trackedBaseRotation, trackedBasePosition,
         g_currentInput.aimPoseValidHands,
         FEARVR_HAND_MASK_RIGHT,
         g_currentInput.handAimPose[FEARVR_HAND_RIGHT],
         g_aimPoseCache[FEARVR_HAND_RIGHT],
         g_weaponAim.fireTransform);
     g_weaponAim.gripValid = BuildStableTrackedHandTransform(
-        baseRotation, trackedBasePosition,
+        trackedBaseRotation, trackedBasePosition,
         g_currentInput.gripPoseValidHands,
         FEARVR_HAND_MASK_RIGHT,
         g_currentInput.handGripPose[FEARVR_HAND_RIGHT],
         g_gripPoseCache[FEARVR_HAND_RIGHT],
         g_weaponAim.gripTransform);
     g_weaponAim.leftAimValid = BuildStableTrackedHandTransform(
-        baseRotation, trackedBasePosition,
+        trackedBaseRotation, trackedBasePosition,
         g_currentInput.aimPoseValidHands,
         FEARVR_HAND_MASK_LEFT,
         g_currentInput.handAimPose[FEARVR_HAND_LEFT],
         g_aimPoseCache[FEARVR_HAND_LEFT],
         g_weaponAim.leftAimTransform);
     g_weaponAim.leftGripValid = BuildStableTrackedHandTransform(
-        baseRotation, trackedBasePosition,
+        trackedBaseRotation, trackedBasePosition,
         g_currentInput.gripPoseValidHands,
         FEARVR_HAND_MASK_LEFT,
         g_currentInput.handGripPose[FEARVR_HAND_LEFT],
         g_gripPoseCache[FEARVR_HAND_LEFT],
         g_weaponAim.leftGripTransform);
+    g_weaponAim.trackingBase =
+        LTRigidTransform(
+            trackedBasePosition, trackedBaseRotation);
+    g_weaponAim.trackingBaseValid =
+        g_weaponAim.valid || g_weaponAim.gripValid ||
+        g_weaponAim.leftAimValid || g_weaponAim.leftGripValid;
     // OpenXR's right-hand aim pose already defines the canonical firing
     // axis. Do not turn the controller's arbitrary pose at recenter/load
     // into a permanent pitch/roll offset; the HMD recenter basis was
     // already applied in BuildTrackedHandTransform.
     ApplyHandOrientationCalibration(
-        baseRotation, g_weaponAim.leftAimTransform,
+        trackedBaseRotation, g_weaponAim.leftAimTransform,
         g_weaponAim.leftAimValid, g_leftHandOrientation, "Left");
 
     if (g_weaponAim.valid && g_weaponAim.muzzleDirectionValid) {
@@ -5632,6 +6155,7 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // this exact grip/aim transform, so apply the same transform to the weapon
     // after Retail updates it and keep both visually locked together.
     void* const weapon = CurrentRetailWeapon(weaponManager);
+    g_weaponAim.retailWeapon = weapon;
     UpdateLeftFlashlightModel(weapon);
     if (weapon != nullptr && !g_disableWeaponTransform &&
         g_weaponAim.valid && g_weaponAim.gripValid &&
@@ -5994,11 +6518,39 @@ void LeftHandNodeControl(
     }
 }
 
+void BodyPresentationNodeControl(
+    const NodeControlData& data, void* userData) {
+    (void)userData;
+    if (!g_bodyPresentationOffsetActive ||
+        !g_bodyPresentationNodeControl.installed ||
+        data.m_hModel != g_playerBodyObject ||
+        data.m_hNode != g_bodyPresentationNodeControl.node ||
+        data.m_pModelTransform == nullptr ||
+        data.m_pNodeTransform == nullptr) {
+        return;
+    }
+
+    // Move only the rendered skeleton. Moving the HOBJECT while RenderCamera
+    // is building visibility lists can invalidate the engine's spatial
+    // bookkeeping and intermittently cull unrelated world models.
+    const LTVector modelOffset =
+        data.m_pModelTransform->m_rRot.Conjugate().RotateVector(
+            g_bodyPresentationWorldOffset);
+    data.m_pNodeTransform->m_vPos += modelOffset;
+}
+
 void RemoveHandNodeControls() noexcept {
     __try {
         ILTModel* const model =
             g_client != nullptr ? g_client->GetModelLT() : nullptr;
         if (model != nullptr && g_playerBodyObject != nullptr) {
+            if (g_bodyPresentationNodeControl.installed) {
+                model->RemoveNodeControlFn(
+                    g_playerBodyObject,
+                    g_bodyPresentationNodeControl.node,
+                    &BodyPresentationNodeControl,
+                    &g_playerBodyObject);
+            }
             if (g_rightHandControl.upperArmInstalled) {
                 model->RemoveNodeControlFn(
                     g_playerBodyObject,
@@ -6043,6 +6595,8 @@ void RemoveHandNodeControls() noexcept {
     g_playerBodyObject = nullptr;
     g_rightHandControl = HandNodeControlState{};
     g_leftHandControl = HandNodeControlState{};
+    g_bodyPresentationNodeControl =
+        BodyPresentationNodeControlState{};
     InterlockedExchange(&g_armGeometryInspectedLogged, 0);
     InterlockedExchange(&g_armGeometryEmptyAttempts, 0);
     InterlockedExchange(&g_armGeometryNeverAvailableLogged, 0);
@@ -6473,6 +7027,28 @@ void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
         }
         g_playerBodyObject = playerBody;
         ConfigureRetailArmPieceVisibility(model, playerBody);
+        if (!g_bodyPresentationNodeControl.installed) {
+            HMODELNODE presentationNode = INVALID_MODEL_NODE;
+            if ((model->GetNode(
+                     playerBody, "translation",
+                     presentationNode) == LT_OK ||
+                 model->GetNode(
+                     playerBody, "null2",
+                     presentationNode) == LT_OK) &&
+                presentationNode != INVALID_MODEL_NODE &&
+                model->AddNodeControlFn(
+                    playerBody, presentationNode,
+                    &BodyPresentationNodeControl,
+                    &g_playerBodyObject) == LT_OK) {
+                g_bodyPresentationNodeControl.node =
+                    presentationNode;
+                g_bodyPresentationNodeControl.installed = true;
+                Report(
+                    "INFO", "body_presentation_node_installed",
+                    "Room-scale body correction uses a skeleton node and "
+                    "does not move the world HOBJECT during rendering.");
+            }
+        }
         if (g_rightHandControl.installed &&
             g_rightHandControl.upperArmInstalled &&
             g_rightHandControl.forearmInstalled &&
@@ -6648,6 +7224,8 @@ void RemoveWeaponAimHooks() noexcept {
     g_weaponAim.muzzleLocalValid = false;
     g_weaponAim.muzzleDiagnosticLogged = false;
     g_weaponAim.muzzleWeapon = nullptr;
+    g_weaponAim.retailWeapon = nullptr;
+    g_weaponAim.trackingBaseValid = false;
     g_rightHandOrientation = HandOrientationCalibration{};
     g_leftHandOrientation = HandOrientationCalibration{};
     // Ohne Aim-Hooks laeuft kein Weapon-Manager-Update mehr, das den Griff
@@ -6672,6 +7250,13 @@ void RemoveWeaponAimHooks() noexcept {
     g_retailMovementHadSnapshot = false;
     g_retailDuckWasDown = false;
     g_retailPostureDownUntil = 0;
+    g_retailUnsupportedSince = 0;
+    g_retailSupportedSince = 0;
+    g_retailPersistentUnsupported = false;
+    g_cutsceneCameraStateKnown = false;
+    g_cutsceneCameraState = false;
+    g_cutsceneCameraActivationTick = 0;
+    g_cutsceneBodyPresentation = {};
     g_retailPostureDownVariable = nullptr;
     g_slideKickView = {};
     ResetClimbGrip(g_climbGrip);

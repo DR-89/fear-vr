@@ -145,11 +145,11 @@ inline FearVrCommandValue MapControllerCommand(
                 input.trigger[FEARVR_HAND_RIGHT] >=
                     kTriggerThreshold};
     case FEARVR_CMD_FOCUS:
-        return {
-            1.0F,
-            leftActive &&
-                input.trigger[FEARVR_HAND_LEFT] >=
-                    kTriggerThreshold};
+        // The left trigger is the dedicated slow-mo control. Injecting FOCUS
+        // on the same edge lets Retail's focus detector redirect the first
+        // shot after slow-mo starts. Keyboard/mouse focus remains untouched
+        // because an inactive controller value falls through to Retail.
+        return {0.0F, false};
     // Der Waffenwechsel schaltet zyklisch vorwaerts und braucht deshalb keine
     // Gegenrichtung mehr. Ausgeloest wird er als Tastenflanke im GameClient,
     // hier steht nur der Ruhezustand.

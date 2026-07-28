@@ -21,7 +21,7 @@ project(FearVr
 # vollstaendigen Versionszeichenkette zusammengesetzt. Leer lassen fuer ein
 # endgueltiges Release. tools/make-release.ps1 liest beide Werte aus dieser
 # Datei, damit es nur eine Quelle der Wahrheit gibt.
-set(FEARVR_VERSION_LABEL "beta.6")
+set(FEARVR_VERSION_LABEL "beta.7")
 
 # ---- Optionen ---------------------------------------------------------------
 option(FEARVR_BUILD_HOST  "Build x64 OpenXR host (fearvr-host.exe)" OFF)

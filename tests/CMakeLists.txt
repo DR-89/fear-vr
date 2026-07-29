@@ -103,6 +103,15 @@ if(MSVC)
 endif()
 add_test(NAME lean_body COMMAND test_lean_body)
 
+add_executable(test_vr_menu_model test_vr_menu_model.cpp)
+target_link_libraries(
+  test_vr_menu_model PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_vr_menu_model PRIVATE /UNDEBUG)
+endif()
+add_test(NAME vr_menu_model COMMAND test_vr_menu_model)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND TARGET fearvr-proxy)
   # Isolierter M2-Producer: Der echte System-Import bleibt d3d9.lib; erst
   # nach dem Link wird ausschließlich neben diese Test-EXE der Proxy kopiert.

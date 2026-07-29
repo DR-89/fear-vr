@@ -31,6 +31,7 @@
 #include "climb_grip.h"
 #include "two_handed_grip.h"
 #include "weapon_weight.h"
+#include "vr_menu_model.h"
 
 namespace fearvr {
 namespace {
@@ -589,10 +590,36 @@ void* g_vrNormalControls[
 std::size_t g_vrNormalControlCount = 0;
 bool g_vrMenuControlsBuilt = false;
 bool g_vrSettingsPageActive = false;
+VrSettingsPage g_vrSettingsPage = VrSettingsPage::None;
+bool g_vrWeaponProfileEditsCurrent = true;
 int g_vrOriginalItemSpacing = 0;
 bool g_vrOriginalItemSpacingKnown = false;
+
+constexpr std::array<int, 7> kLeanScalePresets{
+    100, 150, 200, 250, 300, 350, 400};
+constexpr std::array<float, 8> kWeaponWeightPresets{
+    0.25F, 0.50F, 0.75F, 1.00F, 1.50F, 2.00F, 3.00F, 4.00F};
+constexpr std::array<float, 7> kWeaponPositionFollowPresets{
+    6.0F, 10.0F, 14.0F, 18.0F, 24.0F, 32.0F, 40.0F};
+constexpr std::array<float, 7> kWeaponRotationFollowPresets{
+    6.0F, 10.0F, 14.0F, 20.0F, 26.0F, 32.0F, 40.0F};
+constexpr std::array<float, 7> kWeaponCatchUpPresets{
+    0.0F, 0.5F, 1.0F, 1.5F, 2.0F, 3.0F, 4.0F};
+
 VrMenuControl g_vrMenuEntry;
 VrMenuControl g_vrMenuTitle;
+VrMenuControl g_vrMenuDisplayTitle;
+VrMenuControl g_vrMenuComfortTitle;
+VrMenuControl g_vrMenuControlsTitle;
+VrMenuControl g_vrMenuWeaponsTitle;
+VrMenuControl g_vrMenuMeleeTitle;
+VrMenuControl g_vrMenuAdvancedTitle;
+VrMenuControl g_vrMenuOpenDisplay;
+VrMenuControl g_vrMenuOpenComfort;
+VrMenuControl g_vrMenuOpenControls;
+VrMenuControl g_vrMenuOpenWeapons;
+VrMenuControl g_vrMenuOpenMelee;
+VrMenuControl g_vrMenuOpenAdvanced;
 VrMenuToggle g_vrMenuStereo;
 VrMenuToggle g_vrMenuTranslation;
 VrMenuToggle g_vrMenuStereoHud;
@@ -607,12 +634,26 @@ VrMenuToggle g_vrMenuHandedness;
 VrMenuToggle g_vrMenuClimbing;
 // `enabled` = physisches Lehnen, `disabled` = nur Retails Kameraneigung.
 VrMenuToggle g_vrMenuPhysicalLean;
-// Master-Schalter; die vier Einzelaktionen bleiben bewusst in fearvr.ini,
-// damit die native, flache Menue-Seite nicht vier weitere Zeilen bekommt.
+VrMenuControl g_vrMenuLeanScale[kLeanScalePresets.size()];
 VrMenuToggle g_vrMenuMelee;
+VrMenuToggle g_vrMenuMeleeWeaponStrike;
+VrMenuToggle g_vrMenuMeleeOffHandStrike;
+VrMenuToggle g_vrMenuMeleeJumpKick;
+VrMenuToggle g_vrMenuMeleeSlideKick;
 VrMenuToggle g_vrMenuArms;
+VrMenuToggle g_vrMenuTwoHandGrip;
+VrMenuToggle g_vrMenuWeaponWeight;
+VrMenuToggle g_vrMenuWeaponWeightDiagnostics;
+VrMenuToggle g_vrMenuWeaponProfileTarget;
 VrMenuControl g_vrMenuFovScale[kFovScalePercents.size()];
 VrMenuControl g_vrMenuTurnSpeed[3];
+VrMenuControl g_vrMenuWeaponWeightValue[kWeaponWeightPresets.size()];
+VrMenuControl g_vrMenuWeaponPositionFollow[
+    kWeaponPositionFollowPresets.size()];
+VrMenuControl g_vrMenuWeaponRotationFollow[
+    kWeaponRotationFollowPresets.size()];
+VrMenuControl g_vrMenuWeaponCatchUp[kWeaponCatchUpPresets.size()];
+VrMenuControl g_vrMenuResetWeaponProfile;
 VrMenuControl g_vrMenuRecenter;
 VrMenuControl g_vrMenuDefaults;
 VrMenuControl g_vrMenuBack;
@@ -822,6 +863,12 @@ constexpr unsigned char kRetailListSwapItemsPrefix[] = {
 
 enum VrMenuCommand : std::uint32_t {
     kVrMenuOpen = 0x56520001U,
+    kVrMenuOpenDisplay,
+    kVrMenuOpenComfort,
+    kVrMenuOpenControls,
+    kVrMenuOpenWeapons,
+    kVrMenuOpenMelee,
+    kVrMenuOpenAdvanced,
     kVrMenuToggleStereo,
     kVrMenuToggleTranslation,
     kVrMenuToggleStereoHud,
@@ -832,10 +879,24 @@ enum VrMenuCommand : std::uint32_t {
     kVrMenuToggleHandedness,
     kVrMenuToggleClimbing,
     kVrMenuTogglePhysicalLean,
+    kVrMenuCycleLeanScale,
     kVrMenuToggleMelee,
+    kVrMenuToggleMeleeWeaponStrike,
+    kVrMenuToggleMeleeOffHandStrike,
+    kVrMenuToggleMeleeJumpKick,
+    kVrMenuToggleMeleeSlideKick,
     kVrMenuToggleArms,
+    kVrMenuToggleTwoHandGrip,
+    kVrMenuToggleWeaponWeight,
+    kVrMenuToggleWeaponWeightDiagnostics,
+    kVrMenuToggleWeaponProfileTarget,
     kVrMenuCycleFovScale,
     kVrMenuCycleTurnSpeed,
+    kVrMenuCycleWeaponWeight,
+    kVrMenuCycleWeaponPositionFollow,
+    kVrMenuCycleWeaponRotationFollow,
+    kVrMenuCycleWeaponCatchUp,
+    kVrMenuResetWeaponProfile,
     kVrMenuRecenter,
     kVrMenuDefaults,
     kVrMenuBack,
@@ -1753,6 +1814,23 @@ VrMenuControl AddRetailVrMenuControl(
 
 void HideRetailVrSettingsControls() noexcept {
     SetRetailControlVisible(g_vrMenuTitle, false);
+    SetRetailControlVisible(g_vrMenuDisplayTitle, false);
+    SetRetailControlVisible(g_vrMenuComfortTitle, false);
+    SetRetailControlVisible(g_vrMenuControlsTitle, false);
+    SetRetailControlVisible(g_vrMenuWeaponsTitle, false);
+    SetRetailControlVisible(g_vrMenuMeleeTitle, false);
+    SetRetailControlVisible(g_vrMenuAdvancedTitle, false);
+    const VrMenuControl categoryControls[] = {
+        g_vrMenuOpenDisplay,
+        g_vrMenuOpenComfort,
+        g_vrMenuOpenControls,
+        g_vrMenuOpenWeapons,
+        g_vrMenuOpenMelee,
+        g_vrMenuOpenAdvanced,
+    };
+    for (const VrMenuControl& control : categoryControls) {
+        SetRetailControlVisible(control, false);
+    }
     const VrMenuToggle toggles[] = {
         g_vrMenuStereo,
         g_vrMenuTranslation,
@@ -1765,7 +1843,15 @@ void HideRetailVrSettingsControls() noexcept {
         g_vrMenuClimbing,
         g_vrMenuPhysicalLean,
         g_vrMenuMelee,
+        g_vrMenuMeleeWeaponStrike,
+        g_vrMenuMeleeOffHandStrike,
+        g_vrMenuMeleeJumpKick,
+        g_vrMenuMeleeSlideKick,
         g_vrMenuArms,
+        g_vrMenuTwoHandGrip,
+        g_vrMenuWeaponWeight,
+        g_vrMenuWeaponWeightDiagnostics,
+        g_vrMenuWeaponProfileTarget,
     };
     for (const VrMenuToggle& toggle : toggles) {
         SetRetailControlVisible(toggle.enabled, false);
@@ -1777,6 +1863,22 @@ void HideRetailVrSettingsControls() noexcept {
     for (const VrMenuControl& fovScale : g_vrMenuFovScale) {
         SetRetailControlVisible(fovScale, false);
     }
+    for (const VrMenuControl& leanScale : g_vrMenuLeanScale) {
+        SetRetailControlVisible(leanScale, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponWeightValue) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponPositionFollow) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponRotationFollow) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponCatchUp) {
+        SetRetailControlVisible(value, false);
+    }
+    SetRetailControlVisible(g_vrMenuResetWeaponProfile, false);
     SetRetailControlVisible(g_vrMenuRecenter, false);
     SetRetailControlVisible(g_vrMenuDefaults, false);
     SetRetailControlVisible(g_vrMenuBack, false);
@@ -1789,39 +1891,156 @@ VrMenuControl SetRetailVrToggleVisible(
     return enabled ? toggle.enabled : toggle.disabled;
 }
 
+template <std::size_t Size>
+VrMenuControl SetRetailVrPresetVisible(
+    VrMenuControl (&controls)[Size], std::size_t selected) noexcept {
+    selected = (std::min)(selected, Size - 1U);
+    for (std::size_t index = 0; index < Size; ++index) {
+        SetRetailControlVisible(controls[index], index == selected);
+    }
+    return controls[selected];
+}
+
+bool HasCurrentWeaponWeightProfile() noexcept {
+    return g_weightedWeaponInput.profileName[0] != '\0';
+}
+
+bool EditingCurrentWeaponWeightProfile() noexcept {
+    return g_vrWeaponProfileEditsCurrent &&
+           HasCurrentWeaponWeightProfile();
+}
+
+WeaponWeightProfile& EditableWeaponWeightProfile() noexcept {
+    return EditingCurrentWeaponWeightProfile()
+        ? g_weightedWeaponInput.profile
+        : g_defaultWeaponWeightProfile;
+}
+
+void ResetEditableWeaponWeightProfile() noexcept {
+    EditableWeaponWeightProfile() = WeaponWeightProfile{};
+    ResetWeaponWeightPair(
+        g_weightedWeaponInput.filters,
+        WeaponWeightResetReason::enabledChanged);
+}
+
 VrMenuControl RefreshRetailVrSettingsControls() noexcept {
-    // Keep one short, non-scrolling page. Less frequently changed options
-    // remain persisted in fearvr.ini but do not crowd the native 320px frame.
     HideRetailVrSettingsControls();
-    const VrMenuControl first = SetRetailVrToggleVisible(
-        g_vrMenuStereo,
-        QueryBooleanOption(g_isStereoEnabled, true));
-    SetRetailVrToggleVisible(
-        g_vrMenuStereoHud,
-        QueryBooleanOption(g_isStereoHudEnabled, true));
-    for (int index = 0; index < 3; ++index) {
-        SetRetailControlVisible(
-            g_vrMenuTurnSpeed[index],
-            index == g_turnSpeedPreset);
+    VrMenuControl first = g_vrMenuBack;
+
+    switch (g_vrSettingsPage) {
+    case VrSettingsPage::Root:
+        SetRetailControlVisible(g_vrMenuTitle, true);
+        SetRetailControlVisible(g_vrMenuOpenDisplay, true);
+        SetRetailControlVisible(g_vrMenuOpenComfort, true);
+        SetRetailControlVisible(g_vrMenuOpenControls, true);
+        SetRetailControlVisible(g_vrMenuOpenWeapons, true);
+        SetRetailControlVisible(g_vrMenuOpenMelee, true);
+        SetRetailControlVisible(g_vrMenuOpenAdvanced, true);
+        first = g_vrMenuOpenDisplay;
+        break;
+    case VrSettingsPage::Display:
+        SetRetailControlVisible(g_vrMenuDisplayTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuStereo,
+            QueryBooleanOption(g_isStereoEnabled, true));
+        SetRetailVrToggleVisible(
+            g_vrMenuStereoHud,
+            QueryBooleanOption(g_isStereoHudEnabled, true));
+        SetRetailVrPresetVisible(
+            g_vrMenuFovScale,
+            static_cast<std::size_t>(g_fovScalePreset));
+        break;
+    case VrSettingsPage::Comfort:
+        SetRetailControlVisible(g_vrMenuComfortTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuTranslation,
+            QueryBooleanOption(g_isTranslationEnabled, false));
+        SetRetailVrToggleVisible(g_vrMenuHeadBob, g_headBobEnabled);
+        SetRetailVrToggleVisible(
+            g_vrMenuComfort,
+            QueryBooleanOption(g_isComfortModeEnabled, false));
+        SetRetailVrPresetVisible(
+            g_vrMenuTurnSpeed,
+            static_cast<std::size_t>(g_turnSpeedPreset));
+        SetRetailVrToggleVisible(
+            g_vrMenuPhysicalLean, g_physicalLeanEnabled);
+        SetRetailVrPresetVisible(
+            g_vrMenuLeanScale,
+            ClosestVrPresetIndex(g_leanScalePercent, kLeanScalePresets));
+        break;
+    case VrSettingsPage::Controls:
+        SetRetailControlVisible(g_vrMenuControlsTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuHandedness, !g_leftHandedBindings);
+        SetRetailVrToggleVisible(
+            g_vrMenuHaptics, g_controllerHapticsEnabled);
+        SetRetailVrToggleVisible(g_vrMenuClimbing, g_climbingEnabled);
+        SetRetailVrToggleVisible(
+            g_vrMenuTwoHandGrip, g_twoHandedGripEnabled);
+        SetRetailControlVisible(g_vrMenuRecenter, true);
+        break;
+    case VrSettingsPage::Weapons: {
+        SetRetailControlVisible(g_vrMenuWeaponsTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuWeaponProfileTarget,
+            EditingCurrentWeaponWeightProfile());
+        SetRetailVrToggleVisible(
+            g_vrMenuAimGuide, g_weaponAimGuideEnabled);
+        SetRetailVrToggleVisible(g_vrMenuArms, g_showPlayerArms);
+        SetRetailVrToggleVisible(
+            g_vrMenuWeaponWeight, g_weaponWeightEnabled);
+        const WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponWeightValue,
+            ClosestVrPresetIndex(profile.weight, kWeaponWeightPresets));
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponPositionFollow,
+            ClosestVrPresetIndex(
+                profile.positionalFollow,
+                kWeaponPositionFollowPresets));
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponRotationFollow,
+            ClosestVrPresetIndex(
+                profile.rotationalFollow,
+                kWeaponRotationFollowPresets));
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponCatchUp,
+            ClosestVrPresetIndex(
+                profile.catchUpStrength, kWeaponCatchUpPresets));
+        SetRetailControlVisible(g_vrMenuResetWeaponProfile, true);
+        break;
     }
-    for (int index = 0; index < 4; ++index) {
-        SetRetailControlVisible(
-            g_vrMenuFovScale[index],
-            index == g_fovScalePreset);
+    case VrSettingsPage::Melee:
+        SetRetailControlVisible(g_vrMenuMeleeTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuMelee, g_meleeThrustEnabled);
+        if (g_meleeThrustEnabled) {
+            SetRetailVrToggleVisible(
+                g_vrMenuMeleeWeaponStrike,
+                g_meleeWeaponStrikeEnabled);
+            SetRetailVrToggleVisible(
+                g_vrMenuMeleeOffHandStrike,
+                g_meleeOffHandStrikeEnabled);
+            SetRetailVrToggleVisible(
+                g_vrMenuMeleeJumpKick,
+                g_meleeJumpKickEnabled);
+            SetRetailVrToggleVisible(
+                g_vrMenuMeleeSlideKick,
+                g_meleeSlideKickEnabled);
+        }
+        break;
+    case VrSettingsPage::Advanced:
+        SetRetailControlVisible(g_vrMenuAdvancedTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuWeaponWeightDiagnostics,
+            g_weaponWeightDiagnosticsEnabled);
+        SetRetailControlVisible(g_vrMenuDefaults, true);
+        break;
+    case VrSettingsPage::None:
+    default:
+        break;
     }
-    SetRetailVrToggleVisible(
-        g_vrMenuAimGuide, g_weaponAimGuideEnabled);
-    SetRetailVrToggleVisible(
-        g_vrMenuHaptics, g_controllerHapticsEnabled);
-    SetRetailVrToggleVisible(
-        g_vrMenuHandedness, !g_leftHandedBindings);
-    SetRetailVrToggleVisible(g_vrMenuClimbing, g_climbingEnabled);
-    SetRetailVrToggleVisible(
-        g_vrMenuPhysicalLean, g_physicalLeanEnabled);
-    SetRetailVrToggleVisible(g_vrMenuMelee, g_meleeThrustEnabled);
-    SetRetailVrToggleVisible(g_vrMenuArms, g_showPlayerArms);
-    SetRetailControlVisible(g_vrMenuRecenter, true);
-    SetRetailControlVisible(g_vrMenuDefaults, true);
+
     SetRetailControlVisible(g_vrMenuBack, true);
     MarkRetailVrMenuForLayout();
     return first;
@@ -1844,6 +2063,8 @@ void SelectRetailVrMenuControl(
 }
 
 void RestoreRetailSystemMenuControls() noexcept {
+    g_vrSettingsPage = VrSettingsPage::None;
+    g_vrSettingsPageActive = false;
     SetRetailVrMenuCompactSpacing(false);
     for (std::size_t index = 0;
          index < g_vrNormalControlCount; ++index) {
@@ -1851,6 +2072,17 @@ void RestoreRetailSystemMenuControls() noexcept {
     }
     HideRetailVrSettingsControls();
     MarkRetailVrMenuForLayout();
+}
+
+void ShowRetailVrSettingsPage(VrSettingsPage page) noexcept {
+    if (!g_vrMenuControlsBuilt || page == VrSettingsPage::None) {
+        return;
+    }
+    g_vrSettingsPage = page;
+    g_vrSettingsPageActive = true;
+    SetRetailVrMenuCompactSpacing(true);
+    const VrMenuControl first = RefreshRetailVrSettingsControls();
+    SelectRetailVrMenuControl(first);
 }
 
 void EnterRetailVrSettingsPage() noexcept {
@@ -1861,21 +2093,16 @@ void EnterRetailVrSettingsPage() noexcept {
          index < g_vrNormalControlCount; ++index) {
         SetRetailControlVisible(g_vrNormalControls[index], false);
     }
-    g_vrSettingsPageActive = true;
-    SetRetailVrMenuCompactSpacing(true);
-    const VrMenuControl first =
-        RefreshRetailVrSettingsControls();
-    SelectRetailVrMenuControl(first);
+    ShowRetailVrSettingsPage(VrSettingsPage::Root);
     Report(
         "INFO", "vr_settings_menu_opened",
-        "The native Retail pause menu is showing VR settings.");
+        "The native Retail pause menu is showing categorized VR settings.");
 }
 
 void LeaveRetailVrSettingsPage() noexcept {
     if (!g_vrSettingsPageActive) {
         return;
     }
-    g_vrSettingsPageActive = false;
     RestoreRetailSystemMenuControls();
     SaveVrSettings();
     if (g_retailMenuOnFocus != nullptr &&
@@ -1888,6 +2115,18 @@ void LeaveRetailVrSettingsPage() noexcept {
     Report(
         "INFO", "vr_settings_menu_closed",
         "The native Retail system-menu controls were restored.");
+}
+
+void NavigateBackRetailVrSettingsPage() noexcept {
+    if (!g_vrSettingsPageActive) {
+        return;
+    }
+    const VrSettingsPage parent = ParentVrSettingsPage(g_vrSettingsPage);
+    if (parent == VrSettingsPage::None) {
+        LeaveRetailVrSettingsPage();
+    } else {
+        ShowRetailVrSettingsPage(parent);
+    }
 }
 
 void ResetVrTrackingBasis() noexcept {
@@ -1910,7 +2149,10 @@ void ApplyVrDefaults() noexcept {
     SetBooleanOption(g_setComfortModeEnabled, false);
     ApplyHeadBobEnabled(false);
     g_weaponWeightEnabled = false;
+    g_weaponWeightDiagnosticsEnabled = false;
     g_defaultWeaponWeightProfile = {};
+    g_weightedWeaponInput.profile = WeaponWeightProfile{};
+    g_vrWeaponProfileEditsCurrent = true;
     g_weaponAimGuideEnabled = true;
     g_controllerHapticsEnabled = true;
     g_twoHandedGripEnabled = true;
@@ -1919,6 +2161,9 @@ void ApplyVrDefaults() noexcept {
     g_fovScalePreset = 0;
     ApplyFovScalePreset();
     g_climbingEnabled = false;
+    g_physicalLeanEnabled = true;
+    g_leanScalePercent = 200;
+    ResetLeanCollision(g_leanCollision);
     g_meleeThrustEnabled = true;
     g_meleeWeaponStrikeEnabled = true;
     g_meleeOffHandStrikeEnabled = true;
@@ -1964,7 +2209,7 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
     }
 
     g_vrMenuEntry = AddRetailVrMenuControl(
-        L"VR SETTINGS", kVrMenuOpen);
+        L"VR Settings", kVrMenuOpen);
     if (g_vrMenuEntry.object == nullptr ||
         g_vrMenuEntry.index !=
             kRetailSystemMenuOriginalControlCount) {
@@ -1986,55 +2231,125 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
     g_vrMenuEntry.index = 3;
 
     g_vrMenuTitle = AddRetailVrMenuControl(
-        L"VR SETTINGS", 0, true);
+        L"VR Settings", 0, true);
+    g_vrMenuDisplayTitle = AddRetailVrMenuControl(
+        L"Display & HUD", 0, true);
+    g_vrMenuComfortTitle = AddRetailVrMenuControl(
+        L"Movement & Comfort", 0, true);
+    g_vrMenuControlsTitle = AddRetailVrMenuControl(
+        L"Controls", 0, true);
+    g_vrMenuWeaponsTitle = AddRetailVrMenuControl(
+        L"Weapons", 0, true);
+    g_vrMenuMeleeTitle = AddRetailVrMenuControl(
+        L"Melee", 0, true);
+    g_vrMenuAdvancedTitle = AddRetailVrMenuControl(
+        L"Advanced", 0, true);
+    g_vrMenuOpenDisplay = AddRetailVrMenuControl(
+        L"Display & HUD", kVrMenuOpenDisplay);
+    g_vrMenuOpenComfort = AddRetailVrMenuControl(
+        L"Movement & Comfort", kVrMenuOpenComfort);
+    g_vrMenuOpenControls = AddRetailVrMenuControl(
+        L"Controls", kVrMenuOpenControls);
+    g_vrMenuOpenWeapons = AddRetailVrMenuControl(
+        L"Weapons", kVrMenuOpenWeapons);
+    g_vrMenuOpenMelee = AddRetailVrMenuControl(
+        L"Melee", kVrMenuOpenMelee);
+    g_vrMenuOpenAdvanced = AddRetailVrMenuControl(
+        L"Advanced", kVrMenuOpenAdvanced);
     g_vrMenuStereo.enabled = AddRetailVrMenuControl(
-        L"Stereo rendering: ON", kVrMenuToggleStereo);
+        L"Stereo rendering: On", kVrMenuToggleStereo);
     g_vrMenuStereo.disabled = AddRetailVrMenuControl(
-        L"Stereo rendering: OFF", kVrMenuToggleStereo);
+        L"Stereo rendering: Off", kVrMenuToggleStereo);
     g_vrMenuTranslation.enabled = AddRetailVrMenuControl(
-        L"HMD translation: ON", kVrMenuToggleTranslation);
+        L"HMD translation: On", kVrMenuToggleTranslation);
     g_vrMenuTranslation.disabled = AddRetailVrMenuControl(
-        L"HMD translation: OFF", kVrMenuToggleTranslation);
+        L"HMD translation: Off", kVrMenuToggleTranslation);
     g_vrMenuStereoHud.enabled = AddRetailVrMenuControl(
-        L"Stereo HUD: ON", kVrMenuToggleStereoHud);
+        L"Stereo HUD: On", kVrMenuToggleStereoHud);
     g_vrMenuStereoHud.disabled = AddRetailVrMenuControl(
-        L"Stereo HUD: OFF", kVrMenuToggleStereoHud);
+        L"Stereo HUD: Off", kVrMenuToggleStereoHud);
     g_vrMenuHeadBob.enabled = AddRetailVrMenuControl(
-        L"Head bob: ON", kVrMenuToggleHeadBob);
+        L"Head bob: On", kVrMenuToggleHeadBob);
     g_vrMenuHeadBob.disabled = AddRetailVrMenuControl(
-        L"Head bob: OFF", kVrMenuToggleHeadBob);
+        L"Head bob: Off", kVrMenuToggleHeadBob);
     g_vrMenuComfort.enabled = AddRetailVrMenuControl(
-        L"Comfort screen: ON", kVrMenuToggleComfort);
+        L"Comfort screen: On", kVrMenuToggleComfort);
     g_vrMenuComfort.disabled = AddRetailVrMenuControl(
-        L"Comfort screen: OFF", kVrMenuToggleComfort);
+        L"Comfort screen: Off", kVrMenuToggleComfort);
     g_vrMenuAimGuide.enabled = AddRetailVrMenuControl(
-        L"Red aim guide: ON", kVrMenuToggleAimGuide);
+        L"Red aim guide: On", kVrMenuToggleAimGuide);
     g_vrMenuAimGuide.disabled = AddRetailVrMenuControl(
-        L"Red aim guide: OFF", kVrMenuToggleAimGuide);
+        L"Red aim guide: Off", kVrMenuToggleAimGuide);
     g_vrMenuHaptics.enabled = AddRetailVrMenuControl(
-        L"Controller vibration: ON", kVrMenuToggleHaptics);
+        L"Controller vibration: On", kVrMenuToggleHaptics);
     g_vrMenuHaptics.disabled = AddRetailVrMenuControl(
-        L"Controller vibration: OFF", kVrMenuToggleHaptics);
+        L"Controller vibration: Off", kVrMenuToggleHaptics);
     g_vrMenuHandedness.enabled = AddRetailVrMenuControl(
-        L"Controls: RIGHT-HANDED", kVrMenuToggleHandedness);
+        L"Controls: Right-handed", kVrMenuToggleHandedness);
     g_vrMenuHandedness.disabled = AddRetailVrMenuControl(
-        L"Controls: LEFT-HANDED", kVrMenuToggleHandedness);
+        L"Controls: Left-handed", kVrMenuToggleHandedness);
     g_vrMenuClimbing.enabled = AddRetailVrMenuControl(
-        L"Ladder climbing: HANDS", kVrMenuToggleClimbing);
+        L"Ladder climbing: Hands", kVrMenuToggleClimbing);
     g_vrMenuClimbing.disabled = AddRetailVrMenuControl(
-        L"Ladder climbing: CLASSIC", kVrMenuToggleClimbing);
+        L"Ladder climbing: Classic", kVrMenuToggleClimbing);
     g_vrMenuPhysicalLean.enabled = AddRetailVrMenuControl(
-        L"Physical lean: ON", kVrMenuTogglePhysicalLean);
+        L"Physical lean: On", kVrMenuTogglePhysicalLean);
     g_vrMenuPhysicalLean.disabled = AddRetailVrMenuControl(
-        L"Physical lean: OFF", kVrMenuTogglePhysicalLean);
+        L"Physical lean: Off", kVrMenuTogglePhysicalLean);
+    g_vrMenuLeanScale[0] = AddRetailVrMenuControl(
+        L"Lean strength: 100%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[1] = AddRetailVrMenuControl(
+        L"Lean strength: 150%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[2] = AddRetailVrMenuControl(
+        L"Lean strength: 200%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[3] = AddRetailVrMenuControl(
+        L"Lean strength: 250%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[4] = AddRetailVrMenuControl(
+        L"Lean strength: 300%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[5] = AddRetailVrMenuControl(
+        L"Lean strength: 350%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[6] = AddRetailVrMenuControl(
+        L"Lean strength: 400%", kVrMenuCycleLeanScale);
     g_vrMenuMelee.enabled = AddRetailVrMenuControl(
-        L"Melee: GESTURES", kVrMenuToggleMelee);
+        L"Melee: Gestures", kVrMenuToggleMelee);
     g_vrMenuMelee.disabled = AddRetailVrMenuControl(
-        L"Melee: CLASSIC", kVrMenuToggleMelee);
+        L"Melee: Classic", kVrMenuToggleMelee);
+    g_vrMenuMeleeWeaponStrike.enabled = AddRetailVrMenuControl(
+        L"Weapon-hand strike: On", kVrMenuToggleMeleeWeaponStrike);
+    g_vrMenuMeleeWeaponStrike.disabled = AddRetailVrMenuControl(
+        L"Weapon-hand strike: Off", kVrMenuToggleMeleeWeaponStrike);
+    g_vrMenuMeleeOffHandStrike.enabled = AddRetailVrMenuControl(
+        L"Off-hand strike: On", kVrMenuToggleMeleeOffHandStrike);
+    g_vrMenuMeleeOffHandStrike.disabled = AddRetailVrMenuControl(
+        L"Off-hand strike: Off", kVrMenuToggleMeleeOffHandStrike);
+    g_vrMenuMeleeJumpKick.enabled = AddRetailVrMenuControl(
+        L"Jump kick gesture: On", kVrMenuToggleMeleeJumpKick);
+    g_vrMenuMeleeJumpKick.disabled = AddRetailVrMenuControl(
+        L"Jump kick gesture: Off", kVrMenuToggleMeleeJumpKick);
+    g_vrMenuMeleeSlideKick.enabled = AddRetailVrMenuControl(
+        L"Slide kick gesture: On", kVrMenuToggleMeleeSlideKick);
+    g_vrMenuMeleeSlideKick.disabled = AddRetailVrMenuControl(
+        L"Slide kick gesture: Off", kVrMenuToggleMeleeSlideKick);
     g_vrMenuArms.enabled = AddRetailVrMenuControl(
-        L"Show arms: ON", kVrMenuToggleArms);
+        L"Show arms: On", kVrMenuToggleArms);
     g_vrMenuArms.disabled = AddRetailVrMenuControl(
-        L"Show arms: OFF", kVrMenuToggleArms);
+        L"Show arms: Off", kVrMenuToggleArms);
+    g_vrMenuTwoHandGrip.enabled = AddRetailVrMenuControl(
+        L"Two-handed grip: On", kVrMenuToggleTwoHandGrip);
+    g_vrMenuTwoHandGrip.disabled = AddRetailVrMenuControl(
+        L"Two-handed grip: Off", kVrMenuToggleTwoHandGrip);
+    g_vrMenuWeaponWeight.enabled = AddRetailVrMenuControl(
+        L"Simulated weapon weight: On", kVrMenuToggleWeaponWeight);
+    g_vrMenuWeaponWeight.disabled = AddRetailVrMenuControl(
+        L"Simulated weapon weight: Off", kVrMenuToggleWeaponWeight);
+    g_vrMenuWeaponWeightDiagnostics.enabled = AddRetailVrMenuControl(
+        L"Weapon diagnostics: On", kVrMenuToggleWeaponWeightDiagnostics);
+    g_vrMenuWeaponWeightDiagnostics.disabled = AddRetailVrMenuControl(
+        L"Weapon diagnostics: Off", kVrMenuToggleWeaponWeightDiagnostics);
+    g_vrMenuWeaponProfileTarget.enabled = AddRetailVrMenuControl(
+        L"Tuning profile: Current weapon", kVrMenuToggleWeaponProfileTarget);
+    g_vrMenuWeaponProfileTarget.disabled = AddRetailVrMenuControl(
+        L"Tuning profile: Default", kVrMenuToggleWeaponProfileTarget);
     g_vrMenuFovScale[0] = AddRetailVrMenuControl(
         L"FOV scale: 100%", kVrMenuCycleFovScale);
     g_vrMenuFovScale[1] = AddRetailVrMenuControl(
@@ -2044,22 +2359,85 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
     g_vrMenuFovScale[3] = AddRetailVrMenuControl(
         L"FOV scale: 130%", kVrMenuCycleFovScale);
     g_vrMenuTurnSpeed[0] = AddRetailVrMenuControl(
-        L"Turn speed: SLOW",
+        L"Turn speed: Slow",
         kVrMenuCycleTurnSpeed);
     g_vrMenuTurnSpeed[1] = AddRetailVrMenuControl(
-        L"Turn speed: NORMAL",
+        L"Turn speed: Normal",
         kVrMenuCycleTurnSpeed);
     g_vrMenuTurnSpeed[2] = AddRetailVrMenuControl(
-        L"Turn speed: FAST",
+        L"Turn speed: Fast",
         kVrMenuCycleTurnSpeed);
+    g_vrMenuWeaponWeightValue[0] = AddRetailVrMenuControl(
+        L"Weight: 0.25x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[1] = AddRetailVrMenuControl(
+        L"Weight: 0.50x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[2] = AddRetailVrMenuControl(
+        L"Weight: 0.75x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[3] = AddRetailVrMenuControl(
+        L"Weight: 1.00x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[4] = AddRetailVrMenuControl(
+        L"Weight: 1.50x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[5] = AddRetailVrMenuControl(
+        L"Weight: 2.00x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[6] = AddRetailVrMenuControl(
+        L"Weight: 3.00x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[7] = AddRetailVrMenuControl(
+        L"Weight: 4.00x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponPositionFollow[0] = AddRetailVrMenuControl(
+        L"Position follow: 6", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[1] = AddRetailVrMenuControl(
+        L"Position follow: 10", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[2] = AddRetailVrMenuControl(
+        L"Position follow: 14", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[3] = AddRetailVrMenuControl(
+        L"Position follow: 18", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[4] = AddRetailVrMenuControl(
+        L"Position follow: 24", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[5] = AddRetailVrMenuControl(
+        L"Position follow: 32", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[6] = AddRetailVrMenuControl(
+        L"Position follow: 40", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponRotationFollow[0] = AddRetailVrMenuControl(
+        L"Rotation follow: 6", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[1] = AddRetailVrMenuControl(
+        L"Rotation follow: 10", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[2] = AddRetailVrMenuControl(
+        L"Rotation follow: 14", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[3] = AddRetailVrMenuControl(
+        L"Rotation follow: 20", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[4] = AddRetailVrMenuControl(
+        L"Rotation follow: 26", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[5] = AddRetailVrMenuControl(
+        L"Rotation follow: 32", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[6] = AddRetailVrMenuControl(
+        L"Rotation follow: 40", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponCatchUp[0] = AddRetailVrMenuControl(
+        L"Catch-up strength: 0.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[1] = AddRetailVrMenuControl(
+        L"Catch-up strength: 0.5", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[2] = AddRetailVrMenuControl(
+        L"Catch-up strength: 1.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[3] = AddRetailVrMenuControl(
+        L"Catch-up strength: 1.5", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[4] = AddRetailVrMenuControl(
+        L"Catch-up strength: 2.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[5] = AddRetailVrMenuControl(
+        L"Catch-up strength: 3.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[6] = AddRetailVrMenuControl(
+        L"Catch-up strength: 4.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuResetWeaponProfile = AddRetailVrMenuControl(
+        L"Reset selected weapon profile", kVrMenuResetWeaponProfile);
     g_vrMenuRecenter = AddRetailVrMenuControl(
         L"Recenter 2D panel", kVrMenuRecenter);
     g_vrMenuDefaults = AddRetailVrMenuControl(
         L"Reset VR defaults", kVrMenuDefaults);
     g_vrMenuBack = AddRetailVrMenuControl(
-        L"BACK", kVrMenuBack);
+        L"Back", kVrMenuBack);
 
-    if (g_vrMenuBack.object == nullptr) {
+    if (g_vrMenuOpenDisplay.object == nullptr ||
+        g_vrMenuOpenAdvanced.object == nullptr ||
+        g_vrMenuResetWeaponProfile.object == nullptr ||
+        g_vrMenuBack.object == nullptr) {
         return false;
     }
     HideRetailVrSettingsControls();
@@ -2103,6 +2481,24 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
     case kVrMenuOpen:
         EnterRetailVrSettingsPage();
         return 1;
+    case kVrMenuOpenDisplay:
+        ShowRetailVrSettingsPage(VrSettingsPage::Display);
+        return 1;
+    case kVrMenuOpenComfort:
+        ShowRetailVrSettingsPage(VrSettingsPage::Comfort);
+        return 1;
+    case kVrMenuOpenControls:
+        ShowRetailVrSettingsPage(VrSettingsPage::Controls);
+        return 1;
+    case kVrMenuOpenWeapons:
+        ShowRetailVrSettingsPage(VrSettingsPage::Weapons);
+        return 1;
+    case kVrMenuOpenMelee:
+        ShowRetailVrSettingsPage(VrSettingsPage::Melee);
+        return 1;
+    case kVrMenuOpenAdvanced:
+        ShowRetailVrSettingsPage(VrSettingsPage::Advanced);
+        return 1;
     case kVrMenuToggleStereo:
         SetBooleanOption(
             g_setStereoEnabled,
@@ -2128,7 +2524,9 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             QueryBooleanOption(g_isStereoHudEnabled, true));
         break;
     case kVrMenuToggleHeadBob:
-        ApplyHeadBobEnabled(!g_headBobEnabled);
+        if (g_headBobEnabled || !g_forceHeadBobDisabled) {
+            ApplyHeadBobEnabled(!g_headBobEnabled);
+        }
         selection = SetRetailVrToggleVisible(
             g_vrMenuHeadBob, g_headBobEnabled);
         break;
@@ -2150,6 +2548,14 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             !g_controllerHapticsEnabled;
         selection = SetRetailVrToggleVisible(
             g_vrMenuHaptics, g_controllerHapticsEnabled);
+        break;
+    case kVrMenuToggleTwoHandGrip:
+        g_twoHandedGripEnabled = !g_twoHandedGripEnabled;
+        if (!g_twoHandedGripEnabled) {
+            g_twoHandedGrip = TwoHandedGripState{};
+        }
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuTwoHandGrip, g_twoHandedGripEnabled);
         break;
     case kVrMenuToggleHandedness:
         g_leftHandedBindings = !g_leftHandedBindings;
@@ -2190,6 +2596,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         g_meleePulseUntil = 0;
         g_slideDuckPulseUntil = 0;
         g_slideForwardPulseUntil = 0;
+        RefreshRetailVrSettingsControls();
         selection = SetRetailVrToggleVisible(
             g_vrMenuMelee, g_meleeThrustEnabled);
         Report(
@@ -2197,6 +2604,34 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             g_meleeThrustEnabled
                 ? "Motion-controller melee gestures are enabled."
                 : "Melee uses classic Retail controls only.");
+        break;
+    case kVrMenuToggleMeleeWeaponStrike:
+        g_meleeWeaponStrikeEnabled = !g_meleeWeaponStrikeEnabled;
+        ResetMeleeActions(g_meleeActions);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMeleeWeaponStrike,
+            g_meleeWeaponStrikeEnabled);
+        break;
+    case kVrMenuToggleMeleeOffHandStrike:
+        g_meleeOffHandStrikeEnabled = !g_meleeOffHandStrikeEnabled;
+        ResetMeleeActions(g_meleeActions);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMeleeOffHandStrike,
+            g_meleeOffHandStrikeEnabled);
+        break;
+    case kVrMenuToggleMeleeJumpKick:
+        g_meleeJumpKickEnabled = !g_meleeJumpKickEnabled;
+        ResetMeleeActions(g_meleeActions);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMeleeJumpKick,
+            g_meleeJumpKickEnabled);
+        break;
+    case kVrMenuToggleMeleeSlideKick:
+        g_meleeSlideKickEnabled = !g_meleeSlideKickEnabled;
+        ResetMeleeActions(g_meleeActions);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMeleeSlideKick,
+            g_meleeSlideKickEnabled);
         break;
     case kVrMenuToggleArms:
         g_showPlayerArms = !g_showPlayerArms;
@@ -2209,6 +2644,38 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
                   "material."
                 : "Player upper and lower arms use the transparent VR "
                   "material; hands, torso and legs remain visible.");
+        break;
+    case kVrMenuToggleWeaponWeight:
+        g_weaponWeightEnabled = !g_weaponWeightEnabled;
+        ResetWeaponWeightPair(
+            g_weightedWeaponInput.filters,
+            WeaponWeightResetReason::enabledChanged);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuWeaponWeight, g_weaponWeightEnabled);
+        break;
+    case kVrMenuToggleWeaponWeightDiagnostics:
+        g_weaponWeightDiagnosticsEnabled =
+            !g_weaponWeightDiagnosticsEnabled;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuWeaponWeightDiagnostics,
+            g_weaponWeightDiagnosticsEnabled);
+        break;
+    case kVrMenuToggleWeaponProfileTarget:
+        if (HasCurrentWeaponWeightProfile()) {
+            g_vrWeaponProfileEditsCurrent =
+                !g_vrWeaponProfileEditsCurrent;
+        } else {
+            g_vrWeaponProfileEditsCurrent = false;
+        }
+        RefreshRetailVrSettingsControls();
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuWeaponProfileTarget,
+            EditingCurrentWeaponWeightProfile());
+        break;
+    case kVrMenuResetWeaponProfile:
+        ResetEditableWeaponWeightProfile();
+        RefreshRetailVrSettingsControls();
+        selection = g_vrMenuResetWeaponProfile;
         break;
     case kVrMenuCycleFovScale: {
         g_fovScalePreset = (g_fovScalePreset + 1) % 4;
@@ -2239,6 +2706,14 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
                 ? "Leaning moves the viewpoint, limited by the world."
                 : "Leaning only tilts the camera, as in the original game.");
         break;
+    case kVrMenuCycleLeanScale: {
+        const std::size_t index = NextVrPresetIndex(
+            g_leanScalePercent, kLeanScalePresets);
+        g_leanScalePercent = kLeanScalePresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuLeanScale, index);
+        break;
+    }
     case kVrMenuCycleTurnSpeed:
         g_turnSpeedPreset = (g_turnSpeedPreset + 1) % 3;
         for (int index = 0; index < 3; ++index) {
@@ -2248,6 +2723,42 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         }
         selection = g_vrMenuTurnSpeed[g_turnSpeedPreset];
         break;
+    case kVrMenuCycleWeaponWeight: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.weight, kWeaponWeightPresets);
+        profile.weight = kWeaponWeightPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponWeightValue, index);
+        break;
+    }
+    case kVrMenuCycleWeaponPositionFollow: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.positionalFollow, kWeaponPositionFollowPresets);
+        profile.positionalFollow = kWeaponPositionFollowPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponPositionFollow, index);
+        break;
+    }
+    case kVrMenuCycleWeaponRotationFollow: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.rotationalFollow, kWeaponRotationFollowPresets);
+        profile.rotationalFollow = kWeaponRotationFollowPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponRotationFollow, index);
+        break;
+    }
+    case kVrMenuCycleWeaponCatchUp: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.catchUpStrength, kWeaponCatchUpPresets);
+        profile.catchUpStrength = kWeaponCatchUpPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponCatchUp, index);
+        break;
+    }
     case kVrMenuRecenter:
         RequestVrPanelRecenter();
         selection = g_vrMenuRecenter;
@@ -2258,7 +2769,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         selection = g_vrMenuDefaults;
         break;
     case kVrMenuBack:
-        LeaveRetailVrSettingsPage();
+        NavigateBackRetailVrSettingsPage();
         return 1;
     default:
         return g_retailMenuOnCommand(
@@ -8291,7 +8802,7 @@ void PollControllerMenuInput() noexcept {
     }
     if ((pressed & FEARVR_IB_RIGHT_SECONDARY) != 0) {
         if (g_vrSettingsPageActive) {
-            LeaveRetailVrSettingsPage();
+            NavigateBackRetailVrSettingsPage();
         } else {
             // B geht in Untermenüs eine Ebene zurück und schließt das Menü
             // nur auf der obersten Ebene. Deshalb hier kein "Menü zu"

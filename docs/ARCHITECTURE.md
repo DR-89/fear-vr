@@ -378,7 +378,7 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Getestete Optionen:** eigenes VR-Overlay, zweistufiges Menü mit
   `MORE SETTINGS >`, kleinere Fonthöhe über `SetFontHeight`, zusätzliches
   `Enable(false)` auf versteckten Controls.
-- **Gewählte Lösung:** ein englisch beschrifteter Eintrag `VR SETTINGS` direkt
+- **Gewählte Lösung:** ein englisch beschrifteter Eintrag `VR Settings` direkt
   hinter „Optionen“, als **eine** kompakte Seite mit elf Einträgen, die
   vollständig in den nativen Rahmen passt. Solange die Seite aktiv ist, wird
   der Listenanfang in jedem Client-Update auf 0 festgehalten — nicht nur im
@@ -395,6 +395,13 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Rückfallpfad:** Bei Signaturabweichung wird kein Menü-Hook installiert; das
   ESC-Menü bleibt unverändert und alle Werte weiterhin über `fearvr.ini`
   einstellbar.
+- **Nachtrag 29.07.2026:** Die einzelne Seite wurde durch eine
+  Kategorieübersicht mit sechs kurzen Unterseiten ersetzt. Damit sind die
+  bisher nur in `fearvr.ini` erreichbaren Komfort- und Melee-Schalter sowie
+  sichere Presets für globale oder waffenspezifische Weight-Profile direkt im
+  Spiel einstellbar. Jede Unterseite passt weiterhin vollständig in den
+  nativen Rahmen; Root-/Back-Zustand und Presetwahl liegen als unabhängig
+  testbares Modell in `src/common/vr_menu_model.h`.
 - **Details:** `docs/OPENXR-INPUT.md`, `docs/TESTING.md` §11 und §14.
 
 ### AD-015 — Lehnen über die Rolllage der linken Hand

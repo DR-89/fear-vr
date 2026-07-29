@@ -144,10 +144,10 @@ weltbegrenzte physische Lean-Versatz.
 Solange physisches Lehnen aktiv ist, entfällt Retails Kameraneigung über die
 linke Handneigung (`COMMAND_ID_LEAN_LEFT`/`_RIGHT` werden dann nicht mehr
 injiziert). Beides zusammen kippte das Bild zusätzlich zu einer Bewegung, die
-der Spieler ohnehin selbst macht. Mit `Physical lean: OFF` ist die Handneigung
+der Spieler ohnehin selbst macht. Mit `Physical lean: Off` ist die Handneigung
 unverändert da.
 
-Umschaltbar im VR-Menü unter `Physical lean: ON / OFF`, gespeichert als
+Umschaltbar im VR-Menü unter `Physical lean: On / Off`, gespeichert als
 `PhysicalLean` in `fearvr.ini`.
 
 ### Physisches Ducken (`Physical duck`, Standard an)
@@ -161,7 +161,7 @@ Betriebsarten unveraendert nutzbar. Umschaltbar im VR-Menue, gespeichert als
 ### Klettern an Leitern (abschaltbar, Standard aus)
 
 Umschaltbar im VR-Menü unter `Ladder climbing: HANDS / CLASSIC`, gespeichert
-als `Climbing` in `fearvr.ini`. Standard ist `CLASSIC`, also die
+als `Climbing` in `fearvr.ini`. Standard ist `Classic`, also die
 Retail-Steuerung über den Stick. An einer Leiter
 greift dann ein Grabknopf die Sprosse, und die Bewegung dieser Hand **pro
 Bild** treibt das Klettern: Ziehen nach unten klettert aufwärts, beim
@@ -311,7 +311,7 @@ Kick oder Slide Kick.
 
 ### Linkshänderbelegung
 
-`Controls: RIGHT-HANDED / LEFT-HANDED` im VR-Menü spiegelt die komplette
+`Controls: Right-handed / Left-handed` im VR-Menü spiegelt die komplette
 Belegung: Waffe, Feuern, Benutzen und Waffenwechsel wandern in die linke Hand,
 Bewegung, Taschenlampe, Lehnen, Zeitlupe und Pause in die rechte.
 
@@ -489,59 +489,46 @@ erkannt.
 
 ## VR-Einstellungen im Pausenmenü
 
-`VR SETTINGS` wird in der verifizierten Retail-1.08-Klasse
+`VR Settings` wird in der verifizierten Retail-1.08-Klasse
 `CMenuSystem` direkt nach „Optionen“ ergänzt. Die Seite verwendet dieselbe
 native Menüliste und ist deshalb mit Tastatur und VR-Controller bedienbar:
 Stick navigiert, A oder Trigger bestätigt, B geht zurück.
 
-Die Seite verwendet den von Retail dynamisch bemessenen Rahmen und scrollt so,
-dass die aktuelle Auswahl beim Wechsel zwischen den sichtbaren Zeilengruppen
-im Rahmen bleibt:
+Die native Liste bildet eine kurze Kategorieübersicht mit sechs Unterseiten.
+Jede Unterseite bleibt klein genug für den nativen 320px-Rahmen. `Back`
+beziehungsweise Controller-B kehrt von einer Unterseite zuerst zur
+Kategorieübersicht zurück und verlässt `VR Settings` erst von dort. Werte
+werden sofort angewendet und in `stage/userdata-m5/fearvr.ini` gespeichert.
+Numerische Einstellungen verwenden sichere Presets; exakte Zwischenwerte
+können weiterhin direkt in der INI gesetzt werden.
 
-1. Stereo rendering
-2. Stereo HUD
-3. Weapon weight: NONE / LIGHT / MEDIUM / HEAVY
-4. Red aim guide
-5. Controller vibration
-6. Flashlight mount: LEFT HAND / HEAD / WEAPON
-7. Controls: RIGHT-HANDED / LEFT-HANDED
-8. Ladder climbing: HANDS / CLASSIC
-9. Physical lean: ON / OFF
-10. Physical duck: ON / OFF
-11. Melee: GESTURES / CLASSIC
-12. Show arms: ON / OFF
-13. FOV scale: 100% / 110% / 120% / 130%
-14. Turn speed
-15. Recenter 2D panel
-16. Reset VR defaults
-17. BACK
+1. **Display & HUD:** Stereo rendering, Stereo HUD, FOV scale.
+2. **Movement & Comfort:** HMD translation, head bob, comfort screen,
+   turn speed, physical leaning, physical duck and lean strength.
+3. **Controls:** handedness, controller vibration, ladder climbing,
+   flashlight mount, two-handed grip and Recenter 2D panel.
+4. **Weapons:** red aim guide, show arms, simulated weapon-weight preset
+   (None/Light/Medium/Heavy), plus
+   Weight, Position follow, Rotation follow and Catch-up strength.
+5. **Melee:** master toggle and individual weapon strike, off-hand strike,
+   jump kick and slide kick toggles.
+6. **Advanced:** weapon diagnostics and Reset VR defaults.
+
+`Show arms` ist standardmäßig `Off`: Nur Ober- und Unterarme werden über ein
+lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine
+bleiben sichtbar. `On` setzt sofort das unveränderte Retail-Material ein.
+Die Auswahl wird als `ShowArms` gespeichert.
 
 Die vier Gewichtsstufen skalieren das konfigurierte Waffenprofil mit `0`,
 `0,5`, `1` oder `2`. Die Auswahl wird als `WeaponWeightPreset` gespeichert;
 eine vorhandene Konfiguration mit `WeaponWeightEnabled=1` und ohne Preset wird
-aus Kompatibilitätsgründen als `MEDIUM` geladen.
-
-`Show arms` ist standardmäßig `OFF` und verwendet ein lokal erzeugtes
-Alpha-Test-Material, das nur Ober- und Unterarme ausblendet. Hände, Torso und
-Beine bleiben sichtbar; der Kopf wird über seinen separaten Materialslot
-verborgen. `ON` setzt das unveränderte Retail-Material ein. Die Auswahl wird
-als `ShowArms` gespeichert. Die Maske wird für alle elf DXT3-Mipmaps erzeugt,
-damit Hände und Körper auch beim Wechsel auf kleinere Texturstufen sichtbar
-bleiben.
+aus Kompatibilitätsgründen als `Medium` geladen.
 
 `FOV scale` erweitert das symmetrische Sichtfeld in Tangentenraum und wirkt
 gleichzeitig auf Retails Stereokamera und die an OpenXR übermittelte
 Projektionsschicht. Dadurch bleiben Bild und Headset-Projektion deckungsgleich.
 `130%` ist der VR-Standard; die Auswahl wird als `FovScale`
 gespeichert.
-
-Die vier einzelnen Nahkampfaktionen gehören in `fearvr.ini` statt als vier
-weitere Zeilen auf die native Seite.
-
-HMD-Translation, Head-Bob und Komfortbildschirm bleiben als Einstellungen
-erhalten und werden weiterhin aus `fearvr.ini` gelesen und dorthin
-geschrieben, stehen aber nicht auf der sichtbaren Seite. Ein zweistufiges Menü
-wurde verworfen.
 
 Die Taschenlampe ist ein eigener Spot-Projektor ohne Batterieverbrauch und
 über X schaltbar. `Flashlight mount` wählt zwischen linker Hand, Kopf und
@@ -606,7 +593,7 @@ visuellen Iteration im Headset erneut abgenommen.
 
 ### Warum die Auswahl gesprungen ist
 
-Jeder Umschalter besteht aus zwei Controls (`… : ON` und `… : OFF`), von denen
+Jeder Umschalter besteht aus zwei Controls (`… : On` und `… : Off`), von denen
 immer eines versteckt ist. Das ist für die Navigation unkritisch, weil
 `CLTGUICtrl::IsEnabled()` als `m_bEnabled && IsVisible()` definiert ist und
 `CLTGUIListCtrl::NextSelection` unsichtbare Einträge damit korrekt überspringt.
@@ -618,24 +605,16 @@ aller Controls aufsummiert — **ohne** `IsVisible()` zu prüfen.
 Beide Rechnungen widersprechen sich, sobald versteckte Geschwister-Controls
 dazwischenliegen, und `m_nFirstShown` wird falsch gesetzt.
 
-Die verkürzte VR-Seite passt vollständig in den nativen Rahmen. Der
-Listenanfang wird deshalb bei 0 festgehalten, solange die Seite aktiv ist —
-und zwar in jedem Client-Update, weil Tastatur, Maus und Controller alle
-direkt über `NextSelection` navigieren und nicht über den eigenen Hook.
+Jede Kategorieunterseite passt vollständig in den nativen Rahmen. Der
+Listenanfang wird deshalb bei 0 festgehalten, solange irgendeine VR-Seite
+aktiv ist — und zwar in jedem Client-Update, weil Tastatur, Maus und Controller
+alle direkt über `NextSelection` navigieren und nicht über den eigenen Hook.
 
-Änderungen werden sofort angewendet und in `stage/userdata-m5/fearvr.ini`
-gespeichert.
-
-Zusätzlich in `fearvr.ini`, ohne Menüeintrag:
-
-- `MeleeWeaponStrike=1` — Stoß der Waffenhand.
-- `MeleeOffHandStrike=1` — Off-Hand Strike.
-- `MeleeJumpKick=1` — Jump Kick auf einem vorhandenen Spielersprung.
-- `MeleeSlideKick=1` — bewachter Slide-Kick-Sequencer.
-
-`MeleeGestures=1` ist der vom Menüeintrag `Melee: GESTURES / CLASSIC`
-gespeicherte Master-Schalter. Neue und bestehende Konfigurationen ohne diese
-Schlüssel verwenden `1`; jede Aktion kann mit `0` einzeln abgeschaltet werden.
+`MeleeGestures=1` ist der Master-Schalter. `MeleeWeaponStrike`,
+`MeleeOffHandStrike`, `MeleeJumpKick` und `MeleeSlideKick` bleiben getrennte
+persistierte Werte, sind nun aber ebenfalls auf der Melee-Unterseite
+erreichbar. Untergeordnete Schalter werden ausgeblendet, wenn der
+Master-Schalter auf `Classic` steht.
 
 - `ShowArms=0` — vom Menü gespeicherter Schalter; `0` ist der Standard und
   verwendet die VR-Armmaske, `1` das vollständig sichtbare Retail-Material.

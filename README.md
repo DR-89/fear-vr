@@ -294,6 +294,16 @@ something is built but not yet verified in-game, it's noted.
   Recenter 2D panel, Reset VR defaults.
 - **Persistence in `fearvr.ini`**, including settings not exposed in the menu:
   HMD translation, head bob, comfort screen and four individual melee moves.
+- **Optional simulated weapon weight**, disabled by default. Set
+  `WeaponWeightEnabled=1` under `[VR]`; `WeaponWeight`,
+  `WeaponPositionalFollow`, `WeaponRotationalFollow`, and
+  `WeaponCatchUpStrength` default to `1.0`, `18.0`, `20.0`, and `1.5`.
+  Per-weapon overrides use `[WeaponWeight.<model-name>]` with `Weight`,
+  `PositionalFollow`, `RotationalFollow`, and `CatchUpStrength`. Unknown
+  models explicitly use the `[VR]` defaults. `WeaponWeightDiagnostics=1`
+  emits rate-limited raw/filter error and velocity telemetry.
+  Recommended ranges are `0.10-4.00`, `2.0-40.0`, `2.0-40.0`, and
+  `0.0-4.0`, respectively.
 - **Body visibility switch** saved as `ShowArms` (`0` by default). F11 remains
   a developer diagnostic for isolating Retail body pieces, not the arm-hiding
   mechanism.

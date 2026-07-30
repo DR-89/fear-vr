@@ -287,21 +287,21 @@ something is built but not yet verified in-game, it's noted.
 
 ### Menu and Settings
 
-- **Native VR settings page** in the ESC menu ("VR SETTINGS"), usable with
-  the controller: Stereo rendering, Stereo HUD, Turn speed, Red aim
-  guide, Controller vibration, Controls (right/left-handed), Ladder climbing
-  (hands or classic), Melee (gestures or classic), Show arms, FOV scale,
-  Recenter 2D panel, Reset VR defaults.
-- **Persistence in `fearvr.ini`**, including settings not exposed in the menu:
-  HMD translation, head bob, comfort screen and four individual melee moves.
-- **Optional simulated weapon weight**, disabled by default. Set
-  `WeaponWeightEnabled=1` under `[VR]`; `WeaponWeight`,
-  `WeaponPositionalFollow`, `WeaponRotationalFollow`, and
-  `WeaponCatchUpStrength` default to `1.0`, `18.0`, `20.0`, and `1.5`.
-  Per-weapon overrides use `[WeaponWeight.<model-name>]` with `Weight`,
-  `PositionalFollow`, `RotationalFollow`, and `CatchUpStrength`. Unknown
-  models explicitly use the `[VR]` defaults. `WeaponWeightDiagnostics=1`
-  emits rate-limited raw/filter error and velocity telemetry.
+- **Categorized native VR settings** in the ESC menu ("VR Settings"), usable
+  with keyboard, mouse, or controller. Six submenus cover Display & HUD,
+  Movement & Comfort, Controls, Weapons, Melee, and Advanced settings. B/Back
+  returns to the category list before leaving VR settings.
+- **All normal VR preferences are editable in game** and persist immediately
+  to `fearvr.ini`, including HMD translation, head bob, comfort screen,
+  physical leaning, all four individual melee gestures, and simulated weapon
+  weight. The Advanced page contains diagnostics and the global defaults reset.
+- **Per-weapon simulated weight profiles** can be tuned from the Weapons page.
+  Choose the currently held weapon or the global default, then adjust weight,
+  positional follow, rotational follow, and catch-up strength through safe
+  presets. Exact values remain available in `fearvr.ini` under `[VR]` or
+  `[WeaponWeight.<model-name>]`. Unknown models use the `[VR]` defaults.
+  `WeaponWeightDiagnostics=1` emits rate-limited raw/filter error and velocity
+  telemetry.
   Recommended ranges are `0.10-4.00`, `2.0-40.0`, `2.0-40.0`, and
   `0.0-4.0`, respectively.
 - **Body visibility switch** saved as `ShowArms` (`0` by default). F11 remains
@@ -503,7 +503,7 @@ uses, the left trigger toggles slow-mo, and the right trigger
 fires. Tilting the left hand sideways leans around corners.
 Holding the weapon with both hands steers longer weapons along the line
 between the hands; sprinting and leaning rest while that grab is held.
-`Controls: LEFT-HANDED` in the VR menu mirrors every binding between the
+`Controls: Left-handed` in the VR menu mirrors every binding between the
 hands.
 The flashlight is in the left hand, follows its position and aim direction,
 and toggles with X. Every shot vibrates. Mouse,
@@ -511,7 +511,7 @@ keyboard and gamepad remain usable in parallel. Details:
 `docs/OPENXR-INPUT.md`.
 
 In first-person view, hands, torso, legs and weapon remain visible; only upper
-and lower arms are hidden by default. `Show arms: ON / OFF` in the VR menu
+and lower arms are hidden by default. `Show arms: On / Off` in the VR menu
 switches immediately between the original Retail material and the VR arm mask.
 
 The M5 launch enables the confirmed stereo HUD by default and closes SteamVR's
@@ -531,16 +531,14 @@ Keys in-game:
 - F10: toggle world-locked comfort screen for camera shakes and cutscenes;
 - F11: developer diagnostic that isolates player body pieces one by one.
 
-The ESC menu in M5 contains the English-labeled entry "VR SETTINGS" directly
-after "Options". The page is deliberately short and single-page: Stereo
-rendering, Stereo HUD, Turn speed, Red aim guide, Controller vibration,
-right/left-handed controls, ladder climbing, gesture/classic melee, Show arms,
-FOV scale, Recenter 2D panel, Reset VR defaults and BACK. HMD translation, head
-bob, comfort screen and the four individual melee switches remain configurable
-in `fearvr.ini`
-without cluttering the native menu. Selection is saved to
-`stage/userdata-m5/fearvr.ini`. Stick navigates, A or trigger confirms and B
-goes back.
+The ESC menu in M5 contains the English-labeled entry "VR Settings" directly
+after "Options". Six short native submenus cover Display & HUD, Movement &
+Comfort, Controls, Weapons, Melee and Advanced settings without overflowing
+the Retail frame. This includes HMD translation, head bob, comfort screen,
+individual melee switches, physical lean and simulated weapon-weight profiles.
+Changes are applied immediately and saved to `fearvr.ini`. Stick navigates,
+A or trigger confirms, and B returns to the category list before leaving VR
+settings.
 
 ## Uninstall
 

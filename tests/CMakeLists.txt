@@ -145,6 +145,15 @@ if(MSVC)
 endif()
 add_test(NAME vr_menu_model COMMAND test_vr_menu_model)
 
+add_executable(test_render_scale test_render_scale.cpp)
+target_link_libraries(
+  test_render_scale PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_render_scale PRIVATE /UNDEBUG)
+endif()
+add_test(NAME render_scale COMMAND test_render_scale)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND TARGET fearvr-proxy)
   # Isolierter M2-Producer: Der echte System-Import bleibt d3d9.lib; erst
   # nach dem Link wird ausschließlich neben diese Test-EXE der Proxy kopiert.

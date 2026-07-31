@@ -90,6 +90,8 @@ using RetailSetWeaponTransformFunction =
     void(__thiscall*)(void*, const LTTransform&);
 using RetailSetWeaponVisibleFunction =
     void(__thiscall*)(void*, bool, bool);
+using RetailStartMuzzleFlashFunction =
+    void(__thiscall*)(void*);
 using RetailGetFireVectorsFunction =
     bool(__thiscall*)(
         const void*, LTVector&, LTVector&, LTVector&, LTVector&);
@@ -160,6 +162,7 @@ void* g_retailGetBindingValueTarget = nullptr;
 RetailWeaponManagerUpdateFunction g_retailWeaponManagerUpdate = nullptr;
 RetailSetWeaponTransformFunction g_retailSetWeaponTransform = nullptr;
 RetailSetWeaponVisibleFunction g_retailSetWeaponVisible = nullptr;
+RetailStartMuzzleFlashFunction g_retailStartMuzzleFlash = nullptr;
 RetailGetFireVectorsFunction g_retailGetFireVectors = nullptr;
 RetailSetTrackedTargetFunction g_retailSetTrackedTarget = nullptr;
 ObjectFilterFn g_retailVectorObjectFilter = nullptr;
@@ -193,6 +196,7 @@ float g_activationReachOriginal = 0.0F;
 float g_pickupReachOriginal = 0.0F;
 volatile LONG g_pickupRayActiveLogged = 0;
 void* g_retailWeaponManagerUpdateTarget = nullptr;
+void* g_retailStartMuzzleFlashTarget = nullptr;
 void* g_retailGetFireVectorsTarget = nullptr;
 void* g_retailSetTrackedTargetTarget = nullptr;
 HOBJECT g_playerBodyObject = nullptr;
@@ -263,6 +267,8 @@ volatile LONG g_twoHandedGripActiveLogged = 0;
 volatile LONG g_dualPistolsActiveLogged = 0;
 volatile LONG g_handPoseGapBridgedLogged = 0;
 volatile LONG g_weaponSocketSyncActiveLogged = 0;
+const void* g_retailVisibilityInitializedWeapon = nullptr;
+thread_local void* g_retailWeaponUpdateInProgress = nullptr;
 volatile LONG g_weaponCameraBaseSyncActiveLogged = 0;
 volatile LONG g_directionalCameraHeightBypassLogged = 0;
 volatile LONG g_twoHandedCameraHeightStabilizedLogged = 0;
@@ -890,6 +896,7 @@ constexpr ULONGLONG kTrackedPoseGapGraceMilliseconds = 150;
 constexpr std::uintptr_t kRetailWeaponManagerUpdateRva = 0x00078140U;
 constexpr std::uintptr_t kRetailSetWeaponTransformRva = 0x00066F90U;
 constexpr std::uintptr_t kRetailSetWeaponVisibleRva = 0x00069320U;
+constexpr std::uintptr_t kRetailStartMuzzleFlashRva = 0x00069950U;
 constexpr std::uintptr_t kRetailGetFireVectorsRva = 0x0006B4A0U;
 // ClientWeapon_VectorObjFilterFn first rejects the local player, then replaces
 // the broad character proxy with Retails per-skeleton-node intersection.
@@ -941,6 +948,8 @@ constexpr std::size_t kRetailCameraLastDescriptorOffset = 0x190;
 constexpr std::int32_t kRetailCameraDescriptorRotation = 0x1D;
 constexpr std::int32_t kRetailCameraDescriptorRotationAim = 0x1E;
 constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
+constexpr std::size_t kRetailRightWeaponModelDataOffset = 0x10;
+constexpr std::size_t kRetailLeftWeaponModelDataOffset = 0xC8;
 // Retail CClientWeapon starts m_RightHandWeapon at +0x10. Its first LTObjRef
 // occupies 16 bytes on x86 (vptr, list links, HOBJECT), putting the model
 // HOBJECT at +0x1c and m_hMuzzleSocket at +0x50.
@@ -6274,6 +6283,8 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     g_twoHandedGripActive = false;
     g_twoHandedGrip = TwoHandedGripState{};
     g_weaponDisabled = false;
+    g_retailVisibilityInitializedWeapon = nullptr;
+    g_retailWeaponUpdateInProgress = nullptr;
     g_weightedWeaponInput = {};
     ResetWeaponWeightPair(
         g_weightedWeaponInput.filters,
@@ -7952,12 +7963,14 @@ float __fastcall HookRetailGetBindingValue(
 
 bool ResolveRetailWeaponTargets(
     void*& weaponManagerUpdate, void*& setWeaponTransform,
-    void*& setWeaponVisible, void*& getFireVectors,
+    void*& setWeaponVisible, void*& startMuzzleFlash,
+    void*& getFireVectors,
     void*& setTrackedTarget,
     void*& vectorObjectFilter) noexcept {
     weaponManagerUpdate = nullptr;
     setWeaponTransform = nullptr;
     setWeaponVisible = nullptr;
+    startMuzzleFlash = nullptr;
     getFireVectors = nullptr;
     setTrackedTarget = nullptr;
     vectorObjectFilter = nullptr;
@@ -7991,6 +8004,7 @@ bool ResolveRetailWeaponTargets(
     auto* const update = base + kRetailWeaponManagerUpdateRva;
     auto* const setTransform = base + kRetailSetWeaponTransformRva;
     auto* const setVisible = base + kRetailSetWeaponVisibleRva;
+    auto* const muzzleFlash = base + kRetailStartMuzzleFlashRva;
     auto* const fireVectors = base + kRetailGetFireVectorsRva;
     auto* const trackedTarget = base + kRetailSetTrackedTargetRva;
     auto* const vectorFilter =
@@ -8009,6 +8023,12 @@ bool ResolveRetailWeaponTargets(
     // Damit ist der Ort des Deaktiviert-Flags belegt.
     constexpr unsigned char kSetVisibleDisabledProbe[] = {
         0x8A, 0x86, 0x23, 0x02, 0x00, 0x00};
+    // CWeaponModelData::StartMuzzleFlash begins by reserving its ClientFX
+    // create structure and loading m_MuzzleFlashFX from +0x50.
+    constexpr unsigned char kStartMuzzleFlashPrefix[] = {
+        0x81, 0xEC, 0xC4, 0x00, 0x00, 0x00, 0x56, 0x8B,
+        0xF1, 0x8B, 0x46, 0x50, 0x85, 0xC0, 0x57, 0x74,
+        0x22};
     constexpr unsigned char kFireVectorsPrefix[] = {
         0x83, 0xEC, 0x58, 0xA1};
     constexpr unsigned char kFireVectorsBody[] = {
@@ -8035,6 +8055,9 @@ bool ResolveRetailWeaponTargets(
             kSetVisibleDisabledProbe,
             sizeof(kSetVisibleDisabledProbe)) ||
         !MatchesCode(
+            muzzleFlash, kStartMuzzleFlashPrefix,
+            sizeof(kStartMuzzleFlashPrefix)) ||
+        !MatchesCode(
             fireVectors, kFireVectorsPrefix,
             sizeof(kFireVectorsPrefix)) ||
         !MatchesCode(
@@ -8056,6 +8079,7 @@ bool ResolveRetailWeaponTargets(
     weaponManagerUpdate = update;
     setWeaponTransform = setTransform;
     setWeaponVisible = setVisible;
+    startMuzzleFlash = muzzleFlash;
     getFireVectors = fireVectors;
     setTrackedTarget = trackedTarget;
     vectorObjectFilter = vectorFilter;
@@ -8418,6 +8442,56 @@ HOBJECT RetailRightWeaponModel(const void* weapon) noexcept {
         return nullptr;
     }
     return model;
+}
+
+bool RetailRightWeaponModelIsVisible(const void* weapon) noexcept {
+    if (g_client == nullptr) {
+        return false;
+    }
+    HOBJECT const model = RetailRightWeaponModel(weapon);
+    if (model == nullptr) {
+        return false;
+    }
+    __try {
+        ILTCommon* const common = g_client->Common();
+        uint32 flags = 0;
+        return common != nullptr &&
+               common->GetObjectFlags(
+                   model, OFT_Flags, flags) == LT_OK &&
+               (flags & FLAG_VISIBLE) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Keep the carried model renderable without calling CClientWeapon::SetVisible.
+// Retail's full visibility routine always hides m_MuzzleFlashFX, even when it
+// is asked to show the weapon, so it must not run after the weapon update has
+// made a firing flash visible.
+void ForceRetailRightWeaponModelVisible(const void* weapon) noexcept {
+    static volatile LONG fixActiveLogged = 0;
+    if (g_client == nullptr) {
+        return;
+    }
+    HOBJECT const model = RetailRightWeaponModel(weapon);
+    if (model == nullptr) {
+        return;
+    }
+    __try {
+        ILTCommon* const common = g_client->Common();
+        if (common != nullptr &&
+            common->SetObjectFlags(
+                model, OFT_Flags, FLAG_VISIBLE,
+                FLAG_VISIBLE) == LT_OK &&
+            InterlockedCompareExchange(
+                &fixActiveLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "muzzle_flash_visibility_fix_active",
+                "Post-update weapon visibility now changes only the model "
+                "flag, preserving Retail muzzle-flash FX state.");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 WeaponWeightPose ToWeaponWeightPose(const FearVrPose& pose) noexcept {
@@ -10669,6 +10743,32 @@ void ApplyTwoHandedAimSupport() noexcept {
         correction * g_weaponAim.fireTransform.m_rRot;
 }
 
+void __fastcall HookRetailStartMuzzleFlash(
+    void* weaponModelData, void* ignoredEdx) {
+    (void)ignoredEdx;
+    void* flashOwner = weaponModelData;
+    void* const weapon = g_retailWeaponUpdateInProgress;
+    if (weapon != nullptr) {
+        auto* const bytes = static_cast<unsigned char*>(weapon);
+        void* const leftModelData =
+            bytes + kRetailLeftWeaponModelDataOffset;
+        if (weaponModelData == leftModelData &&
+            RetailRightWeaponModel(weapon) != nullptr) {
+            flashOwner =
+                bytes + kRetailRightWeaponModelDataOffset;
+            static volatile LONG redirectLogged = 0;
+            if (InterlockedCompareExchange(
+                    &redirectLogged, 1, 0) == 0) {
+                Report(
+                    "INFO", "dual_pistol_muzzle_flash_redirected",
+                    "A left-hand Dual Pistols shot now starts its flash on "
+                    "the carried right-hand pistol.");
+            }
+        }
+    }
+    g_retailStartMuzzleFlash(flashOwner);
+}
+
 int __fastcall HookRetailWeaponManagerUpdate(
     void* weaponManager, void* ignoredEdx,
     const LTRotation& baseRotation,
@@ -10809,6 +10909,29 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // SetTrackedTarget call site which is dormant in the shipped game path.
     EnsureHandNodeControls(CurrentRetailPlayerBody());
 
+    // Player-body mode normally keeps the separate player-view weapon hidden.
+    // Initialize Retail's logical visibility for each new weapon, or restore
+    // it when Retail actually hides the model. Do not call SetVisible on
+    // ordinary frames: it always hides the looped muzzle FX and can restart a
+    // short pistol flash between renders.
+    void* const weaponBeforeUpdate =
+        CurrentRetailWeapon(weaponManager);
+    if (weaponBeforeUpdate != nullptr &&
+        !RetailWeaponIsDisabled(weaponBeforeUpdate) &&
+        (weaponBeforeUpdate !=
+             g_retailVisibilityInitializedWeapon ||
+         !RetailRightWeaponModelIsVisible(
+             weaponBeforeUpdate)) &&
+        g_retailSetWeaponVisible != nullptr) {
+        __try {
+            g_retailSetWeaponVisible(
+                weaponBeforeUpdate, true, true);
+            g_retailVisibilityInitializedWeapon =
+                weaponBeforeUpdate;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+
     // F.E.A.R. applies CAccuracyMgr perturbation after GetFireVectors.
     // Suppress it only during the actual weapon update while VR aiming is
     // active, then restore the game's state immediately. This keeps the
@@ -10828,8 +10951,10 @@ int __fastcall HookRetailWeaponManagerUpdate(
             currentPerturb = nullptr;
         }
     }
+    g_retailWeaponUpdateInProgress = weaponBeforeUpdate;
     const int state = g_retailWeaponManagerUpdate(
         weaponManager, baseRotation, basePosition);
+    g_retailWeaponUpdateInProgress = nullptr;
     if (currentPerturb != nullptr) {
         __try {
             *currentPerturb = savedPerturb;
@@ -10892,12 +11017,11 @@ int __fastcall HookRetailWeaponManagerUpdate(
     g_weaponDisabled = RetailWeaponIsDisabled(weapon);
     UpdateFlashlightModel(weapon);
     UpdateVrMuzzleFlash();
-    if (weapon != nullptr && !g_weaponDisabled &&
-        g_retailSetWeaponVisible != nullptr) {
-        g_retailSetWeaponVisible(weapon, true, true);
+    if (weapon != nullptr && !g_weaponDisabled) {
+        ForceRetailRightWeaponModelVisible(weapon);
     }
-    // Noch einmal nach SetWeaponVisible anwenden: Das linke Retail-Modell
-    // bleibt damit garantiert am Support-Controller statt an der Waffenhand.
+    // Die linke Dual-Pistol nach allen Retail-Sichtbarkeitsänderungen erneut
+    // an der Support-Hand fixieren.
     if (weapon != nullptr && !g_disableWeaponTransform &&
         DualPistolsVrActive()) {
         ApplyRetailLeftWeaponTransform();
@@ -12128,6 +12252,10 @@ void RemoveWeaponAimHooks() noexcept {
         MH_DisableHook(g_retailWeaponManagerUpdateTarget);
         MH_RemoveHook(g_retailWeaponManagerUpdateTarget);
     }
+    if (g_retailStartMuzzleFlashTarget != nullptr) {
+        MH_DisableHook(g_retailStartMuzzleFlashTarget);
+        MH_RemoveHook(g_retailStartMuzzleFlashTarget);
+    }
     if (g_retailGetFireVectorsTarget != nullptr) {
         MH_DisableHook(g_retailGetFireVectorsTarget);
         MH_RemoveHook(g_retailGetFireVectorsTarget);
@@ -12137,11 +12265,13 @@ void RemoveWeaponAimHooks() noexcept {
         MH_RemoveHook(g_retailSetTrackedTargetTarget);
     }
     g_retailWeaponManagerUpdateTarget = nullptr;
+    g_retailStartMuzzleFlashTarget = nullptr;
     g_retailGetFireVectorsTarget = nullptr;
     g_retailSetTrackedTargetTarget = nullptr;
     g_retailWeaponManagerUpdate = nullptr;
     g_retailSetWeaponTransform = nullptr;
     g_retailSetWeaponVisible = nullptr;
+    g_retailStartMuzzleFlash = nullptr;
     g_retailGetFireVectors = nullptr;
     g_retailSetTrackedTarget = nullptr;
     g_retailVectorObjectFilter = nullptr;
@@ -12161,6 +12291,8 @@ void RemoveWeaponAimHooks() noexcept {
     g_weaponAim.leftMuzzleValid = false;
     g_weaponAim.leftMuzzleLocalValid = false;
     g_weaponAim.retailWeapon = nullptr;
+    g_retailWeaponUpdateInProgress = nullptr;
+    g_retailVisibilityInitializedWeapon = nullptr;
     g_weaponAim.trackingBaseValid = false;
     g_supportRightGripPoseCache = TrackedPoseCache{};
     g_weightedWeaponInput = {};
@@ -12217,12 +12349,13 @@ bool InstallWeaponAimHooks() noexcept {
     void* update = nullptr;
     void* setTransform = nullptr;
     void* setVisible = nullptr;
+    void* startMuzzleFlash = nullptr;
     void* fireVectors = nullptr;
     void* setTrackedTarget = nullptr;
     void* vectorObjectFilter = nullptr;
     if (!ResolveRetailWeaponTargets(
-            update, setTransform, setVisible, fireVectors,
-            setTrackedTarget, vectorObjectFilter)) {
+            update, setTransform, setVisible, startMuzzleFlash,
+            fireVectors, setTrackedTarget, vectorObjectFilter)) {
         Report(
             "ERROR", "weapon_aim_layout_mismatch",
             "Retail 1.08 weapon transform/fire-vector signatures "
@@ -12239,6 +12372,7 @@ bool InstallWeaponAimHooks() noexcept {
         return false;
     }
     g_retailWeaponManagerUpdateTarget = update;
+    g_retailStartMuzzleFlashTarget = startMuzzleFlash;
     g_retailGetFireVectorsTarget = fireVectors;
     g_retailSetTrackedTargetTarget = setTrackedTarget;
     g_retailSetWeaponTransform =
@@ -12249,6 +12383,9 @@ bool InstallWeaponAimHooks() noexcept {
             setVisible);
     g_retailVectorObjectFilter =
         reinterpret_cast<ObjectFilterFn>(vectorObjectFilter);
+    g_retailStartMuzzleFlash =
+        reinterpret_cast<RetailStartMuzzleFlashFunction>(
+            startMuzzleFlash);
     const HMODULE retailModule =
         GetModuleHandleW(L"GameOrig.dll");
     g_retailAccuracyManager =
@@ -12262,6 +12399,12 @@ bool InstallWeaponAimHooks() noexcept {
         update,
         reinterpret_cast<void*>(&HookRetailWeaponManagerUpdate),
         reinterpret_cast<void**>(&g_retailWeaponManagerUpdate));
+    if (status == MH_OK) {
+        status = MH_CreateHook(
+            startMuzzleFlash,
+            reinterpret_cast<void*>(&HookRetailStartMuzzleFlash),
+            reinterpret_cast<void**>(&g_retailStartMuzzleFlash));
+    }
     if (status == MH_OK) {
         status = MH_CreateHook(
             fireVectors,
@@ -12278,6 +12421,9 @@ bool InstallWeaponAimHooks() noexcept {
     }
     if (status == MH_OK) {
         status = MH_EnableHook(update);
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(startMuzzleFlash);
     }
     if (status == MH_OK) {
         status = MH_EnableHook(fireVectors);

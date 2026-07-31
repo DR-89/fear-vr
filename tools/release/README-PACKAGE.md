@@ -82,6 +82,58 @@ no file is copied into Windows or SteamVR. The archive is marked
 Runtime selection is process-local through `XR_RUNTIME_JSON`; no global OpenXR
 setting is changed.
 
+`Install.cmd` passes any extra arguments straight through, so
+`Install.cmd -InstallDir "D:\Games\FearVR"` works the same way.
+
+A copy under `steamapps\common` is launched through
+`steam.exe -applaunch 21090`; any other copy is started directly with the
+same arguments. `-LaunchMode` overrides that choice.
+
+`-PublicToolsGame` accepts either the installation folder or its
+`Dev\Runtime\Game` subfolder. Quote any path that contains spaces.
+
+## Updating
+
+Double-click `Install.cmd` in the new package. There is nothing to uninstall
+first.
+
+An existing installation is detected, the paths and launch mode from last
+time are reused, the modules are replaced, and modules a newer package no
+longer uses are removed. **Saved games and profiles stay.** Close the game
+first — while `FEAR.exe` runs, its modules are locked and the installer
+refuses to continue.
+
+`-Clean` wipes the install folder except `userdata` before staging again.
+
+## Playing
+
+Desktop shortcut **F.E.A.R. VR**, or:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\play.ps1
+```
+
+Options:
+
+```powershell
+tools\play.ps1 -Runtime vdxr      # force Virtual Desktop
+tools\play.ps1 -Runtime steamvr   # force SteamVR
+tools\play.ps1 -Translation       # limited HMD translation (opt-in)
+tools\play.ps1 -NoHeadBob         # force head bob off (already off by default)
+tools\play.ps1 -NoStereoHud       # troubleshooting only
+tools\play.ps1 -NoCapture         # raw Present-rate diagnosis; headset image off
+tools\play.ps1 -NoHidFpsFix       # diagnostic rollback of the Jupiter EX HID fix
+tools\play.ps1 -NoXrFramePacing   # allow duplicate XR requests for A/B testing
+```
+
+`-Runtime` sets `XR_RUNTIME_JSON` for the host process only. The system-wide
+runtime setting is never changed.
+
+A Steam copy needs the Steam client running, because F.E.A.R. officially
+starts through `steam.exe -applaunch 21090`. GOG and disc copies do not need
+Steam at all. Either way this is independent of which VR runtime renders;
+SteamVR itself does not have to run when using Virtual Desktop.
+
 ## Controls
 
 - Right trigger fires the right-hand pistol.

@@ -130,6 +130,16 @@ struct CommandLineConfig {
     // Pixel fuer Pixel auf der CPU. Der GPU-Weg zeichnet in das Geraet des
     // Spiels; bleibt danach etwas schwarz, trennt dieser Schalter die Ursache.
     bool disableGpuHud{false};
+    // Diagnostic escape hatch for comparing against beta.7's immediate
+    // CPU-readback scheduling (the old end-of-Present spin stays removed).
+    bool syncCpuBridge{false};
+    // Measures the game's unmodified Present rate while leaving the proxy,
+    // OpenXR host, and gameplay hooks loaded. No frame is copied to the host.
+    bool disableCapture{false};
+    // Diagnostic rollback for the three verified Jupiter EX input patches.
+    bool disableHidFpsFix{false};
+    // Diagnostic rollback for pacing the game from fresh OpenXR requests.
+    bool disableXrFramePacing{false};
 };
 
 CommandLineConfig ReadConfig() noexcept {
@@ -167,6 +177,22 @@ CommandLineConfig ReadConfig() noexcept {
         } else if (_wcsicmp(
                        arguments[index], L"-fearvr-no-gpu-hud") == 0) {
             config.disableGpuHud = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-fearvr-sync-cpu-bridge") == 0) {
+            config.syncCpuBridge = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-fearvr-no-capture") == 0) {
+            config.disableCapture = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-fearvr-no-hid-fps-fix") == 0) {
+            config.disableHidFpsFix = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-fearvr-no-xr-frame-pacing") == 0) {
+            config.disableXrFramePacing = true;
         }
     }
     LocalFree(arguments);
@@ -908,6 +934,12 @@ public:
                     "Stereo starts disabled; press F8 in the 3D world. "
                     "Press F9 to recenter head tracking.");
             }
+            if (config_.disableXrFramePacing) {
+                logger_.Write(
+                    "WARN", "xr_frame_pacing_disabled",
+                    "FEAR may render duplicate OpenXR requests for "
+                    "diagnostic comparison.");
+            }
         }
     }
 
@@ -932,6 +964,9 @@ public:
         }
         if (slotConsumedEvent_ != nullptr) {
             CloseHandle(slotConsumedEvent_);
+        }
+        if (renderRequestEvent_ != nullptr) {
+            CloseHandle(renderRequestEvent_);
         }
     }
 
@@ -1105,6 +1140,7 @@ public:
         transferMaxMicroseconds_ =
             (std::max)(transferMaxMicroseconds_, transferMicroseconds);
         if (stereo) {
+            lastStagedStereoFrameId_ = frameId;
             if (stereoHudFlatFrame_) {
                 InterlockedAnd(
                     AtomicFlags(*shared_),
@@ -1473,6 +1509,96 @@ public:
         if (!EnsureIpc()) {
             return FALSE;
         }
+        return ReadRenderRequestLocked(output);
+    }
+
+    BOOL WaitForNewRenderRequest(
+        std::uint64_t previousFrameId,
+        std::uint32_t timeoutMilliseconds,
+        FearVrRenderRequest* output) noexcept {
+        if (output == nullptr || previousFrameId == 0 ||
+            config_.disableXrFramePacing) {
+            return FALSE;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!EnsureIpc() || renderRequestEvent_ == nullptr) {
+            return FALSE;
+        }
+
+        ServiceCaptureDuringPacingWaitLocked();
+        FearVrRenderRequest snapshot{};
+        if (ReadRenderRequestLocked(&snapshot) &&
+            snapshot.frameId != previousFrameId) {
+            *output = snapshot;
+            return TRUE;
+        }
+
+        constexpr DWORD kMaximumPacingWaitMilliseconds = 20;
+        const DWORD boundedTimeout = (std::min)(
+            static_cast<DWORD>(timeoutMilliseconds),
+            kMaximumPacingWaitMilliseconds);
+        if (boundedTimeout == 0) {
+            return FALSE;
+        }
+
+        if (!xrFramePacingLogged_) {
+            xrFramePacingLogged_ = true;
+            logger_.Write(
+                "INFO", "xr_frame_pacing_active",
+                "Duplicate stereo renders wait at most 20ms for the next "
+                "OpenXR request; host loss always falls back.");
+        }
+
+        const ULONGLONG waitStart = GetTickCount64();
+        const ULONGLONG deadline = waitStart + boundedTimeout;
+        for (;;) {
+            ServiceCaptureDuringPacingWaitLocked();
+            if (ReadRenderRequestLocked(&snapshot) &&
+                snapshot.frameId != previousFrameId) {
+                *output = snapshot;
+                const std::uint64_t waited =
+                    static_cast<std::uint64_t>(
+                        GetTickCount64() - waitStart);
+                xrPacingWaitMaxMilliseconds_ = (std::max)(
+                    xrPacingWaitMaxMilliseconds_, waited);
+                ++xrPacingWaits_;
+                if (xrPacingWaits_ % 300 == 0) {
+                    std::ostringstream message;
+                    message << "waits=300 max_wait_ms="
+                            << xrPacingWaitMaxMilliseconds_
+                            << " timeouts=" << xrPacingTimeouts_;
+                    logger_.Write(
+                        "INFO", "xr_frame_pacing", message.str());
+                    xrPacingWaitMaxMilliseconds_ = 0;
+                    xrPacingTimeouts_ = 0;
+                }
+                return TRUE;
+            }
+            const ULONGLONG now = GetTickCount64();
+            if (now >= deadline) {
+                break;
+            }
+            const DWORD remaining = static_cast<DWORD>(
+                (std::min)(deadline - now, 1ULL));
+            const DWORD waitResult =
+                WaitForSingleObject(renderRequestEvent_, remaining);
+            if (waitResult == WAIT_FAILED) {
+                break;
+            }
+        }
+        ++xrPacingTimeouts_;
+        return FALSE;
+    }
+
+private:
+    void ServiceCaptureDuringPacingWaitLocked() noexcept {
+        // The current Latest-Frame worker owns CPU/D3D9Ex transfers. Pacing
+        // only polls its publication query; the older PR queue is disabled.
+        PollPending();
+    }
+
+    BOOL ReadRenderRequestLocked(
+        FearVrRenderRequest* output) noexcept {
         for (int attempt = 0; attempt < 4; ++attempt) {
             const std::uint64_t before =
                 ReadAtomic64(shared_->requestSequence);
@@ -1515,6 +1641,8 @@ public:
         }
         return FALSE;
     }
+
+public:
 
     BOOL ReadInputState(FearVrInputState* output) noexcept {
         if (output == nullptr) {
@@ -1831,11 +1959,16 @@ private:
             MakeIpcObjectName(config_.sessionId, L"FrameReady");
         const std::wstring consumedName =
             MakeIpcObjectName(config_.sessionId, L"SlotConsumed");
+        const std::wstring renderRequestName =
+            MakeIpcObjectName(config_.sessionId, L"RenderRequest");
         frameReadyEvent_ =
             CreateEventW(nullptr, FALSE, FALSE, frameReadyName.c_str());
         slotConsumedEvent_ =
             CreateEventW(nullptr, FALSE, FALSE, consumedName.c_str());
-        if (frameReadyEvent_ == nullptr || slotConsumedEvent_ == nullptr) {
+        renderRequestEvent_ =
+            CreateEventW(nullptr, FALSE, FALSE, renderRequestName.c_str());
+        if (frameReadyEvent_ == nullptr || slotConsumedEvent_ == nullptr ||
+            renderRequestEvent_ == nullptr) {
             LogWin32("event_create_failed", GetLastError());
             return false;
         }
@@ -2508,6 +2641,298 @@ private:
         return true;
     }
 
+    // PR #12's earlier CPU queue is retained for reference but disabled. The
+    // current main branch uses the newer Latest-Frame worker above; running
+    // both schedulers would duplicate readbacks and reintroduce Present stalls.
+#if 0
+    bool QueueCpuCapture(IDirect3DDevice9* device,
+                         IDirect3DSurface9* backBuffer,
+                         bool stereo) noexcept {
+        if (cpuCaptureCount_ == kCpuCaptureQueueSize) {
+            ++cpuCaptureQueueDrops_;
+            if (stereo) {
+                ClearStereoFrame();
+            }
+            return false;
+        }
+
+        CpuCaptureFrame& frame = cpuCaptureQueue_[cpuCaptureWrite_];
+        if (frame.active || !frame.completion) {
+            ++cpuCaptureQueueDrops_;
+            if (stereo) {
+                ClearStereoFrame();
+            }
+            return false;
+        }
+
+        std::array<IDirect3DSurface9*, FEARVR_EYE_COUNT> source{
+            backBuffer, backBuffer};
+        bool flatPanel = false;
+        bool gpuHudComposited = false;
+        std::uint64_t changedPixels = 0;
+        const std::uint64_t totalPixels =
+            static_cast<std::uint64_t>(width_) * height_;
+
+        if (stereo) {
+            if (config_.stereoHudEnabled && hudCompositor_.ready()) {
+                HRESULT result = device->StretchRect(
+                    backBuffer, nullptr, gameCapture_.Get(), nullptr,
+                    D3DTEXF_NONE);
+                if (FAILED(result)) {
+                    LogHresult(
+                        "async_stereo_hud_present_stretch_failed", result);
+                    ClearStereoFrame();
+                    return false;
+                }
+                changedPixels = static_cast<std::uint64_t>(
+                    hudCompositor_.coverageRatio() *
+                        static_cast<double>(totalPixels) + 0.5);
+                flatPanel = menuActive_;
+                const bool composite =
+                    !flatPanel &&
+                    IsSafePostWorldCoverage(changedPixels, totalPixels);
+                IDirect3DTexture9* const eyeWorld[FEARVR_EYE_COUNT] = {
+                    stereoCaptureTexture_[FEARVR_EYE_LEFT].Get(),
+                    stereoCaptureTexture_[FEARVR_EYE_RIGHT].Get()};
+                if (!hudCompositor_.Compose(
+                        device, gameCaptureTexture_.Get(),
+                        stereoCaptureTexture_[FEARVR_EYE_RIGHT].Get(),
+                        eyeWorld, composite, flatPanel, logger_)) {
+                    ClearStereoFrame();
+                    return false;
+                }
+                for (std::uint32_t eye = 0;
+                     eye < FEARVR_EYE_COUNT; ++eye) {
+                    source[eye] = hudCompositor_.CompositeSurface(eye);
+                }
+                gpuHudComposited = true;
+            } else {
+                for (std::uint32_t eye = 0;
+                     eye < FEARVR_EYE_COUNT; ++eye) {
+                    source[eye] = stereoCapture_[eye].Get();
+                }
+            }
+        }
+
+        const std::uint32_t sourceCount =
+            stereo ? FEARVR_EYE_COUNT : 1u;
+        for (std::uint32_t eye = 0; eye < sourceCount; ++eye) {
+            const HRESULT result = device->StretchRect(
+                source[eye], nullptr, frame.surface[eye].Get(), nullptr,
+                D3DTEXF_NONE);
+            if (FAILED(result)) {
+                LogHresult("cpu_capture_queue_stretch_failed", result);
+                if (stereo) {
+                    ClearStereoFrame();
+                }
+                return false;
+            }
+        }
+        const HRESULT queryResult =
+            frame.completion->Issue(D3DISSUE_END);
+        if (FAILED(queryResult)) {
+            LogHresult("cpu_capture_queue_issue_failed", queryResult);
+            if (stereo) {
+                ClearStereoFrame();
+            }
+            return false;
+        }
+
+        frame.stereo = stereo;
+        frame.flatPanel = flatPanel;
+        frame.renderModeGeneration = renderModeGeneration_;
+        frame.frameId = stereo ? stereoFrameId_ : ++frameId_;
+        if (stereo && frame.frameId > frameId_) {
+            frameId_ = frame.frameId;
+        }
+        frame.active = true;
+        cpuCaptureWrite_ =
+            (cpuCaptureWrite_ + 1) % kCpuCaptureQueueSize;
+        ++cpuCaptureCount_;
+        ++cpuCaptureQueued_;
+
+        if (gpuHudComposited) {
+            ++stereoHudFrames_;
+            if (stereoHudFrames_ == 1 ||
+                stereoHudFrames_ % 300 == 0) {
+                std::ostringstream message;
+                message << "changed_pixels=" << changedPixels
+                        << " coverage_percent="
+                        << (totalPixels == 0
+                                ? 0
+                                : changedPixels * 100u / totalPixels)
+                        << " mode="
+                        << (flatPanel ? "flat_panel" : "raised_hud")
+                        << " path=gpu_async";
+                logger_.Write(
+                    "INFO", "stereo_hud_async_staged", message.str());
+            }
+        }
+        if (stereo) {
+            ClearStereoFrame();
+        }
+        return true;
+    }
+
+    void RetireCpuCaptureHead() noexcept {
+        CpuCaptureFrame& frame =
+            cpuCaptureQueue_[cpuCaptureRead_];
+        frame.active = false;
+        cpuCaptureRead_ =
+            (cpuCaptureRead_ + 1) % kCpuCaptureQueueSize;
+        --cpuCaptureCount_;
+    }
+
+    void ProcessCpuCaptureQueue(
+        IDirect3DDevice9* device) noexcept {
+        while (cpuCaptureCount_ != 0) {
+            CpuCaptureFrame& frame =
+                cpuCaptureQueue_[cpuCaptureRead_];
+            if (!frame.active || !frame.completion) {
+                RetireCpuCaptureHead();
+                continue;
+            }
+
+            const HRESULT queryResult =
+                frame.completion->GetData(nullptr, 0, 0);
+            if (queryResult == S_FALSE) {
+                ++cpuCaptureQueryNotReady_;
+                return;
+            }
+            if (FAILED(queryResult)) {
+                LogHresult(
+                    "cpu_capture_queue_getdata_failed", queryResult);
+                RetireCpuCaptureHead();
+                continue;
+            }
+
+            // Do not spend a GPU->CPU readback and D3D9Ex upload on an old
+            // completed frame when a newer completed frame is already
+            // available. Commands on one D3D9 device complete in order, so
+            // probing the next queue entry is sufficient and repeating this
+            // loop converges on the newest completed capture.
+            if (cpuCaptureCount_ > 1) {
+                const std::size_t nextIndex =
+                    (cpuCaptureRead_ + 1) % kCpuCaptureQueueSize;
+                CpuCaptureFrame& next =
+                    cpuCaptureQueue_[nextIndex];
+                if (next.active && next.completion &&
+                    next.completion->GetData(nullptr, 0, 0) == S_OK) {
+                    RetireCpuCaptureHead();
+                    ++cpuCaptureStaleDrops_;
+                    continue;
+                }
+            }
+
+            // A menu transition invalidates the image but never waits for it.
+            // Retire it only after the GPU query completes so its surfaces
+            // cannot be overwritten while commands still reference them.
+            if (frame.renderModeGeneration != renderModeGeneration_) {
+                RetireCpuCaptureHead();
+                ++cpuCaptureModeDrops_;
+                continue;
+            }
+            std::uint32_t slotIndex = 0;
+            if (!ClaimWritablePair(slotIndex)) {
+                ++droppedFrames_;
+                ++cpuCaptureSlotDrops_;
+                // Keeping this completed frame at the head used to turn a
+                // short host-side slot conflict into a growing latency
+                // backlog. Drop it; OpenXR can reuse the prior complete pair.
+                RetireCpuCaptureHead();
+                return;
+            }
+
+            const std::uint64_t generation = ++generation_;
+            for (std::uint32_t eye = 0;
+                 eye < FEARVR_EYE_COUNT; ++eye) {
+                FearVrSlot& slot = shared_->slot[eye][slotIndex];
+                slot.frameId = frame.frameId;
+                slot.generation = generation;
+            }
+
+            const auto transferStart =
+                std::chrono::steady_clock::now();
+            bool uploaded = true;
+            if (frame.stereo) {
+                for (std::uint32_t eye = 0;
+                     eye < FEARVR_EYE_COUNT; ++eye) {
+                    if (!StageSurfaceViaCpu(
+                            device, frame.surface[eye].Get()) ||
+                        !UploadCpuSurface(eye, slotIndex)) {
+                        uploaded = false;
+                        break;
+                    }
+                }
+            } else {
+                // A mono Present feeds both protocol eyes, but its pixels
+                // only need to cross the classic-D3D9 readback boundary
+                // once. Upload the same CPU image to both shared slots.
+                uploaded = StageSurfaceViaCpu(
+                    device,
+                    frame.surface[FEARVR_EYE_LEFT].Get());
+                for (std::uint32_t eye = 0;
+                     uploaded && eye < FEARVR_EYE_COUNT; ++eye) {
+                    uploaded = UploadCpuSurface(eye, slotIndex);
+                }
+            }
+            const auto transferMicroseconds =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - transferStart)
+                        .count());
+            cpuCaptureTransferMaxMicroseconds_ = (std::max)(
+                cpuCaptureTransferMaxMicroseconds_,
+                transferMicroseconds);
+
+            if (!uploaded) {
+                ReleaseClaimedPair(slotIndex);
+            } else {
+                if (frame.stereo && !frame.flatPanel) {
+                    InterlockedOr(
+                        AtomicFlags(*shared_), FEARVR_BF_STEREO_ACTIVE);
+                    ++stereoFrames_;
+                } else {
+                    InterlockedAnd(
+                        AtomicFlags(*shared_),
+                        static_cast<LONG>(
+                            ~FEARVR_BF_STEREO_ACTIVE));
+                }
+                PendingFrame& pending = queuedPending_[slotIndex];
+                pending.active = true;
+                pending.slotIndex = slotIndex;
+                pending.frameId = frame.frameId;
+                pending.generation = generation;
+                ++cpuCaptureTransferred_;
+            }
+
+            RetireCpuCaptureHead();
+
+            if (cpuCaptureTransferred_ != 0 &&
+                cpuCaptureTransferred_ % 300 == 0) {
+                std::ostringstream message;
+                message << "queued=" << cpuCaptureQueued_
+                        << " transferred=" << cpuCaptureTransferred_
+                        << " queue_drops=" << cpuCaptureQueueDrops_
+                        << " mode_drops=" << cpuCaptureModeDrops_
+                        << " stale_drops=" << cpuCaptureStaleDrops_
+                        << " slot_drops=" << cpuCaptureSlotDrops_
+                        << " duplicate_drops="
+                        << stereoDuplicateCaptureDrops_
+                        << " query_not_ready="
+                        << cpuCaptureQueryNotReady_
+                        << " transfer_max_us="
+                        << cpuCaptureTransferMaxMicroseconds_;
+                logger_.Write(
+                    "INFO", "cpu_capture_pipeline", message.str());
+                cpuCaptureQueryNotReady_ = 0;
+                cpuCaptureTransferMaxMicroseconds_ = 0;
+            }
+            return;
+        }
+    }
+
+#endif
     bool CopyFrameViaCpu(IDirect3DDevice9* device,
                          IDirect3DSurface9* backBuffer,
                          std::uint32_t slotIndex) noexcept {
@@ -3520,6 +3945,7 @@ private:
     HANDLE mapping_{nullptr};
     HANDLE frameReadyEvent_{nullptr};
     HANDLE slotConsumedEvent_{nullptr};
+    HANDLE renderRequestEvent_{nullptr};
     FearVrSharedHeader* shared_{nullptr};
     IDirect3DDevice9* device_{nullptr};
     IDirect3DDevice9* multithreadedDevice_{nullptr};
@@ -3576,6 +4002,21 @@ private:
     FearVrGameCameraSample stereoCameraSample_{};
     std::uint64_t stereoFrames_{0};
     std::uint64_t stereoHudFrames_{0};
+    std::uint64_t lastStagedStereoFrameId_{0};
+    std::uint64_t stereoDuplicateCaptureDrops_{0};
+    std::uint64_t cpuCaptureQueued_{0};
+    std::uint64_t cpuCaptureTransferred_{0};
+    std::uint64_t cpuCaptureQueueDrops_{0};
+    std::uint64_t cpuCaptureModeDrops_{0};
+    std::uint64_t cpuCaptureStaleDrops_{0};
+    std::uint64_t cpuCaptureSlotDrops_{0};
+    std::uint64_t cpuCaptureQueryNotReady_{0};
+    std::uint64_t cpuCaptureTransferMaxMicroseconds_{0};
+    std::uint64_t xrPacingWaits_{0};
+    std::uint64_t xrPacingTimeouts_{0};
+    std::uint64_t xrPacingWaitMaxMilliseconds_{0};
+    std::uint64_t bypassPresentCount_{0};
+    std::chrono::steady_clock::time_point bypassPresentWindowStart_{};
     std::uint64_t gameAdapterLuid_{0};
     std::uint64_t lastHostHeartbeat_{0};
     ULONGLONG lastHostHeartbeatTick_{0};
@@ -3594,6 +4035,7 @@ private:
     bool stereoHudFlatFrame_{false};
     bool stereoAccepting_{false};
     bool stereoIncompleteLogged_{false};
+    bool xrFramePacingLogged_{false};
     bool stereoKeyWasDown_{false};
     bool recenterKeyWasDown_{false};
     bool comfortKeyWasDown_{false};
@@ -4119,6 +4561,14 @@ void RegisterStereoToggleCallback(
 
 BOOL GetRenderRequest(FearVrRenderRequest* request) noexcept {
     return GetBridge().ReadRenderRequest(request);
+}
+
+BOOL WaitForNewRenderRequest(
+    std::uint64_t previousFrameId,
+    std::uint32_t timeoutMilliseconds,
+    FearVrRenderRequest* request) noexcept {
+    return GetBridge().WaitForNewRenderRequest(
+        previousFrameId, timeoutMilliseconds, request);
 }
 
 BOOL GetInputState(FearVrInputState* input) noexcept {

@@ -543,6 +543,50 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Offen:** Die Ursache im Retail-Binary ist nicht geklaert. Dokumentiert ist
   die gemessene Regel, keine Erklaerung.
 
+### AD-021 — OpenXR-Auftrag als Frame-Takt, neuestes fertiges Bild gewinnt
+
+- **Problem:** VDXR nahm weiterhin 90 Bilder pro Sekunde entgegen, während
+  schnelle Controllerbewegungen sichtbare Doppelbilder erzeugten. Der
+  Classic-D3D9-CPU/D3D9Ex-Pfad behielt bei einem belegten Ausgabeslot das
+  älteste fertige Bild am Kopf der Queue. FEAR renderte außerdem mehrere
+  Stereopaare mit derselben OpenXR-Auftrags-ID.
+- **Messung/Beleg:** Lauf `fearvr-20260731-063123` zeigte bei 90 XR-fps
+  45–87 als `reused` bezeichnete Einreichungen je 300 Frames und beim ersten
+  passenden Stereobild sieben Auftragsframes Alter. Der damalige Zähler
+  verglich allerdings nur `frameId` und vermischte dadurch eine neue
+  Texturgeneration mit derselben Pose mit einem wirklich wiederverwendeten
+  Bild.
+- **Getestete Optionen:** (a) ein festes 90-fps-Limit — verworfen, weil die
+  Runtime auch 72, 80 oder 120 Hz liefern kann und ein freilaufendes Limit
+  nicht phasengleich zu `xrWaitFrame` ist; (b) synchroner Readback in
+  `Present` — nur Diagnose, weil er den Spielthread blockiert; (c) den
+  neuesten OpenXR-Auftrag als Taktgeber verwenden und die ohnehin anfallende
+  Transferarbeit in dessen begrenztes Wartefenster legen.
+- **Gewählte Lösung:** Der Host signalisiert nach jedem vollständig
+  veröffentlichten Renderauftrag ein eigenes Auto-Reset-Event. Will FEAR
+  dieselbe Auftrags-ID erneut rendern, wartet die Bridge höchstens 20 ms.
+  Während dieses begrenzten Fensters werden fertige D3D9-Stagingkopien
+  gelesen, nach D3D9Ex hochgeladen und abgeschlossene Slots freigegeben.
+  Mehrere fertige Capture-Einträge werden auf den neuesten reduziert; bei
+  belegtem Ausgabering wird das Bild verworfen statt später veraltet
+  ausgeliefert. Doppelte Stereo-Auftrags-IDs werden nicht erneut gecaptured.
+- **Messung:** Im stabilen Stereoteil von
+  `fearvr-20260731-065041` liefen XR und importierte Spielbilder beide mit
+  89,1–90,1 fps. Echte Wiederverwendung lag typischerweise bei 0–3 von
+  300 Frames, das mittlere Auftragsalter bei einem und das Maximum meist bei
+  ein bis zwei Frames. Nach der Startphase gab es keine neuen
+  Queue-/Slot-Drops; vereinzelte begrenzte Pacing-Timeouts traten nur bei
+  Runtime-/EndFrame-Einbrüchen auf.
+- **Bekannte Nachteile:** Der Classic-D3D9-Kompatibilitätspfad benötigt
+  weiterhin einen GPU-zu-CPU-Readback. Seine Arbeit liegt nun im
+  Frame-Pacing-Fenster, ist aber nicht kostenlos. 2D-Startmenüs vor dem
+  ersten nativen Stereoframe bleiben bewusst freilaufend.
+- **Rückfallpfad:** `-fearvr-no-xr-frame-pacing` lässt FEAR für einen
+  A/B-Test wieder mehrere Renderdurchläufe pro OpenXR-Auftrag ausführen.
+  Jeder Wait ist auch ohne diesen Schalter hart begrenzt; bei Hostverlust
+  rendert FEAR mit dem letzten Auftrag weiter und kann nicht zyklisch auf den
+  Host warten.
+
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 
 - [x] ob und wie `RenderCamera` zweimal **sicher** aufgerufen wird → `STEREO-RESEARCH.md`

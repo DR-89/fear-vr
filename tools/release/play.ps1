@@ -62,6 +62,16 @@ param(
     # Laesst die Arbeit im IClientShell::Update-Hook weg.
     [switch]$NoClientUpdate,
 
+    # Misst nur die rohe Present-Rate. Das Spiel bleibt im Desktopfenster
+    # sichtbar, aber es werden absichtlich keine Bilder ins Headset kopiert.
+    [switch]$NoCapture,
+
+    # Diagnose-Rollback für den verifizierten Jupiter-EX-HID-FPS-Fix.
+    [switch]$NoHidFpsFix,
+
+    # Diagnose-Rollback: FEAR nicht am OpenXR-Renderauftrag takten.
+    [switch]$NoXrFramePacing,
+
     # Laesst Weapon-Manager-, AimAt- und Fire-Vector-Hook ungesetzt.
     [switch]$NoAimHooks,
 
@@ -558,6 +568,9 @@ if ($NoStereo) { $gameArguments += '-fearvr-no-stereo' }
 if ($NoInject) { $gameArguments += '-fearvr-no-inject' }
 if ($NoBindingHook) { $gameArguments += '-fearvr-no-binding-hook' }
 if ($NoClientUpdate) { $gameArguments += '-fearvr-no-client-update' }
+if ($NoCapture) { $gameArguments += '-fearvr-no-capture' }
+if ($NoHidFpsFix) { $gameArguments += '-fearvr-no-hid-fps-fix' }
+if ($NoXrFramePacing) { $gameArguments += '-fearvr-no-xr-frame-pacing' }
 if ($NoAimHooks) { $gameArguments += '-fearvr-no-aim-hooks' }
 if ($NoAimAt) { $gameArguments += '-fearvr-no-aimat' }
 if ($AimAtPassthrough) { $gameArguments += '-fearvr-aimat-passthrough' }

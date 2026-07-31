@@ -16,6 +16,7 @@ EXPORTS
     FearVr_IsFlatPanelActive
     FearVr_RegisterStereoToggleCallback
     FearVr_GetRenderRequest
+    FearVr_WaitForNewRenderRequest
     FearVr_GetInputState
     FearVr_SubmitHapticRequest
     FearVr_BeginEye

@@ -662,6 +662,38 @@ der Host erhält nach einer Überlastung wieder das aktuellste verfügbare Bild.
 Der Live-Lauf blieb fehlerfrei; der subjektive Test meldete während des Laufs
 ein sehr gutes Ergebnis.
 
+### OpenXR-Frame-Pacing und Capture-Alter, geprüft am 31.07.2026
+
+Der VDXR-FPS-Zähler misst die Einreichungsrate des OpenXR-Hosts, nicht die
+Anzahl neuer FEAR-Bilder. Für die Untersuchung wurden deshalb zwei getrennte
+IDs protokolliert: `generation` bezeichnet ein wirklich neu importiertes
+Texturpaar, `frameId` den OpenXR-Auftrag samt vorhergesagter Pose. Aus deren
+Differenz zum aktuellen Hostauftrag entstehen
+`image_age_avg_frames` und `image_age_max_frames`.
+
+| Lauf/Stand | XR/Game | echte Wiederverwendung | Bildalter |
+|---|---|---|---|
+| `fearvr-20260731-063123`, vor Pacing | XR meist 90, Capture 96–119 fps | 33–87/300 laut altem, frameId-basiertem Zähler | erster Treffer 7 Frames |
+| `fearvr-20260731-064723`, nur Auftragstakt | XR 90, Game 81–89 fps | 3–15/300 | stabil 4–5 Frames |
+| `fearvr-20260731-065041`, Transfer im Wartefenster | XR 89,4–90,1, Game 89,1–90,1 fps | typischerweise 0–3/300 | Durchschnitt 1, meist maximal 1–2 Frames |
+
+Im finalen Messfenster des letzten Laufs:
+
+- `xr_frame_pacing`: maximal 16 ms gewartet; im stabilen frühen Intervall
+  keine Timeouts, später vereinzelte begrenzte Timeouts bei
+  Runtime-/EndFrame-Einbrüchen;
+- `cpu_capture_pipeline`: nach der Startphase keine neuen Queue-, Stale- oder
+  Slot-Drops;
+- Host-Copyzeit rund 59–61 µs im Mittel;
+- eigener Host-CPU-Maximalwert rund 380–438 µs;
+- keine Pose-Fallbacks und kein Fehlerereignis.
+
+Damit folgt FEAR nicht einem hart codierten 90-fps-Limit, sondern automatisch
+dem Takt der aktiven OpenXR-Runtime. Das gleiche Verfahren funktioniert
+dadurch auch bei 72, 80 oder 120 Hz. Ein verlorener Host kann FEAR nicht
+festhalten: Jeder Wait endet spätestens nach 20 ms. Der Diagnose-Rollback
+lautet `tools\play.ps1 -NoXrFramePacing`.
+
 ### Runtime-Unabhängigkeit, geprüft am 25.07.2026
 
 | Prüfung | Ergebnis |

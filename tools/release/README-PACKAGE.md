@@ -112,10 +112,16 @@ tools\play.ps1 -NoStereoHud       # troubleshooting only
 tools\play.ps1 -NoCapture         # raw Present-rate diagnosis; headset image off
 tools\play.ps1 -NoHidFpsFix       # diagnostic rollback of the Jupiter EX HID fix
 tools\play.ps1 -NoXrFramePacing   # allow duplicate XR requests for A/B testing
+tools\play.ps1 -RenderScale 150   # supersample native stereo world rendering
 ```
 
 `-Runtime` sets `XR_RUNTIME_JSON` for the host process only. The system-wide
 runtime setting is never changed.
+
+`-RenderScale` accepts 100 through 200 percent and applies only to native
+stereo gameplay. Retail menus and videos keep their original backbuffer.
+Start with 125 or 150 percent: classic-D3D9 CPU readback cost grows with the
+number of pixels.
 
 A Steam copy needs the Steam client running, because F.E.A.R. officially
 starts through `steam.exe -applaunch 21090`. GOG and disc copies do not need

@@ -678,6 +678,64 @@ dadurch auch bei 72, 80 oder 120 Hz. Ein verlorener Host kann FEAR nicht
 festhalten: Jeder Wait endet spätestens nach 20 ms. Der Diagnose-Rollback
 lautet `tools\play.ps1 -NoXrFramePacing`.
 
+### Off-screen render-scale probe
+
+Launch:
+
+```powershell
+tools\play.ps1 -Runtime vdxr -RenderScale 150
+```
+
+Before launching, restore the Retail mode to a valid value such as
+1280×1024. Expected proxy events:
+
+- `render_scale_config` with `requested_percent=150`;
+- `render_scale_ready` with `source=1280x1024 target=1920x1536`;
+- `shared_resources` with the same target size and `render_scale=150%`;
+- no `render_scale_*_failed` events.
+
+Menus and videos must remain flat and fully usable. The larger eye target is
+activated only during 3D gameplay. Compare the same scene at 100, 125, and
+150 percent while recording `perf_frame`, `cpu_capture_pipeline`, image age,
+and perceived texture/edge clarity. A larger transported image alone is not
+proof: distant geometry edges and fine textures must visibly contain more
+detail.
+
+First technical run, `fearvr-20260731-072431`, at 150 percent:
+
+- The Retail source remained 1280×1024; both stereo targets and imported host
+  textures were 1920×1536.
+- Jupiter's active target used 4× MSAA and resolved successfully into the
+  single-sample capture texture.
+- There were no `render_scale_*_failed`, restore, stereo fallback, or render
+  exception events.
+- Visual inspection found that the scene occupied only the top-left
+  1280×1024 region of the 1920×1536 eye image, leaving the lower-right region
+  empty. Jupiter reset the viewport and scissor rectangle to its cached
+  Retail dimensions inside `RenderCamera`, after the bridge selected the
+  larger target.
+- VDXR remained near 90 Hz; new game images were usually 64–75 fps during
+  stereo gameplay with an image age of two request frames.
+- GPU-to-CPU/D3D9Ex transfer maxima were usually 10–13 ms.
+
+Correction run `fearvr-20260731-073412` scales D3D9 `SetViewport` and
+`SetScissorRect` calls only while render-target 0 is the active supersampled
+eye surface. The log proves the exact transformation:
+
+- viewport `0,0 1280x1024` → `0,0 1920x1536`;
+- scissor `0,0-1280,1024` → `0,0-1920,1536`;
+- menus, other render targets, and the D3D9Ex transfer device are excluded;
+- no viewport/scissor restore failures, stereo fallback, or render exception
+  occurred during the technical run.
+- Headset inspection confirmed that the corrected scene fills the complete
+  eye image; the previous empty lower-right region is gone.
+
+This proves the technical separation between the Retail and stereo
+resolutions and fixes the incomplete top-left rendering. At this stage,
+however, 150 percent remains too expensive for the Classic D3D9 CPU path to
+sustain 90 new game images per second. After visual confirmation, the next
+A/B value is 125 percent.
+
 ### Runtime-Unabhängigkeit, geprüft am 25.07.2026
 
 | Prüfung | Ergebnis |

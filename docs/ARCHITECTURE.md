@@ -547,6 +547,40 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   rendert FEAR mit dem letzten Auftrag weiter und kann nicht zyklisch auf den
   Host warten.
 
+### AD-022 — Stereo supersampling without changing the Retail display mode
+
+- **Problem:** The VDXR run `fearvr-20260731-065041` used 3072×3264 OpenXR
+  swapchains per eye, but the imported game images were only 1280×1024.
+  Jupiter EX rejected a manually configured 2560×1440 Retail mode and reset
+  it to 640×480.
+- **Source evidence/tested option:** The earlier attempt to force the entire
+  Retail backbuffer to a 1920×1080 window in `CreateDevice`/`Reset` broke the
+  flat-menu projection and was removed by `9fd783e`. Increasing only the
+  OpenXR swapchain resolution cannot create additional scene detail.
+- **Selected probe:** `-fearvr-render-scale 100..200` scales only the render
+  targets used by the two native stereo world passes. Before each eye, the
+  bridge saves render target 0, the depth-stencil surface, and the viewport;
+  selects a matching larger off-screen target; then restores every saved
+  state. With MSAA, the eye first renders into an equivalently multisampled
+  target and resolves into the sampleable single-sample capture texture.
+  Menus, videos, and the Retail window retain their original backbuffer.
+- **Failure path:** If an off-screen target cannot be created or activated,
+  the existing backbuffer capture remains active and a structured log event
+  records the HRESULT. Failed or interrupted eye renders also restore D3D9
+  state and cannot publish an incomplete stereo pair.
+- **Viewport correction:** Jupiter resets the viewport and scissor rectangle
+  to the cached Retail dimensions from inside `RenderCamera`. The bridge
+  intercepts those calls and scales them only when render-target 0 is the
+  active supersampled eye surface. It restores both values after the eye;
+  internal post-processing targets, menus, and transfer devices are not
+  modified.
+- **Known cost/open measurement:** The Classic D3D9 path still reads through
+  the CPU; 150 percent linear scaling produces 2.25 times as many pixels.
+  Live testing must also establish whether Jupiter's internal post-processing
+  targets follow the active target size or remain at the Retail resolution.
+- **Rollback:** `-RenderScale 100` or `-fearvr-render-scale 100` uses the
+  original rendering path.
+
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 
 - [x] ob und wie `RenderCamera` zweimal **sicher** aufgerufen wird → `STEREO-RESEARCH.md`

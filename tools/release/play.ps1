@@ -62,6 +62,11 @@ param(
     # Diagnose-Rollback: FEAR nicht am OpenXR-Renderauftrag takten.
     [switch]$NoXrFramePacing,
 
+    # Linear resolution scale for native stereo world rendering. Menus and
+    # videos retain the Retail backbuffer; this applies only during gameplay.
+    [ValidateRange(100, 200)]
+    [int]$RenderScale = 100,
+
     # Laesst Weapon-Manager-, AimAt- und Fire-Vector-Hook ungesetzt.
     [switch]$NoAimHooks,
 
@@ -259,6 +264,10 @@ if ($NoClientUpdate) { $gameArguments += '-fearvr-no-client-update' }
 if ($NoCapture) { $gameArguments += '-fearvr-no-capture' }
 if ($NoHidFpsFix) { $gameArguments += '-fearvr-no-hid-fps-fix' }
 if ($NoXrFramePacing) { $gameArguments += '-fearvr-no-xr-frame-pacing' }
+$gameArguments += @(
+    '-fearvr-render-scale',
+    $RenderScale.ToString([Globalization.CultureInfo]::InvariantCulture)
+)
 if ($NoAimHooks) { $gameArguments += '-fearvr-no-aim-hooks' }
 if ($NoAimAt) { $gameArguments += '-fearvr-no-aimat' }
 if ($AimAtPassthrough) { $gameArguments += '-fearvr-aimat-passthrough' }

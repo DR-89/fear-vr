@@ -4498,15 +4498,19 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         g_client->SetCameraFOV(camera, stereoFovX, stereoFovY);
         g_stereoStep =
             eye == FEARVR_EYE_LEFT
+                ? "begin_left_eye"
+                : "begin_right_eye";
+        g_beginEye(eye);
+        g_stereoStep =
+            eye == FEARVR_EYE_LEFT
                 ? "clear_left_target"
                 : "clear_right_target";
         if (renderer->ClearRenderTarget(
                 CLEARRTARGET_ALL, 0) != LT_OK) {
+            // CaptureEye also restores a supersampled D3D9 render target.
+            g_captureEye(eye);
             break;
         }
-        g_stereoStep =
-            eye == FEARVR_EYE_LEFT ? "begin_left_eye" : "begin_right_eye";
-        g_beginEye(eye);
         g_stereoStep =
             eye == FEARVR_EYE_LEFT
                 ? "render_left_eye"
@@ -4523,8 +4527,11 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
                 eye == FEARVR_EYE_LEFT
                     ? "capture_left_eye"
                     : "capture_right_eye";
-            g_captureEye(eye);
         }
+        // Always leave the eye scope. EndStereoFrame receives frame 0 below
+        // when rendering failed, so a restored but incomplete eye pair can
+        // never be published.
+        g_captureEye(eye);
         ++renderedEyes;
     }
 
@@ -4535,11 +4542,13 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     g_client->SetCameraFOV(camera, originalFovX, originalFovY);
     g_stereoRecovery.valid = false;
     g_stereoStep = "end_stereo_frame";
-    g_endStereoFrame(request.frameId);
+    const bool stereoComplete =
+        renderedEyes == FEARVR_EYE_COUNT &&
+        eyeResult[FEARVR_EYE_LEFT] == LT_OK &&
+        eyeResult[FEARVR_EYE_RIGHT] == LT_OK;
+    g_endStereoFrame(stereoComplete ? request.frameId : 0);
 
-    if (renderedEyes != FEARVR_EYE_COUNT ||
-        eyeResult[FEARVR_EYE_LEFT] != LT_OK ||
-        eyeResult[FEARVR_EYE_RIGHT] != LT_OK) {
+    if (!stereoComplete) {
         if (InterlockedCompareExchange(
                 &g_stereoFallbackLogged, 1, 0) == 0) {
             Report(
@@ -4601,6 +4610,14 @@ LTRESULT InvokeStereoProtected(
     }
     g_bodyPresentationOffsetActive = false;
     g_stereoRecovery.valid = false;
+    if (g_endStereoFrame != nullptr) {
+        __try {
+            // Besides invalidating the partial pair, this restores any
+            // supersampled D3D9 eye target left active by the exception.
+            g_endStereoFrame(0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
 
     char message[192]{};
     std::snprintf(

@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include "fearvr-version.h"
 #include "ipc_names.h"
 #include "protocol_utils.h"
+#include "render_scale.h"
 #include "stereo_hud_math.h"
 #include "system_d3d9.h"
 
@@ -27,6 +29,8 @@ namespace fearvr {
 namespace {
 
 using Microsoft::WRL::ComPtr;
+
+thread_local bool g_internalViewportStateChange = false;
 
 std::string JsonEscape(const std::string& value) {
     std::string escaped;
@@ -134,6 +138,9 @@ struct CommandLineConfig {
     bool disableHidFpsFix{false};
     // Diagnostic rollback for pacing the game from fresh OpenXR requests.
     bool disableXrFramePacing{false};
+    // Linear supersampling applied only while the native stereo world is
+    // rendered. Retail's display mode remains unchanged for menus/videos.
+    std::uint32_t renderScalePercent{kRenderScaleMinimumPercent};
 };
 
 CommandLineConfig ReadConfig() noexcept {
@@ -187,6 +194,18 @@ CommandLineConfig ReadConfig() noexcept {
                        arguments[index],
                        L"-fearvr-no-xr-frame-pacing") == 0) {
             config.disableXrFramePacing = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-fearvr-render-scale") == 0 &&
+                   index + 1 < argumentCount) {
+            wchar_t* end = nullptr;
+            const unsigned long parsed =
+                std::wcstoul(arguments[++index], &end, 10);
+            if (end != arguments[index] && *end == L'\0') {
+                config.renderScalePercent =
+                    NormalizeRenderScalePercent(
+                        static_cast<std::uint32_t>(parsed));
+            }
         }
     }
     LocalFree(arguments);
@@ -925,6 +944,14 @@ public:
                     "FEAR may render duplicate OpenXR requests for "
                     "diagnostic comparison.");
             }
+            logger_.Write(
+                "INFO", "render_scale_config",
+                "requested_percent=" +
+                    std::to_string(config_.renderScalePercent) +
+                    (config_.renderScalePercent >
+                             kRenderScaleMinimumPercent
+                         ? " mode=stereo_offscreen"
+                         : " mode=retail_backbuffer"));
         }
     }
 
@@ -950,6 +977,111 @@ public:
     void LogHookStatus(const char* level, const char* event,
                        const std::string& message) noexcept {
         logger_.Write(level, event, message);
+    }
+
+    bool ScaleStereoViewport(
+        IDirect3DDevice9* device,
+        const D3DVIEWPORT9* requested,
+        D3DVIEWPORT9& scaled) noexcept {
+        if (device == nullptr || requested == nullptr) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!IsSupersampledEyeTargetBound(device) ||
+            sourceWidth_ == 0 || sourceHeight_ == 0 ||
+            width_ == sourceWidth_ || height_ == sourceHeight_) {
+            return false;
+        }
+        const std::uint64_t sourceRight =
+            static_cast<std::uint64_t>(requested->X) +
+            requested->Width;
+        const std::uint64_t sourceBottom =
+            static_cast<std::uint64_t>(requested->Y) +
+            requested->Height;
+        if (requested->Width == 0 || requested->Height == 0 ||
+            sourceRight > sourceWidth_ ||
+            sourceBottom > sourceHeight_) {
+            return false;
+        }
+
+        const UINT left = static_cast<UINT>(MulDiv(
+            static_cast<int>(requested->X),
+            static_cast<int>(width_),
+            static_cast<int>(sourceWidth_)));
+        const UINT top = static_cast<UINT>(MulDiv(
+            static_cast<int>(requested->Y),
+            static_cast<int>(height_),
+            static_cast<int>(sourceHeight_)));
+        const UINT right = static_cast<UINT>(MulDiv(
+            static_cast<int>(sourceRight),
+            static_cast<int>(width_),
+            static_cast<int>(sourceWidth_)));
+        const UINT bottom = static_cast<UINT>(MulDiv(
+            static_cast<int>(sourceBottom),
+            static_cast<int>(height_),
+            static_cast<int>(sourceHeight_)));
+        scaled = *requested;
+        scaled.X = left;
+        scaled.Y = top;
+        scaled.Width = (std::max)(1U, right - left);
+        scaled.Height = (std::max)(1U, bottom - top);
+        if (!stereoViewportScaleLogged_) {
+            std::ostringstream message;
+            message << "requested=" << requested->X << ','
+                    << requested->Y << ' ' << requested->Width
+                    << 'x' << requested->Height << " scaled="
+                    << scaled.X << ',' << scaled.Y << ' '
+                    << scaled.Width << 'x' << scaled.Height;
+            logger_.Write(
+                "INFO", "render_scale_viewport_adjusted",
+                message.str());
+            stereoViewportScaleLogged_ = true;
+        }
+        return true;
+    }
+
+    bool ScaleStereoScissor(
+        IDirect3DDevice9* device, const RECT* requested,
+        RECT& scaled) noexcept {
+        if (device == nullptr || requested == nullptr) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!IsSupersampledEyeTargetBound(device) ||
+            sourceWidth_ == 0 || sourceHeight_ == 0 ||
+            width_ == sourceWidth_ || height_ == sourceHeight_ ||
+            requested->left < 0 || requested->top < 0 ||
+            requested->right <= requested->left ||
+            requested->bottom <= requested->top ||
+            static_cast<UINT>(requested->right) > sourceWidth_ ||
+            static_cast<UINT>(requested->bottom) > sourceHeight_) {
+            return false;
+        }
+        scaled.left = MulDiv(
+            requested->left, static_cast<int>(width_),
+            static_cast<int>(sourceWidth_));
+        scaled.top = MulDiv(
+            requested->top, static_cast<int>(height_),
+            static_cast<int>(sourceHeight_));
+        scaled.right = MulDiv(
+            requested->right, static_cast<int>(width_),
+            static_cast<int>(sourceWidth_));
+        scaled.bottom = MulDiv(
+            requested->bottom, static_cast<int>(height_),
+            static_cast<int>(sourceHeight_));
+        if (!stereoScissorScaleLogged_) {
+            std::ostringstream message;
+            message << "requested=" << requested->left << ','
+                    << requested->top << '-' << requested->right
+                    << ',' << requested->bottom << " scaled="
+                    << scaled.left << ',' << scaled.top << '-'
+                    << scaled.right << ',' << scaled.bottom;
+            logger_.Write(
+                "INFO", "render_scale_scissor_adjusted",
+                message.str());
+            stereoScissorScaleLogged_ = true;
+        }
+        return true;
     }
 
     void ApplyEngineFixes() noexcept {
@@ -1556,6 +1688,7 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        RestoreStereoRenderTarget();
         if (eye == FEARVR_EYE_LEFT) {
             if (stereoFrameReady_) {
                 stereoAccepting_ = false;
@@ -1564,6 +1697,9 @@ public:
             stereoEyeCaptured_.fill(false);
             stereoFrameId_ = 0;
             stereoAccepting_ = true;
+        }
+        if (stereoAccepting_) {
+            ActivateStereoRenderTarget(eye);
         }
     }
 
@@ -1574,8 +1710,32 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!stereoAccepting_ || device_ == nullptr ||
             !resourcesReady_ || !stereoCapture_[eye]) {
+            RestoreStereoRenderTarget();
             return;
         }
+
+        if (stereoRenderTargetActive_ &&
+            stereoRenderTargetEye_ == eye) {
+            bool captured = true;
+            if (stereoRenderTarget_[eye].Get() !=
+                stereoCapture_[eye].Get()) {
+                const HRESULT result = device_->StretchRect(
+                    stereoRenderTarget_[eye].Get(), nullptr,
+                    stereoCapture_[eye].Get(), nullptr,
+                    D3DTEXF_NONE);
+                if (FAILED(result)) {
+                    LogHresult(
+                        "render_scale_msaa_resolve_failed", result);
+                    captured = false;
+                }
+            }
+            RestoreStereoRenderTarget();
+            if (captured) {
+                stereoEyeCaptured_[eye] = true;
+            }
+            return;
+        }
+        RestoreStereoRenderTarget();
 
         ComPtr<IDirect3DSurface9> backBuffer;
         HRESULT result = device_->GetBackBuffer(
@@ -1587,8 +1747,9 @@ public:
         }
         D3DSURFACE_DESC description{};
         result = backBuffer->GetDesc(&description);
-        if (FAILED(result) || description.Width != width_ ||
-            description.Height != height_) {
+        if (FAILED(result) ||
+            description.Width != sourceWidth_ ||
+            description.Height != sourceHeight_) {
             logger_.Write(
                 "WARN", "stereo_capture_size_changed",
                 "Stereo capture deferred until resources are recreated.");
@@ -1606,6 +1767,7 @@ public:
 
     void EndStereoFrame(std::uint64_t frameId) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
+        RestoreStereoRenderTarget();
         if (!stereoAccepting_) {
             return;
         }
@@ -1634,6 +1796,145 @@ private:
         std::uint64_t frameId{0};
         std::uint64_t generation{0};
     };
+
+    bool IsSupersampledEyeTargetBound(
+        IDirect3DDevice9* device) noexcept {
+        if (!stereoRenderTargetActive_ || device != device_ ||
+            stereoRenderTargetEye_ >= FEARVR_EYE_COUNT ||
+            !stereoRenderTarget_[stereoRenderTargetEye_]) {
+            return false;
+        }
+        ComPtr<IDirect3DSurface9> current;
+        const HRESULT result = device->GetRenderTarget(
+            0, current.ReleaseAndGetAddressOf());
+        return SUCCEEDED(result) &&
+            current.Get() ==
+                stereoRenderTarget_[stereoRenderTargetEye_].Get();
+    }
+
+    bool ActivateStereoRenderTarget(
+        std::uint32_t eye) noexcept {
+        if (!stereoSupersamplingReady_ || device_ == nullptr ||
+            eye >= FEARVR_EYE_COUNT ||
+            !stereoRenderTarget_[eye] ||
+            !stereoDepthStencil_) {
+            return false;
+        }
+
+        HRESULT result = device_->GetRenderTarget(
+            0, savedRenderTarget_.ReleaseAndGetAddressOf());
+        if (FAILED(result) || !savedRenderTarget_) {
+            LogHresult("render_scale_save_target_failed", result);
+            return false;
+        }
+        result = device_->GetDepthStencilSurface(
+            savedDepthStencil_.ReleaseAndGetAddressOf());
+        if (FAILED(result) || !savedDepthStencil_) {
+            savedRenderTarget_.Reset();
+            LogHresult("render_scale_save_depth_failed", result);
+            return false;
+        }
+        result = device_->GetViewport(&savedViewport_);
+        if (FAILED(result)) {
+            savedDepthStencil_.Reset();
+            savedRenderTarget_.Reset();
+            LogHresult("render_scale_save_viewport_failed", result);
+            return false;
+        }
+        savedViewportValid_ = true;
+        result = device_->GetScissorRect(&savedScissorRect_);
+        if (SUCCEEDED(result)) {
+            savedScissorValid_ = true;
+        }
+
+        result = device_->SetRenderTarget(
+            0, stereoRenderTarget_[eye].Get());
+        if (FAILED(result)) {
+            LogHresult("render_scale_set_target_failed", result);
+            RestoreStereoRenderTarget();
+            return false;
+        }
+        stereoRenderTargetActive_ = true;
+        stereoRenderTargetEye_ = eye;
+
+        result = device_->SetDepthStencilSurface(
+            stereoDepthStencil_.Get());
+        if (FAILED(result)) {
+            LogHresult("render_scale_set_depth_failed", result);
+            RestoreStereoRenderTarget();
+            return false;
+        }
+
+        D3DVIEWPORT9 viewport{};
+        viewport.Width = width_;
+        viewport.Height = height_;
+        viewport.MinZ = savedViewport_.MinZ;
+        viewport.MaxZ = savedViewport_.MaxZ;
+        g_internalViewportStateChange = true;
+        result = device_->SetViewport(&viewport);
+        g_internalViewportStateChange = false;
+        if (FAILED(result)) {
+            LogHresult("render_scale_set_viewport_failed", result);
+            RestoreStereoRenderTarget();
+            return false;
+        }
+        return true;
+    }
+
+    void RestoreStereoRenderTarget() noexcept {
+        if (!savedRenderTarget_ && !savedDepthStencil_ &&
+            !savedViewportValid_) {
+            stereoRenderTargetActive_ = false;
+            return;
+        }
+        if (device_ != nullptr) {
+            if (savedRenderTarget_) {
+                const HRESULT result = device_->SetRenderTarget(
+                    0, savedRenderTarget_.Get());
+                if (FAILED(result)) {
+                    LogHresult(
+                        "render_scale_restore_target_failed", result);
+                }
+            }
+            if (savedDepthStencil_) {
+                const HRESULT result =
+                    device_->SetDepthStencilSurface(
+                        savedDepthStencil_.Get());
+                if (FAILED(result)) {
+                    LogHresult(
+                        "render_scale_restore_depth_failed", result);
+                }
+            }
+            if (savedViewportValid_) {
+                g_internalViewportStateChange = true;
+                const HRESULT result =
+                    device_->SetViewport(&savedViewport_);
+                g_internalViewportStateChange = false;
+                if (FAILED(result)) {
+                    LogHresult(
+                        "render_scale_restore_viewport_failed", result);
+                }
+            }
+            if (savedScissorValid_) {
+                g_internalViewportStateChange = true;
+                const HRESULT result =
+                    device_->SetScissorRect(&savedScissorRect_);
+                g_internalViewportStateChange = false;
+                if (FAILED(result)) {
+                    LogHresult(
+                        "render_scale_restore_scissor_failed",
+                        result);
+                }
+            }
+        }
+        savedRenderTarget_.Reset();
+        savedDepthStencil_.Reset();
+        savedViewport_ = {};
+        savedViewportValid_ = false;
+        savedScissorRect_ = {};
+        savedScissorValid_ = false;
+        stereoRenderTargetActive_ = false;
+    }
 
     void ClearStereoFrame() noexcept {
         stereoEyeCaptured_.fill(false);
@@ -2077,6 +2378,100 @@ private:
         return true;
     }
 
+    bool CreateStereoRenderTargets(IDirect3DDevice9* gameDevice,
+                                   UINT width,
+                                   UINT height) noexcept {
+        stereoSupersamplingReady_ = false;
+        if (effectiveRenderScalePercent_ <=
+            kRenderScaleMinimumPercent) {
+            return true;
+        }
+
+        ComPtr<IDirect3DSurface9> originalRenderTarget;
+        HRESULT result = gameDevice->GetRenderTarget(
+            0, originalRenderTarget.ReleaseAndGetAddressOf());
+        if (FAILED(result) || !originalRenderTarget) {
+            LogHresult("render_scale_get_target_failed", result);
+            return true;
+        }
+        D3DSURFACE_DESC renderDescription{};
+        result = originalRenderTarget->GetDesc(&renderDescription);
+        if (FAILED(result)) {
+            LogHresult("render_scale_target_desc_failed", result);
+            return true;
+        }
+
+        ComPtr<IDirect3DSurface9> originalDepthStencil;
+        result = gameDevice->GetDepthStencilSurface(
+            originalDepthStencil.ReleaseAndGetAddressOf());
+        if (FAILED(result) || !originalDepthStencil) {
+            LogHresult("render_scale_get_depth_failed", result);
+            return true;
+        }
+        D3DSURFACE_DESC depthDescription{};
+        result = originalDepthStencil->GetDesc(&depthDescription);
+        if (FAILED(result)) {
+            LogHresult("render_scale_depth_desc_failed", result);
+            return true;
+        }
+
+        const D3DMULTISAMPLE_TYPE multisample =
+            renderDescription.MultiSampleType;
+        const DWORD multisampleQuality =
+            renderDescription.MultiSampleQuality;
+        if (depthDescription.MultiSampleType != multisample ||
+            depthDescription.MultiSampleQuality !=
+                multisampleQuality) {
+            logger_.Write(
+                "WARN", "render_scale_msaa_mismatch",
+                "Retail render target and depth buffer use different "
+                "MSAA settings; supersampling remains disabled.");
+            return true;
+        }
+
+        result = gameDevice->CreateDepthStencilSurface(
+            width, height, depthDescription.Format, multisample,
+            multisampleQuality, TRUE,
+            stereoDepthStencil_.ReleaseAndGetAddressOf(), nullptr);
+        if (FAILED(result) || !stereoDepthStencil_) {
+            LogHresult("render_scale_depth_create_failed", result);
+            return true;
+        }
+
+        for (std::uint32_t eye = 0;
+             eye < FEARVR_EYE_COUNT; ++eye) {
+            if (multisample == D3DMULTISAMPLE_NONE) {
+                stereoRenderTarget_[eye] = stereoCapture_[eye];
+                continue;
+            }
+            result = gameDevice->CreateRenderTarget(
+                width, height, D3DFMT_A8R8G8B8, multisample,
+                multisampleQuality, FALSE,
+                stereoRenderTarget_[eye].ReleaseAndGetAddressOf(),
+                nullptr);
+            if (FAILED(result) || !stereoRenderTarget_[eye]) {
+                LogHresult(
+                    "render_scale_msaa_target_create_failed", result);
+                for (auto& target : stereoRenderTarget_) {
+                    target.Reset();
+                }
+                stereoDepthStencil_.Reset();
+                return true;
+            }
+        }
+
+        stereoSupersamplingReady_ = true;
+        std::ostringstream message;
+        message << "source=" << sourceWidth_ << 'x' << sourceHeight_
+                << " target=" << width << 'x' << height
+                << " percent=" << effectiveRenderScalePercent_
+                << " msaa=" << static_cast<unsigned>(multisample)
+                << " quality=" << multisampleQuality;
+        logger_.Write(
+            "INFO", "render_scale_ready", message.str());
+        return true;
+    }
+
     bool CreateCpuCaptureQueue(IDirect3DDevice9* gameDevice,
                                UINT width, UINT height) noexcept {
         for (CpuCaptureFrame& frame : cpuCaptureQueue_) {
@@ -2251,8 +2646,8 @@ private:
 
     bool EnsureResources(IDirect3DDevice9* device, UINT width,
                          UINT height) noexcept {
-        if (resourcesReady_ && width_ == width && height_ == height &&
-            device_ == device) {
+        if (resourcesReady_ && sourceWidth_ == width &&
+            sourceHeight_ == height && device_ == device) {
             return true;
         }
         const ULONGLONG now = GetTickCount64();
@@ -2262,29 +2657,53 @@ private:
 
         ReleaseResources();
         device_ = device;
-        width_ = width;
-        height_ = height;
+        sourceWidth_ = width;
+        sourceHeight_ = height;
+
+        D3DCAPS9 capabilities{};
+        if (FAILED(device->GetDeviceCaps(&capabilities))) {
+            capabilities.MaxTextureWidth = width;
+            capabilities.MaxTextureHeight = height;
+        }
+        const RenderScaleSize renderSize =
+            CalculateRenderScaleSize(
+                width, height, config_.renderScalePercent,
+                capabilities.MaxTextureWidth,
+                capabilities.MaxTextureHeight);
+        width_ = renderSize.width == 0 ? width : renderSize.width;
+        height_ = renderSize.height == 0 ? height : renderSize.height;
+        effectiveRenderScalePercent_ =
+            renderSize.width == 0
+                ? kRenderScaleMinimumPercent
+                : renderSize.percent;
 
         ComPtr<IDirect3DDevice9Ex> deviceEx;
         bool created = false;
         if (SUCCEEDED(device->QueryInterface(
                 IID_PPV_ARGS(deviceEx.ReleaseAndGetAddressOf())))) {
-            created = CreateSharedSlots(device, width, height);
+            created = CreateSharedSlots(device, width_, height_);
             if (created) {
                 transferMode_ = TransferMode::DirectShared;
             }
         } else {
-            created = CreateCpuInteropResources(device, width, height);
+            created =
+                CreateCpuInteropResources(device, width_, height_);
         }
         if (created) {
             created =
-                CreateStereoCaptureSurfaces(device, width, height);
+                CreateStereoCaptureSurfaces(
+                    device, width_, height_);
+        }
+        if (created) {
+            created = CreateStereoRenderTargets(
+                device, width_, height_);
         }
         if (created && config_.stereoHudEnabled &&
             !config_.disableGpuHud) {
             // Scheitert der Kompositor, bleibt das HUD trotzdem: dann mischt
             // wieder die CPU. Kein Grund, den ganzen Bildpfad aufzugeben.
-            hudCompositor_.Initialize(device, width, height, logger_);
+            hudCompositor_.Initialize(
+                device, width_, height_, logger_);
         }
         if (!created) {
             ReleaseResources();
@@ -2297,7 +2716,10 @@ private:
         InterlockedOr(AtomicFlags(*shared_),
                       FEARVR_BF_SHARED_SUPPORTED);
         std::ostringstream message;
-        message << "size=" << width << 'x' << height
+        message << "source=" << sourceWidth_ << 'x'
+                << sourceHeight_ << " size=" << width_ << 'x'
+                << height_ << " render_scale="
+                << effectiveRenderScalePercent_ << "%"
                 << " format=B8G8R8A8 slots="
                 << FEARVR_SLOTS_PER_EYE << "x2 path="
                 << (transferMode_ == TransferMode::DirectShared
@@ -3013,12 +3435,14 @@ private:
     }
 
     void ReleaseResources() noexcept {
+        RestoreStereoRenderTarget();
         pending_ = {};
         resourcesReady_ = false;
         transferMode_ = TransferMode::None;
         // Zuerst der Kompositor: Er hält Render-Targets auf demselben Gerät.
         hudCompositor_.Release();
         for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+            stereoRenderTarget_[eye].Reset();
             stereoCaptureTexture_[eye].Reset();
             stereoCapture_[eye].Reset();
             for (std::uint32_t slotIndex = 0;
@@ -3041,6 +3465,10 @@ private:
                 }
             }
         }
+        stereoDepthStencil_.Reset();
+        stereoSupersamplingReady_ = false;
+        stereoViewportScaleLogged_ = false;
+        stereoScissorScaleLogged_ = false;
         bridgeUpload_.Reset();
         presentedReadback_.Reset();
         rightWorldReadback_.Reset();
@@ -3188,6 +3616,13 @@ private:
         stereoCaptureTexture_{};
     std::array<ComPtr<IDirect3DSurface9>, FEARVR_EYE_COUNT>
         stereoCapture_{};
+    std::array<ComPtr<IDirect3DSurface9>, FEARVR_EYE_COUNT>
+        stereoRenderTarget_{};
+    ComPtr<IDirect3DSurface9> stereoDepthStencil_;
+    ComPtr<IDirect3DSurface9> savedRenderTarget_;
+    ComPtr<IDirect3DSurface9> savedDepthStencil_;
+    D3DVIEWPORT9 savedViewport_{};
+    RECT savedScissorRect_{};
     GpuHudCompositor hudCompositor_;
     std::array<std::array<SlotResource, FEARVR_SLOTS_PER_EYE>,
                FEARVR_EYE_COUNT>
@@ -3195,8 +3630,12 @@ private:
     std::array<CpuCaptureFrame, kCpuCaptureQueueSize>
         cpuCaptureQueue_{};
     std::array<PendingFrame, FEARVR_SLOTS_PER_EYE> pending_{};
+    UINT sourceWidth_{0};
+    UINT sourceHeight_{0};
     UINT width_{0};
     UINT height_{0};
+    std::uint32_t effectiveRenderScalePercent_{
+        kRenderScaleMinimumPercent};
     std::uint32_t nextSlot_{0};
     std::uint64_t frameId_{0};
     std::uint64_t generation_{0};
@@ -3238,6 +3677,13 @@ private:
     bool stereoHudFlatFrame_{false};
     bool stereoAccepting_{false};
     bool stereoIncompleteLogged_{false};
+    bool stereoSupersamplingReady_{false};
+    bool stereoRenderTargetActive_{false};
+    bool savedViewportValid_{false};
+    bool savedScissorValid_{false};
+    bool stereoViewportScaleLogged_{false};
+    bool stereoScissorScaleLogged_{false};
+    std::uint32_t stereoRenderTargetEye_{FEARVR_EYE_LEFT};
     bool xrFramePacingLogged_{false};
     bool stereoKeyWasDown_{false};
     bool recenterKeyWasDown_{false};
@@ -3271,6 +3717,11 @@ using ResetFunction =
 using PresentFunction =
     HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, const RECT*,
                                 const RECT*, HWND, const RGNDATA*);
+using SetViewportFunction =
+    HRESULT(STDMETHODCALLTYPE*)(
+        IDirect3DDevice9*, const D3DVIEWPORT9*);
+using SetScissorRectFunction =
+    HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, const RECT*);
 
 void ForceHighQualitySource(D3DPRESENT_PARAMETERS* parameters) noexcept {
     // Keep Retail's own display mode. The game menu relies on that mode's
@@ -3288,6 +3739,8 @@ struct DeviceVtableRecord {
     void** vtable{nullptr};
     ResetFunction reset{nullptr};
     PresentFunction present{nullptr};
+    SetViewportFunction setViewport{nullptr};
+    SetScissorRectFunction setScissorRect{nullptr};
 };
 
 SRWLOCK g_hookLock = SRWLOCK_INIT;
@@ -3298,6 +3751,8 @@ volatile LONG g_lateHooksActive = FALSE;
 BOOL g_lateHookResult = FALSE;
 ResetFunction g_lateReset = nullptr;
 PresentFunction g_latePresent = nullptr;
+SetViewportFunction g_lateSetViewport = nullptr;
+SetScissorRectFunction g_lateSetScissorRect = nullptr;
 
 HRESULT STDMETHODCALLTYPE HookCreateDevice(
     IDirect3D9* self, UINT adapter, D3DDEVTYPE deviceType,
@@ -3317,12 +3772,20 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDirect3DDevice9* self,
                                        const RECT* destination,
                                        HWND overrideWindow,
                                        const RGNDATA* dirtyRegion);
+HRESULT STDMETHODCALLTYPE HookSetViewport(
+    IDirect3DDevice9* self, const D3DVIEWPORT9* viewport);
+HRESULT STDMETHODCALLTYPE HookSetScissorRect(
+    IDirect3DDevice9* self, const RECT* rectangle);
 HRESULT STDMETHODCALLTYPE HookLateReset(
     IDirect3DDevice9* self, D3DPRESENT_PARAMETERS* parameters);
 HRESULT STDMETHODCALLTYPE HookLatePresent(
     IDirect3DDevice9* self, const RECT* source,
     const RECT* destination, HWND overrideWindow,
     const RGNDATA* dirtyRegion);
+HRESULT STDMETHODCALLTYPE HookLateSetViewport(
+    IDirect3DDevice9* self, const D3DVIEWPORT9* viewport);
+HRESULT STDMETHODCALLTYPE HookLateSetScissorRect(
+    IDirect3DDevice9* self, const RECT* rectangle);
 
 bool ReplaceVtableEntry(void** vtable, std::size_t index,
                         void* replacement) noexcept {
@@ -3363,10 +3826,20 @@ void PatchDevice(IDirect3DDevice9* device) noexcept {
                 reinterpret_cast<ResetFunction>(vtable[16]);
             record.present =
                 reinterpret_cast<PresentFunction>(vtable[17]);
+            record.setViewport =
+                reinterpret_cast<SetViewportFunction>(vtable[47]);
+            record.setScissorRect =
+                reinterpret_cast<SetScissorRectFunction>(vtable[75]);
             ReplaceVtableEntry(vtable, 16,
                                reinterpret_cast<void*>(&HookReset));
             ReplaceVtableEntry(vtable, 17,
                                reinterpret_cast<void*>(&HookPresent));
+            ReplaceVtableEntry(
+                vtable, 47,
+                reinterpret_cast<void*>(&HookSetViewport));
+            ReplaceVtableEntry(
+                vtable, 75,
+                reinterpret_cast<void*>(&HookSetScissorRect));
             break;
         }
     }
@@ -3501,6 +3974,44 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDirect3DDevice9* self,
                           dirtyRegion);
 }
 
+HRESULT STDMETHODCALLTYPE HookSetViewport(
+    IDirect3DDevice9* self, const D3DVIEWPORT9* viewport) {
+    const DeviceVtableRecord record =
+        FindDeviceRecord(*reinterpret_cast<void***>(self));
+    if (record.setViewport == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    if (g_internalViewportStateChange) {
+        return record.setViewport(self, viewport);
+    }
+    D3DVIEWPORT9 scaled{};
+    return record.setViewport(
+        self,
+        GetBridge().ScaleStereoViewport(
+            self, viewport, scaled)
+            ? &scaled
+            : viewport);
+}
+
+HRESULT STDMETHODCALLTYPE HookSetScissorRect(
+    IDirect3DDevice9* self, const RECT* rectangle) {
+    const DeviceVtableRecord record =
+        FindDeviceRecord(*reinterpret_cast<void***>(self));
+    if (record.setScissorRect == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    if (g_internalViewportStateChange) {
+        return record.setScissorRect(self, rectangle);
+    }
+    RECT scaled{};
+    return record.setScissorRect(
+        self,
+        GetBridge().ScaleStereoScissor(
+            self, rectangle, scaled)
+            ? &scaled
+            : rectangle);
+}
+
 HRESULT STDMETHODCALLTYPE HookLateReset(
     IDirect3DDevice9* self, D3DPRESENT_PARAMETERS* parameters) {
     if (g_lateReset == nullptr) {
@@ -3523,6 +4034,40 @@ HRESULT STDMETHODCALLTYPE HookLatePresent(
     GetBridge().CapturePresent(self);
     return g_latePresent(self, source, destination, overrideWindow,
                          dirtyRegion);
+}
+
+HRESULT STDMETHODCALLTYPE HookLateSetViewport(
+    IDirect3DDevice9* self, const D3DVIEWPORT9* viewport) {
+    if (g_lateSetViewport == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    if (g_internalViewportStateChange) {
+        return g_lateSetViewport(self, viewport);
+    }
+    D3DVIEWPORT9 scaled{};
+    return g_lateSetViewport(
+        self,
+        GetBridge().ScaleStereoViewport(
+            self, viewport, scaled)
+            ? &scaled
+            : viewport);
+}
+
+HRESULT STDMETHODCALLTYPE HookLateSetScissorRect(
+    IDirect3DDevice9* self, const RECT* rectangle) {
+    if (g_lateSetScissorRect == nullptr) {
+        return D3DERR_INVALIDCALL;
+    }
+    if (g_internalViewportStateChange) {
+        return g_lateSetScissorRect(self, rectangle);
+    }
+    RECT scaled{};
+    return g_lateSetScissorRect(
+        self,
+        GetBridge().ScaleStereoScissor(
+            self, rectangle, scaled)
+            ? &scaled
+            : rectangle);
 }
 
 BOOL CALLBACK InstallLateHooksOnce(PINIT_ONCE, PVOID, PVOID*) {
@@ -3584,8 +4129,14 @@ BOOL CALLBACK InstallLateHooksOnce(PINIT_ONCE, PVOID, PVOID*) {
     void** vtable = *reinterpret_cast<void***>(device.Get());
     void* const resetTarget = vtable[16];
     void* const presentTarget = vtable[17];
+    void* const setViewportTarget = vtable[47];
+    void* const setScissorRectTarget = vtable[75];
     if (resetTarget == reinterpret_cast<void*>(&HookReset) &&
-        presentTarget == reinterpret_cast<void*>(&HookPresent)) {
+        presentTarget == reinterpret_cast<void*>(&HookPresent) &&
+        setViewportTarget ==
+            reinterpret_cast<void*>(&HookSetViewport) &&
+        setScissorRectTarget ==
+            reinterpret_cast<void*>(&HookSetScissorRect)) {
         g_lateHookResult = TRUE;
         bridge.LogHookStatus(
             "INFO", "late_hooks_not_needed",
@@ -3636,16 +4187,64 @@ BOOL CALLBACK InstallLateHooksOnce(PINIT_ONCE, PVOID, PVOID*) {
         return TRUE;
     }
 
+    status = MH_CreateHook(
+        setViewportTarget,
+        reinterpret_cast<void*>(&HookLateSetViewport),
+        reinterpret_cast<void**>(&g_lateSetViewport));
+    if (status != MH_OK) {
+        MH_RemoveHook(presentTarget);
+        MH_RemoveHook(resetTarget);
+        g_latePresent = nullptr;
+        g_lateReset = nullptr;
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_viewport_create_failed",
+            MH_StatusToString(status));
+        device.Reset();
+        direct3D.Reset();
+        DestroyWindow(window);
+        return TRUE;
+    }
+
+    status = MH_CreateHook(
+        setScissorRectTarget,
+        reinterpret_cast<void*>(&HookLateSetScissorRect),
+        reinterpret_cast<void**>(&g_lateSetScissorRect));
+    if (status != MH_OK) {
+        MH_RemoveHook(setViewportTarget);
+        MH_RemoveHook(presentTarget);
+        MH_RemoveHook(resetTarget);
+        g_lateSetViewport = nullptr;
+        g_latePresent = nullptr;
+        g_lateReset = nullptr;
+        bridge.LogHookStatus(
+            "ERROR", "late_hook_scissor_create_failed",
+            MH_StatusToString(status));
+        device.Reset();
+        direct3D.Reset();
+        DestroyWindow(window);
+        return TRUE;
+    }
+
     status = MH_QueueEnableHook(resetTarget);
     if (status == MH_OK) {
         status = MH_QueueEnableHook(presentTarget);
     }
     if (status == MH_OK) {
+        status = MH_QueueEnableHook(setViewportTarget);
+    }
+    if (status == MH_OK) {
+        status = MH_QueueEnableHook(setScissorRectTarget);
+    }
+    if (status == MH_OK) {
         status = MH_ApplyQueued();
     }
     if (status != MH_OK) {
+        MH_RemoveHook(setScissorRectTarget);
+        MH_RemoveHook(setViewportTarget);
         MH_RemoveHook(presentTarget);
         MH_RemoveHook(resetTarget);
+        g_lateSetScissorRect = nullptr;
+        g_lateSetViewport = nullptr;
         g_latePresent = nullptr;
         g_lateReset = nullptr;
         bridge.LogHookStatus(
@@ -3661,7 +4260,8 @@ BOOL CALLBACK InstallLateHooksOnce(PINIT_ONCE, PVOID, PVOID*) {
     g_lateHookResult = TRUE;
     bridge.LogHookStatus(
         "INFO", "late_hooks_installed",
-        "System D3D9 Reset and Present hooks are active.");
+        "System D3D9 Reset, Present, viewport, and scissor hooks are "
+        "active.");
     device.Reset();
     direct3D.Reset();
     DestroyWindow(window);

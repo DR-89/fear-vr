@@ -213,6 +213,7 @@ extern "C" void FearVr_ReportHookStatus(
 }
 
 extern "C" BOOL FearVr_InstallIatHook() {
+    fearvr::ApplyEngineFixes();
     const BOOL iatInstalled =
         fearvr::InstallDirect3DCreate9IatHook(
             reinterpret_cast<void*>(&Direct3DCreate9));

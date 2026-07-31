@@ -109,6 +109,8 @@ tools\play.ps1 -Runtime steamvr   # force SteamVR
 tools\play.ps1 -Translation       # limited HMD translation (opt-in)
 tools\play.ps1 -NoHeadBob         # force head bob off (already off by default)
 tools\play.ps1 -NoStereoHud       # troubleshooting only
+tools\play.ps1 -NoCapture         # raw Present-rate diagnosis; headset image off
+tools\play.ps1 -NoHidFpsFix       # diagnostic rollback of the Jupiter EX HID fix
 ```
 
 `-Runtime` sets `XR_RUNTIME_JSON` for the host process only. The system-wide

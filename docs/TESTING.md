@@ -608,6 +608,44 @@ Einordnung:
 
 Damit ist die Kennzahlenpflicht aus §14 erfüllt.
 
+### Jupiter-EX-HID-FPS-Fehler, nachgewiesen am 30.07.2026
+
+Ausgangspunkt war ein reproduzierbarer Einbruch nach dem Laden und nach
+Pause/Fortsetzen. Die Untersuchung trennte Stereo, Client-Hooks, Bridge und
+Engine schrittweise. Entscheidend war ein Diagnosepfad, der Proxy, OpenXR-Host
+und Client-Hooks geladen lässt, in `CapturePresent` aber vor jedem
+`StretchRect`, Readback und D3D9Ex-Upload aussteigt und nur die rohe
+`Present`-Rate protokolliert.
+
+| Lauf | Aktive Arbeit | Beobachtung |
+|---|---|---|
+| `fearvr-20260730-135208` | Mono, alter doppelter Mono-Readback | rund 77 → 39 fps |
+| `fearvr-20260730-135809` | Mono, ein Readback und zwei Uploads | rund 77 → 51 fps; Transfermaximum 3,8–4,4 ms |
+| `fearvr-20260730-140042` | zusätzlich Client-Update-Arbeit aus | 113 → 65 fps; Client-Hooks nicht Ursache |
+| `fearvr-20260730-140414` | Capture und D3D9Ex-Upload ganz aus | rohe Presents 96,7 → 62,8 fps; Bridge nicht Ursache |
+| `fearvr-20260730-141304` | Capture aus, verifizierter HID-Fix an | rohe Presents stabil rund 564–594 fps |
+| `fearvr-20260730-141437` | echter Mono-Capturepfad, HID-Fix an | Gameplay stabil rund 147–172 fps; Pause rund 173–180 fps |
+
+Der Fehler lag damit **vor `Present` in Jupiter EX**, nicht im
+Classic-D3D9-zu-D3D9Ex-Transport. Auf dem Testsystem waren 54 aktive
+HID-Class-Geräte sichtbar. EchoPatch dokumentiert denselben Fehler als
+Initialisierung aller HID-Geräte als Controller. Seine vollständige
+`dinput8.dll` bleibt mit dieser Mod unvereinbar (siehe `ECHOPATCH.md`);
+übernommen wurde nur die eng begrenzte Enginekorrektur:
+
+- Steam-F.E.A.R.-1.08-Zeitstempel `0x44EF6AE6` verlangen;
+- die drei laufenden Bytefolgen bei RVA `0x84057`, `0x840DD` und `0x84166`
+  vollständig prüfen;
+- nur bei dreifacher Übereinstimmung alle drei Bereiche NOPen;
+- bei unbekannter EXE oder einem einzigen Bytefehler nichts schreiben und
+  den Grund protokollieren.
+
+`hid_fps_fix_applied` erschien vor Renderer- und Clientinitialisierung.
+`FEAR.exe` auf Platte blieb unverändert; gepatcht wird ausschließlich die
+verifizierte Speicherabbildung des laufenden Prozesses. Ein erfolgreicher
+D3D9-Reset im Lauf `141437` bestätigte außerdem, dass die asynchrone
+CPU/D3D9Ex-Bridge den Fokus-/Moduswechsel weiterhin übersteht.
+
 ### Runtime-Unabhängigkeit, geprüft am 25.07.2026
 
 | Prüfung | Ergebnis |

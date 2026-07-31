@@ -124,6 +124,14 @@ struct CommandLineConfig {
     // Pixel fuer Pixel auf der CPU. Der GPU-Weg zeichnet in das Geraet des
     // Spiels; bleibt danach etwas schwarz, trennt dieser Schalter die Ursache.
     bool disableGpuHud{false};
+    // Diagnostic escape hatch for comparing against beta.7's immediate
+    // CPU-readback scheduling (the old end-of-Present spin stays removed).
+    bool syncCpuBridge{false};
+    // Measures the game's unmodified Present rate while leaving the proxy,
+    // OpenXR host, and gameplay hooks loaded. No frame is copied to the host.
+    bool disableCapture{false};
+    // Diagnostic rollback for the three verified Jupiter EX input patches.
+    bool disableHidFpsFix{false};
 };
 
 CommandLineConfig ReadConfig() noexcept {
@@ -161,10 +169,112 @@ CommandLineConfig ReadConfig() noexcept {
         } else if (_wcsicmp(
                        arguments[index], L"-fearvr-no-gpu-hud") == 0) {
             config.disableGpuHud = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-fearvr-sync-cpu-bridge") == 0) {
+            config.syncCpuBridge = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-fearvr-no-capture") == 0) {
+            config.disableCapture = true;
+        } else if (_wcsicmp(
+                       arguments[index],
+                       L"-fearvr-no-hid-fps-fix") == 0) {
+            config.disableHidFpsFix = true;
         }
     }
     LocalFree(arguments);
     return config;
+}
+
+enum class HidFpsFixResult {
+    Applied,
+    AlreadyApplied,
+    UnsupportedExecutable,
+    ByteMismatch,
+    ProtectFailed
+};
+
+HidFpsFixResult ApplyVerifiedHidFpsFix() noexcept {
+    // Steam F.E.A.R. 1.08, identified independently by the release installer
+    // and verified here again before touching executable memory.
+    constexpr DWORD kFearSteam108Timestamp = 0x44EF6AE6;
+    struct Patch {
+        std::uintptr_t rva;
+        const std::uint8_t* expected;
+        std::size_t size;
+    };
+    static constexpr std::uint8_t kHidControllerInit1[] = {
+        0x6A, 0x00, 0x6A, 0x00, 0xFF, 0x15, 0x70, 0xC0, 0x54, 0x00,
+        0x50, 0x68, 0xC0, 0x0C, 0x48, 0x00, 0x6A, 0x0D, 0xFF, 0x15,
+        0x3C, 0xC4, 0x54, 0x00, 0xA3, 0xBC, 0x5B, 0x57, 0x00};
+    static constexpr std::uint8_t kHidControllerInit2[] = {
+        0x8B, 0x3F, 0x8B, 0x0F, 0x6A, 0x01, 0x8D, 0x54, 0x24, 0x0C,
+        0x52, 0x68, 0xD0, 0x2E, 0x48, 0x00, 0x6A, 0x01, 0x57, 0xFF,
+        0x51, 0x10};
+    static constexpr std::uint8_t kLegacyJoystickInit[] = {
+        0x6A, 0x02, 0x57, 0x8B, 0xCE, 0xE8, 0x60, 0xFE, 0xFF, 0xFF,
+        0x8B, 0x44, 0x24, 0x14, 0x83, 0xC7, 0x10, 0x3B, 0xF8, 0x75,
+        0xEB, 0x8B, 0x7C, 0x24, 0x10};
+    static constexpr Patch kPatches[] = {
+        {0x84057, kHidControllerInit1, sizeof(kHidControllerInit1)},
+        {0x840DD, kHidControllerInit2, sizeof(kHidControllerInit2)},
+        {0x84166, kLegacyJoystickInit, sizeof(kLegacyJoystickInit)}};
+
+    auto* const base = reinterpret_cast<std::uint8_t*>(
+        GetModuleHandleW(nullptr));
+    if (base == nullptr) {
+        return HidFpsFixResult::UnsupportedExecutable;
+    }
+    const auto* const dos =
+        reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return HidFpsFixResult::UnsupportedExecutable;
+    }
+    const auto* const nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->FileHeader.TimeDateStamp != kFearSteam108Timestamp) {
+        return HidFpsFixResult::UnsupportedExecutable;
+    }
+
+    bool allNops = true;
+    for (const Patch& patch : kPatches) {
+        const std::uint8_t* const target = base + patch.rva;
+        bool patchIsNops = true;
+        for (std::size_t index = 0; index < patch.size; ++index) {
+            patchIsNops = patchIsNops && target[index] == 0x90;
+        }
+        if (!patchIsNops &&
+            std::memcmp(target, patch.expected, patch.size) != 0) {
+            return HidFpsFixResult::ByteMismatch;
+        }
+        allNops = allNops && patchIsNops;
+    }
+    if (allNops) {
+        return HidFpsFixResult::AlreadyApplied;
+    }
+
+    constexpr std::uintptr_t kFirstRva = 0x84057;
+    constexpr std::uintptr_t kLastRva =
+        0x84166 + sizeof(kLegacyJoystickInit);
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(
+            base + kFirstRva, kLastRva - kFirstRva,
+            PAGE_EXECUTE_READWRITE, &oldProtection)) {
+        return HidFpsFixResult::ProtectFailed;
+    }
+    for (const Patch& patch : kPatches) {
+        std::memset(base + patch.rva, 0x90, patch.size);
+    }
+    DWORD ignored = 0;
+    VirtualProtect(
+        base + kFirstRva, kLastRva - kFirstRva,
+        oldProtection, &ignored);
+    FlushInstructionCache(
+        GetCurrentProcess(), base + kFirstRva,
+        kLastRva - kFirstRva);
+    return HidFpsFixResult::Applied;
 }
 
 volatile LONG* AtomicState(FearVrSlot& slot) noexcept {
@@ -193,6 +303,24 @@ struct SlotResource {
     ComPtr<IDirect3DSurface9> surface;
     ComPtr<IDirect3DQuery9> completion;
     HANDLE sharedHandle{nullptr};
+};
+
+constexpr std::size_t kCpuCaptureQueueSize = 3;
+
+// Classic D3D9 cannot expose a render target directly to the D3D9Ex bridge
+// device. Keep the final eye images on the game GPU until an event query says
+// the copies have completed. Only then perform GetRenderTargetData. This moves
+// the unavoidable CPU transfer off the critical end-of-frame dependency:
+// Present never waits for the frame it has just rendered.
+struct CpuCaptureFrame {
+    std::array<ComPtr<IDirect3DTexture9>, FEARVR_EYE_COUNT> texture;
+    std::array<ComPtr<IDirect3DSurface9>, FEARVR_EYE_COUNT> surface;
+    ComPtr<IDirect3DQuery9> completion;
+    std::uint64_t frameId{0};
+    std::uint32_t renderModeGeneration{0};
+    bool active{false};
+    bool stereo{false};
+    bool flatPanel{false};
 };
 
 enum class TransferMode {
@@ -809,6 +937,48 @@ public:
         logger_.Write(level, event, message);
     }
 
+    void ApplyEngineFixes() noexcept {
+        if (config_.disableHidFpsFix) {
+            logger_.Write(
+                "WARN", "hid_fps_fix_disabled",
+                "Jupiter EX HID initialization remains unmodified.");
+            return;
+        }
+        const HidFpsFixResult result = ApplyVerifiedHidFpsFix();
+        switch (result) {
+        case HidFpsFixResult::Applied:
+            logger_.Write(
+                "INFO", "hid_fps_fix_applied",
+                "Verified Steam 1.08 ranges 0x84057, 0x840DD and "
+                "0x84166 disabled redundant HID/joystick initialization.");
+            break;
+        case HidFpsFixResult::AlreadyApplied:
+            logger_.Write(
+                "INFO", "hid_fps_fix_already_applied",
+                "All three verified Jupiter EX input ranges were already "
+                "disabled.");
+            break;
+        case HidFpsFixResult::UnsupportedExecutable:
+            logger_.Write(
+                "WARN", "hid_fps_fix_unsupported_executable",
+                "Executable timestamp is not Steam F.E.A.R. 1.08; no bytes "
+                "were changed.");
+            break;
+        case HidFpsFixResult::ByteMismatch:
+            logger_.Write(
+                "ERROR", "hid_fps_fix_byte_mismatch",
+                "At least one Jupiter EX input range did not match; no "
+                "bytes were changed.");
+            break;
+        case HidFpsFixResult::ProtectFailed:
+            logger_.Write(
+                "ERROR", "hid_fps_fix_protect_failed",
+                "VirtualProtect rejected the verified input ranges; no "
+                "bytes were changed.");
+            break;
+        }
+    }
+
     void CapturePresent(IDirect3DDevice9* device) noexcept {
         if (device == nullptr || config_.sessionId == 0) {
             return;
@@ -820,6 +990,32 @@ public:
         }
 
         InterlockedIncrement64(Atomic64(shared_->gameHeartbeat));
+        if (config_.disableCapture) {
+            const auto now = std::chrono::steady_clock::now();
+            if (bypassPresentCount_ == 0) {
+                bypassPresentWindowStart_ = now;
+            }
+            ++bypassPresentCount_;
+            if (bypassPresentCount_ % 300 == 0) {
+                const auto elapsedMicroseconds =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        now - bypassPresentWindowStart_).count();
+                const double fps = elapsedMicroseconds > 0
+                    ? 300'000'000.0 /
+                          static_cast<double>(elapsedMicroseconds)
+                    : 0.0;
+                std::ostringstream message;
+                message.setf(std::ios::fixed);
+                message.precision(1);
+                message << "presents=300 fps=" << fps
+                        << " total=" << bypassPresentCount_;
+                logger_.Write(
+                    "INFO", "capture_bypass_present_rate",
+                    message.str());
+                bypassPresentWindowStart_ = now;
+            }
+            return;
+        }
         PollPending();
         UpdateHostConnection();
         EnsureDeviceMetadata(device);
@@ -851,10 +1047,25 @@ public:
         if (!EnsureResources(device, description.Width, description.Height)) {
             return;
         }
-        if (pending_.active) {
+
+        const bool stereo =
+            stereoFrameReady_ &&
+            stereoEyeCaptured_[FEARVR_EYE_LEFT] &&
+            stereoEyeCaptured_[FEARVR_EYE_RIGHT];
+        const bool asyncCpuCapture =
+            transferMode_ == TransferMode::CpuViaD3D9Ex &&
+            !config_.syncCpuBridge &&
+            (!stereo || !config_.stereoHudEnabled ||
+             hudCompositor_.ready());
+        if (asyncCpuCapture) {
+            // Complete an older GPU staging copy before queuing this frame.
+            // Neither operation waits for the frame currently being
+            // presented. If the staging query is not ready, the game keeps
+            // running and the headset reuses its last complete image.
+            ProcessCpuCaptureQueue(device);
+            QueueCpuCapture(device, backBuffer.Get(), stereo);
             return;
         }
-
         std::uint32_t slotIndex = 0;
         if (!ClaimWritablePair(slotIndex)) {
             ++droppedFrames_;
@@ -866,10 +1077,6 @@ public:
             return;
         }
 
-        const bool stereo =
-            stereoFrameReady_ &&
-            stereoEyeCaptured_[FEARVR_EYE_LEFT] &&
-            stereoEyeCaptured_[FEARVR_EYE_RIGHT];
         const std::uint64_t frameId =
             stereo ? stereoFrameId_ : ++frameId_;
         if (stereo && frameId > frameId_) {
@@ -926,18 +1133,14 @@ public:
                 static_cast<LONG>(~FEARVR_BF_STEREO_ACTIVE));
         }
 
-        pending_.active = true;
-        pending_.slotIndex = slotIndex;
-        pending_.frameId = frameId;
-        pending_.generation = generation;
-
-        const ULONGLONG deadline = GetTickCount64() + 3;
-        do {
-            if (PollPending()) {
-                break;
-            }
-            SwitchToThread();
-        } while (GetTickCount64() < deadline);
+        PendingFrame& pending = pending_[slotIndex];
+        pending.active = true;
+        pending.slotIndex = slotIndex;
+        pending.frameId = frameId;
+        pending.generation = generation;
+        // Completion is polled at the beginning of a later Present. Waiting
+        // here couples the game's frame rate to the bridge GPU and was the
+        // source of pause/resume wait cascades.
     }
 
     void BeforeReset() noexcept {
@@ -1096,6 +1299,10 @@ public:
             return;
         }
         menuActive_ = requested;
+        ++renderModeGeneration_;
+        if (renderModeGeneration_ == 0) {
+            ++renderModeGeneration_;
+        }
         ClearStereoFrame();
         if (shared_ != nullptr) {
             InterlockedAnd(
@@ -1744,6 +1951,39 @@ private:
         return true;
     }
 
+    bool CreateCpuCaptureQueue(IDirect3DDevice9* gameDevice,
+                               UINT width, UINT height) noexcept {
+        for (CpuCaptureFrame& frame : cpuCaptureQueue_) {
+            for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
+                HRESULT result = gameDevice->CreateTexture(
+                    width, height, 1, D3DUSAGE_RENDERTARGET,
+                    D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                    frame.texture[eye].ReleaseAndGetAddressOf(), nullptr);
+                if (FAILED(result)) {
+                    LogHresult("cpu_capture_queue_create_failed", result);
+                    return false;
+                }
+                result = frame.texture[eye]->GetSurfaceLevel(
+                    0, frame.surface[eye].ReleaseAndGetAddressOf());
+                if (FAILED(result)) {
+                    LogHresult("cpu_capture_queue_surface_failed", result);
+                    return false;
+                }
+            }
+            HRESULT result = gameDevice->CreateQuery(
+                D3DQUERYTYPE_EVENT,
+                frame.completion.ReleaseAndGetAddressOf());
+            if (FAILED(result) || !frame.completion) {
+                LogHresult("cpu_capture_queue_query_failed", result);
+                return false;
+            }
+        }
+        cpuCaptureRead_ = 0;
+        cpuCaptureWrite_ = 0;
+        cpuCaptureCount_ = 0;
+        return true;
+    }
+
     bool CreateCpuInteropResources(IDirect3DDevice9* gameDevice,
                                    UINT width, UINT height) noexcept {
         using Direct3DCreate9ExFunction =
@@ -1835,6 +2075,9 @@ private:
             0, gameCapture_.ReleaseAndGetAddressOf());
         if (FAILED(result)) {
             LogHresult("cpu_bridge_capture_surface_failed", result);
+            return false;
+        }
+        if (!CreateCpuCaptureQueue(gameDevice, width, height)) {
             return false;
         }
         result = gameDevice->CreateOffscreenPlainSurface(
@@ -2038,6 +2281,269 @@ private:
             return false;
         }
         return true;
+    }
+
+    bool QueueCpuCapture(IDirect3DDevice9* device,
+                         IDirect3DSurface9* backBuffer,
+                         bool stereo) noexcept {
+        if (cpuCaptureCount_ == kCpuCaptureQueueSize) {
+            ++cpuCaptureQueueDrops_;
+            if (stereo) {
+                ClearStereoFrame();
+            }
+            return false;
+        }
+
+        CpuCaptureFrame& frame = cpuCaptureQueue_[cpuCaptureWrite_];
+        if (frame.active || !frame.completion) {
+            ++cpuCaptureQueueDrops_;
+            if (stereo) {
+                ClearStereoFrame();
+            }
+            return false;
+        }
+
+        std::array<IDirect3DSurface9*, FEARVR_EYE_COUNT> source{
+            backBuffer, backBuffer};
+        bool flatPanel = false;
+        bool gpuHudComposited = false;
+        std::uint64_t changedPixels = 0;
+        const std::uint64_t totalPixels =
+            static_cast<std::uint64_t>(width_) * height_;
+
+        if (stereo) {
+            if (config_.stereoHudEnabled && hudCompositor_.ready()) {
+                HRESULT result = device->StretchRect(
+                    backBuffer, nullptr, gameCapture_.Get(), nullptr,
+                    D3DTEXF_NONE);
+                if (FAILED(result)) {
+                    LogHresult(
+                        "async_stereo_hud_present_stretch_failed", result);
+                    ClearStereoFrame();
+                    return false;
+                }
+                changedPixels = static_cast<std::uint64_t>(
+                    hudCompositor_.coverageRatio() *
+                        static_cast<double>(totalPixels) + 0.5);
+                flatPanel = menuActive_;
+                const bool composite =
+                    !flatPanel &&
+                    IsSafePostWorldCoverage(changedPixels, totalPixels);
+                IDirect3DTexture9* const eyeWorld[FEARVR_EYE_COUNT] = {
+                    stereoCaptureTexture_[FEARVR_EYE_LEFT].Get(),
+                    stereoCaptureTexture_[FEARVR_EYE_RIGHT].Get()};
+                if (!hudCompositor_.Compose(
+                        device, gameCaptureTexture_.Get(),
+                        stereoCaptureTexture_[FEARVR_EYE_RIGHT].Get(),
+                        eyeWorld, composite, flatPanel, logger_)) {
+                    ClearStereoFrame();
+                    return false;
+                }
+                for (std::uint32_t eye = 0;
+                     eye < FEARVR_EYE_COUNT; ++eye) {
+                    source[eye] = hudCompositor_.CompositeSurface(eye);
+                }
+                gpuHudComposited = true;
+            } else {
+                for (std::uint32_t eye = 0;
+                     eye < FEARVR_EYE_COUNT; ++eye) {
+                    source[eye] = stereoCapture_[eye].Get();
+                }
+            }
+        }
+
+        const std::uint32_t sourceCount =
+            stereo ? FEARVR_EYE_COUNT : 1u;
+        for (std::uint32_t eye = 0; eye < sourceCount; ++eye) {
+            const HRESULT result = device->StretchRect(
+                source[eye], nullptr, frame.surface[eye].Get(), nullptr,
+                D3DTEXF_NONE);
+            if (FAILED(result)) {
+                LogHresult("cpu_capture_queue_stretch_failed", result);
+                if (stereo) {
+                    ClearStereoFrame();
+                }
+                return false;
+            }
+        }
+        const HRESULT queryResult =
+            frame.completion->Issue(D3DISSUE_END);
+        if (FAILED(queryResult)) {
+            LogHresult("cpu_capture_queue_issue_failed", queryResult);
+            if (stereo) {
+                ClearStereoFrame();
+            }
+            return false;
+        }
+
+        frame.stereo = stereo;
+        frame.flatPanel = flatPanel;
+        frame.renderModeGeneration = renderModeGeneration_;
+        frame.frameId = stereo ? stereoFrameId_ : ++frameId_;
+        if (stereo && frame.frameId > frameId_) {
+            frameId_ = frame.frameId;
+        }
+        frame.active = true;
+        cpuCaptureWrite_ =
+            (cpuCaptureWrite_ + 1) % kCpuCaptureQueueSize;
+        ++cpuCaptureCount_;
+        ++cpuCaptureQueued_;
+
+        if (gpuHudComposited) {
+            ++stereoHudFrames_;
+            if (stereoHudFrames_ == 1 ||
+                stereoHudFrames_ % 300 == 0) {
+                std::ostringstream message;
+                message << "changed_pixels=" << changedPixels
+                        << " coverage_percent="
+                        << (totalPixels == 0
+                                ? 0
+                                : changedPixels * 100u / totalPixels)
+                        << " mode="
+                        << (flatPanel ? "flat_panel" : "raised_hud")
+                        << " path=gpu_async";
+                logger_.Write(
+                    "INFO", "stereo_hud_async_staged", message.str());
+            }
+        }
+        if (stereo) {
+            ClearStereoFrame();
+        }
+        return true;
+    }
+
+    void ProcessCpuCaptureQueue(
+        IDirect3DDevice9* device) noexcept {
+        while (cpuCaptureCount_ != 0) {
+            CpuCaptureFrame& frame =
+                cpuCaptureQueue_[cpuCaptureRead_];
+            if (!frame.active || !frame.completion) {
+                frame.active = false;
+                cpuCaptureRead_ =
+                    (cpuCaptureRead_ + 1) % kCpuCaptureQueueSize;
+                --cpuCaptureCount_;
+                continue;
+            }
+
+            const HRESULT queryResult =
+                frame.completion->GetData(nullptr, 0, 0);
+            if (queryResult == S_FALSE) {
+                ++cpuCaptureQueryNotReady_;
+                return;
+            }
+            if (FAILED(queryResult)) {
+                LogHresult(
+                    "cpu_capture_queue_getdata_failed", queryResult);
+                frame.active = false;
+                cpuCaptureRead_ =
+                    (cpuCaptureRead_ + 1) % kCpuCaptureQueueSize;
+                --cpuCaptureCount_;
+                continue;
+            }
+
+            // A menu transition invalidates the image but never waits for it.
+            // Retire it only after the GPU query completes so its surfaces
+            // cannot be overwritten while commands still reference them.
+            if (frame.renderModeGeneration != renderModeGeneration_) {
+                frame.active = false;
+                cpuCaptureRead_ =
+                    (cpuCaptureRead_ + 1) % kCpuCaptureQueueSize;
+                --cpuCaptureCount_;
+                ++cpuCaptureModeDrops_;
+                continue;
+            }
+            std::uint32_t slotIndex = 0;
+            if (!ClaimWritablePair(slotIndex)) {
+                ++droppedFrames_;
+                return;
+            }
+
+            const std::uint64_t generation = ++generation_;
+            for (std::uint32_t eye = 0;
+                 eye < FEARVR_EYE_COUNT; ++eye) {
+                FearVrSlot& slot = shared_->slot[eye][slotIndex];
+                slot.frameId = frame.frameId;
+                slot.generation = generation;
+            }
+
+            const auto transferStart =
+                std::chrono::steady_clock::now();
+            bool uploaded = true;
+            if (frame.stereo) {
+                for (std::uint32_t eye = 0;
+                     eye < FEARVR_EYE_COUNT; ++eye) {
+                    if (!StageSurfaceViaCpu(
+                            device, frame.surface[eye].Get()) ||
+                        !UploadCpuSurface(eye, slotIndex)) {
+                        uploaded = false;
+                        break;
+                    }
+                }
+            } else {
+                // A mono Present feeds both protocol eyes, but its pixels
+                // only need to cross the classic-D3D9 readback boundary
+                // once. Upload the same CPU image to both shared slots.
+                uploaded = StageSurfaceViaCpu(
+                    device,
+                    frame.surface[FEARVR_EYE_LEFT].Get());
+                for (std::uint32_t eye = 0;
+                     uploaded && eye < FEARVR_EYE_COUNT; ++eye) {
+                    uploaded = UploadCpuSurface(eye, slotIndex);
+                }
+            }
+            const auto transferMicroseconds =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - transferStart)
+                        .count());
+            cpuCaptureTransferMaxMicroseconds_ = (std::max)(
+                cpuCaptureTransferMaxMicroseconds_,
+                transferMicroseconds);
+
+            if (!uploaded) {
+                ReleaseClaimedPair(slotIndex);
+            } else {
+                if (frame.stereo && !frame.flatPanel) {
+                    InterlockedOr(
+                        AtomicFlags(*shared_), FEARVR_BF_STEREO_ACTIVE);
+                    ++stereoFrames_;
+                } else {
+                    InterlockedAnd(
+                        AtomicFlags(*shared_),
+                        static_cast<LONG>(
+                            ~FEARVR_BF_STEREO_ACTIVE));
+                }
+                PendingFrame& pending = pending_[slotIndex];
+                pending.active = true;
+                pending.slotIndex = slotIndex;
+                pending.frameId = frame.frameId;
+                pending.generation = generation;
+                ++cpuCaptureTransferred_;
+            }
+
+            frame.active = false;
+            cpuCaptureRead_ =
+                (cpuCaptureRead_ + 1) % kCpuCaptureQueueSize;
+            --cpuCaptureCount_;
+
+            if (cpuCaptureTransferred_ != 0 &&
+                cpuCaptureTransferred_ % 300 == 0) {
+                std::ostringstream message;
+                message << "queued=" << cpuCaptureQueued_
+                        << " transferred=" << cpuCaptureTransferred_
+                        << " queue_drops=" << cpuCaptureQueueDrops_
+                        << " mode_drops=" << cpuCaptureModeDrops_
+                        << " query_not_ready="
+                        << cpuCaptureQueryNotReady_
+                        << " transfer_max_us="
+                        << cpuCaptureTransferMaxMicroseconds_;
+                logger_.Write(
+                    "INFO", "cpu_capture_pipeline", message.str());
+                cpuCaptureQueryNotReady_ = 0;
+                cpuCaptureTransferMaxMicroseconds_ = 0;
+            }
+            return;
+        }
     }
 
     bool CopyFrameViaCpu(IDirect3DDevice9* device,
@@ -2389,6 +2895,18 @@ private:
         presentedReadback_.Reset();
         rightWorldReadback_.Reset();
         gameReadback_.Reset();
+        for (CpuCaptureFrame& frame : cpuCaptureQueue_) {
+            frame.active = false;
+            frame.completion.Reset();
+            for (std::uint32_t eye = 0;
+                 eye < FEARVR_EYE_COUNT; ++eye) {
+                frame.surface[eye].Reset();
+                frame.texture[eye].Reset();
+            }
+        }
+        cpuCaptureRead_ = 0;
+        cpuCaptureWrite_ = 0;
+        cpuCaptureCount_ = 0;
         gameCapture_.Reset();
         gameCaptureTexture_.Reset();
         ClearStereoFrame();
@@ -2444,37 +2962,47 @@ private:
         }
     }
 
-    bool PollPending() noexcept {
-        if (!pending_.active) {
-            return true;
-        }
-        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
-            SlotResource& resource =
-                resources_[eye][pending_.slotIndex];
-            if (!resource.completion ||
-                resource.completion->GetData(
-                    nullptr, 0, D3DGETDATA_FLUSH) != S_OK) {
-                return false;
+    void PollPending() noexcept {
+        for (PendingFrame& pending : pending_) {
+            if (!pending.active) {
+                continue;
             }
-        }
+            bool complete = true;
+            for (std::uint32_t eye = 0;
+                 eye < FEARVR_EYE_COUNT; ++eye) {
+                SlotResource& resource =
+                    resources_[eye][pending.slotIndex];
+                if (!resource.completion ||
+                    resource.completion->GetData(
+                        nullptr, 0, D3DGETDATA_FLUSH) != S_OK) {
+                    complete = false;
+                    break;
+                }
+            }
+            if (!complete) {
+                continue;
+            }
 
-        MemoryBarrier();
-        for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
-            InterlockedExchange(
-                AtomicState(shared_->slot[eye][pending_.slotIndex]),
-                FEARVR_SLOT_READY);
+            MemoryBarrier();
+            for (std::uint32_t eye = 0;
+                 eye < FEARVR_EYE_COUNT; ++eye) {
+                InterlockedExchange(
+                    AtomicState(
+                        shared_->slot[eye][pending.slotIndex]),
+                    FEARVR_SLOT_READY);
+            }
+            SetEvent(frameReadyEvent_);
+            if (pending.frameId == 1 ||
+                pending.frameId % 300 == 0) {
+                std::ostringstream message;
+                message << "frame=" << pending.frameId
+                        << " generation=" << pending.generation
+                        << " slot=" << pending.slotIndex;
+                logger_.Write(
+                    "INFO", "frame_ready", message.str());
+            }
+            pending = {};
         }
-        SetEvent(frameReadyEvent_);
-        if (pending_.frameId == 1 ||
-            pending_.frameId % 300 == 0) {
-            std::ostringstream message;
-            message << "frame=" << pending_.frameId
-                    << " generation=" << pending_.generation
-                    << " slot=" << pending_.slotIndex;
-            logger_.Write("INFO", "frame_ready", message.str());
-        }
-        pending_ = {};
-        return true;
     }
 
     void LogHresult(const char* event, HRESULT result) noexcept {
@@ -2513,7 +3041,9 @@ private:
     std::array<std::array<SlotResource, FEARVR_SLOTS_PER_EYE>,
                FEARVR_EYE_COUNT>
         resources_{};
-    PendingFrame pending_{};
+    std::array<CpuCaptureFrame, kCpuCaptureQueueSize>
+        cpuCaptureQueue_{};
+    std::array<PendingFrame, FEARVR_SLOTS_PER_EYE> pending_{};
     UINT width_{0};
     UINT height_{0};
     std::uint32_t nextSlot_{0};
@@ -2523,11 +3053,22 @@ private:
     std::uint64_t stereoFrameId_{0};
     std::uint64_t stereoFrames_{0};
     std::uint64_t stereoHudFrames_{0};
+    std::uint64_t cpuCaptureQueued_{0};
+    std::uint64_t cpuCaptureTransferred_{0};
+    std::uint64_t cpuCaptureQueueDrops_{0};
+    std::uint64_t cpuCaptureModeDrops_{0};
+    std::uint64_t cpuCaptureQueryNotReady_{0};
+    std::uint64_t cpuCaptureTransferMaxMicroseconds_{0};
+    std::uint64_t bypassPresentCount_{0};
+    std::chrono::steady_clock::time_point bypassPresentWindowStart_{};
     std::uint64_t gameAdapterLuid_{0};
     std::uint64_t lastHostHeartbeat_{0};
     ULONGLONG lastHostHeartbeatTick_{0};
     ULONGLONG nextResourceRetryTick_{0};
     HWND companionWindow_{nullptr};
+    std::size_t cpuCaptureRead_{0};
+    std::size_t cpuCaptureWrite_{0};
+    std::size_t cpuCaptureCount_{0};
     TransferMode transferMode_{TransferMode::None};
     bool resourcesReady_{false};
     bool deviceMetadataReady_{false};
@@ -2544,6 +3085,7 @@ private:
     bool comfortKeyWasDown_{false};
     bool comfortModeEnabled_{false};
     bool menuActive_{false};
+    std::uint32_t renderModeGeneration_{1};
     std::uint32_t recenterGeneration_{0};
     std::uint32_t fovScalePercent_{
         FEARVR_FOV_SCALE_DEFAULT_PERCENT};
@@ -2975,6 +3517,10 @@ void OnDirect3D9Created(IDirect3D9* direct3D) noexcept {
 
 void OnDirect3D9ExCreated(IDirect3D9Ex* direct3D) noexcept {
     PatchD3D9(direct3D, true);
+}
+
+void ApplyEngineFixes() noexcept {
+    GetBridge().ApplyEngineFixes();
 }
 
 BOOL InstallLateD3D9Hooks() noexcept {

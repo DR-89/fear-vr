@@ -30,6 +30,7 @@ int main() {
                 input, fearvr::FEARVR_CMD_REVERSE)
                 .active);
 
+    input.moveY = 0.0F;
     input.moveX = -1.0F;
     const fearvr::FearVrCommandValue strafeAxis =
         fearvr::MapControllerCommand(
@@ -39,6 +40,18 @@ int main() {
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_STRAFE_LEFT)
                .active);
+
+    input.moveX = 1.0F;
+    input.moveY = 1.0F;
+    const float diagonalStrafe = fearvr::MapControllerCommand(
+        input, fearvr::FEARVR_CMD_STRAFE_AXIS).value;
+    const float diagonalForward = fearvr::MapControllerCommand(
+        input, fearvr::FEARVR_CMD_FORWARD_AXIS).value;
+    assert(NearlyEqual(diagonalStrafe, diagonalForward));
+    assert(NearlyEqual(
+        std::sqrt(diagonalStrafe * diagonalStrafe +
+                  diagonalForward * diagonalForward),
+        1.0F));
 
     input.turnX = 0.7F;
     assert(fearvr::MapControllerCommand(

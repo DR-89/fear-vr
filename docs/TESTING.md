@@ -327,7 +327,10 @@ Automatisiert bestanden:
 - Protokoll v3 ist in x86 und x64 layoutidentisch;
 - `FearVrInputState` und `FearVrHapticRequest` besitzen feste POD-Größen;
 - Fokusverlust neutralisiert Sticks, Trigger, Grip und alle Tasten;
-- Deadzone, nicht-endliche Werte und Achsenbegrenzung sind getestet;
+- skalare und radiale Deadzone, nicht-endliche Werte, diagonale
+  Richtungs-/Betragserhaltung und Achsenbegrenzung sind getestet;
+- kopfrelative Vorwärts- und Seitwärtsbewegung sind für eine 90-Grad-
+  HMD-Drehung ohne Headset getestet;
 - x86 und x64 bauen mit `/W4 /WX`, jeweils 6/6 CTest-Tests grün.
 
 Erster Lauf `logs\m5-fear-20260724-181253`:

@@ -1108,11 +1108,15 @@ private:
                     if (imageFrameId != 0 &&
                         candidate.frameId == imageFrameId) {
                         imagePose = &candidate;
+                        const std::uint64_t framesBehind =
+                            requestFrameId_ >= imageFrameId
+                                ? requestFrameId_ - imageFrameId
+                                : 0;
+                        ++imageAgeSamples_;
+                        imageAgeTotalFrames_ += framesBehind;
+                        imageAgeMaxFrames_ = (std::max)(
+                            imageAgeMaxFrames_, framesBehind);
                         if (!imagePoseMatchLogged_) {
-                            const std::uint64_t framesBehind =
-                                requestFrameId_ >= imageFrameId
-                                    ? requestFrameId_ - imageFrameId
-                                    : 0;
                             logger_.Write(
                                 "INFO", "image_pose_matched",
                                 "image_frame=" +
@@ -1253,13 +1257,13 @@ private:
                 // Einreichung kein neues Spielbild importiert wurde. Das
                 // passiert regulär, sobald die XR-Displayrate über der
                 // Spiel-FPS liegt.
-                const std::uint64_t imageFrameId =
-                    ipcBridge_ ? ipcBridge_->LatestFrameId() : 0;
-                if (imageFrameId != 0 &&
-                    imageFrameId == lastSubmittedImageFrameId_) {
+                const std::uint64_t imageGeneration =
+                    ipcBridge_ ? ipcBridge_->LatestGeneration() : 0;
+                if (imageGeneration != 0 &&
+                    imageGeneration == lastSubmittedImageGeneration_) {
                     ++reusedFrames_;
                 }
-                lastSubmittedImageFrameId_ = imageFrameId;
+                lastSubmittedImageGeneration_ = imageGeneration;
                 ++submittedFrames_;
             } else {
                 logger_.Write("WARN", "tracking_invalid",
@@ -1370,6 +1374,9 @@ private:
                 << " xr_fps=" << xrFps
                 << " game_fps=" << gameFps
                 << " reused=" << reusedFrames_
+                << " image_age_avg_frames="
+                << average(imageAgeTotalFrames_, imageAgeSamples_)
+                << " image_age_max_frames=" << imageAgeMaxFrames_
                 << " render_left_avg_us="
                 << average(left.totalMicroseconds, left.samples)
                 << " render_left_max_us=" << left.maxMicroseconds
@@ -1390,6 +1397,9 @@ private:
                 << " handles=" << CurrentHandleCount();
         logger_.Write("INFO", "perf_frame", message.str());
         reusedFrames_ = 0;
+        imageAgeSamples_ = 0;
+        imageAgeTotalFrames_ = 0;
+        imageAgeMaxFrames_ = 0;
         frameCpuMaxMicroseconds_ = 0;
         swapWaitMaxMicroseconds_ = 0;
         inputMaxMicroseconds_ = 0;
@@ -1593,6 +1603,9 @@ private:
     std::chrono::steady_clock::time_point perfWindowStart_{
         std::chrono::steady_clock::now()};
     std::uint64_t reusedFrames_{0};
+    std::uint64_t imageAgeSamples_{0};
+    std::uint64_t imageAgeTotalFrames_{0};
+    std::uint64_t imageAgeMaxFrames_{0};
     std::uint64_t frameCpuMaxMicroseconds_{0};
     std::uint64_t frameSwapWaitMicroseconds_{0};
     std::uint64_t swapWaitMaxMicroseconds_{0};
@@ -1605,7 +1618,7 @@ private:
     std::uint64_t endFrameMaxMicroseconds_{0};
     std::uint64_t longFrames_{0};
     std::uint64_t poseFallbacks_{0};
-    std::uint64_t lastSubmittedImageFrameId_{0};
+    std::uint64_t lastSubmittedImageGeneration_{0};
     std::uint64_t submittedFrames_{0};
     std::uint64_t requestFrameId_{0};
     std::uint32_t loggedFovScalePercent_{0};

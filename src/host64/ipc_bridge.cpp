@@ -153,11 +153,16 @@ bool IpcBridge::TryConnect() {
         MakeIpcObjectName(sessionId_, L"FrameReady");
     const std::wstring consumedName =
         MakeIpcObjectName(sessionId_, L"SlotConsumed");
+    const std::wstring renderRequestName =
+        MakeIpcObjectName(sessionId_, L"RenderRequest");
     frameReadyEvent_ =
         OpenEventW(SYNCHRONIZE, FALSE, frameReadyName.c_str());
     slotConsumedEvent_ =
         OpenEventW(EVENT_MODIFY_STATE, FALSE, consumedName.c_str());
-    if (frameReadyEvent_ == nullptr || slotConsumedEvent_ == nullptr) {
+    renderRequestEvent_ =
+        OpenEventW(EVENT_MODIFY_STATE, FALSE, renderRequestName.c_str());
+    if (frameReadyEvent_ == nullptr || slotConsumedEvent_ == nullptr ||
+        renderRequestEvent_ == nullptr) {
         Disconnect();
         return false;
     }
@@ -198,6 +203,10 @@ void IpcBridge::Disconnect() noexcept {
     if (slotConsumedEvent_ != nullptr) {
         CloseHandle(slotConsumedEvent_);
         slotConsumedEvent_ = nullptr;
+    }
+    if (renderRequestEvent_ != nullptr) {
+        CloseHandle(renderRequestEvent_);
+        renderRequestEvent_ = nullptr;
     }
     if (gameProcessHandle_ != nullptr) {
         CloseHandle(gameProcessHandle_);
@@ -310,6 +319,7 @@ void IpcBridge::PublishRenderRequest(
     shared_->request = request;
     MemoryBarrier();
     InterlockedIncrement64(Atomic64(shared_->requestSequence));
+    SetEvent(renderRequestEvent_);
 }
 
 void IpcBridge::PublishInputState(const FearVrInputState& input) {
@@ -422,6 +432,7 @@ bool IpcBridge::ConsumeLatestPair() {
         (std::max)(copyStats_.maxMicroseconds, copyMicroseconds);
 
     latestFrameId_ = frameId;
+    latestGeneration_ = generation;
     ++consumedFrames_;
     if (consumedFrames_ == 1 || consumedFrames_ % 300 == 0) {
         std::ostringstream message;
@@ -667,6 +678,10 @@ ID3D11ShaderResourceView* IpcBridge::ImageView(
 
 std::uint64_t IpcBridge::LatestFrameId() const noexcept {
     return latestFrameId_;
+}
+
+std::uint64_t IpcBridge::LatestGeneration() const noexcept {
+    return latestGeneration_;
 }
 
 BridgeCopyStats IpcBridge::TakeCopyStats() noexcept {

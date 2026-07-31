@@ -186,6 +186,14 @@ extern "C" BOOL FearVr_GetRenderRequest(FearVrRenderRequest* request) {
     return fearvr::GetRenderRequest(request);
 }
 
+extern "C" BOOL FearVr_WaitForNewRenderRequest(
+    std::uint64_t previousFrameId,
+    std::uint32_t timeoutMilliseconds,
+    FearVrRenderRequest* request) {
+    return fearvr::WaitForNewRenderRequest(
+        previousFrameId, timeoutMilliseconds, request);
+}
+
 extern "C" BOOL FearVr_GetInputState(FearVrInputState* input) {
     return fearvr::GetInputState(input);
 }

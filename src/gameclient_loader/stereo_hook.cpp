@@ -52,6 +52,9 @@ using RegisterStereoToggleFunction =
     void(__cdecl*)(StereoToggleCallback);
 using GetRenderRequestFunction =
     BOOL(__cdecl*)(FearVrRenderRequest*);
+using WaitForNewRenderRequestFunction =
+    BOOL(__cdecl*)(
+        std::uint64_t, std::uint32_t, FearVrRenderRequest*);
 using GetInputStateFunction =
     BOOL(__cdecl*)(FearVrInputState*);
 using SubmitHapticRequestFunction =
@@ -119,6 +122,7 @@ RequestRecenterFunction g_requestRecenter = nullptr;
 IsFlatPanelActiveFunction g_isFlatPanelActive = nullptr;
 RegisterStereoToggleFunction g_registerStereoToggle = nullptr;
 GetRenderRequestFunction g_getRenderRequest = nullptr;
+WaitForNewRenderRequestFunction g_waitForNewRenderRequest = nullptr;
 GetInputStateFunction g_getInputState = nullptr;
 SubmitHapticRequestFunction g_submitHapticRequest = nullptr;
 BeginEyeFunction g_beginEye = nullptr;
@@ -518,6 +522,7 @@ bool g_disableBodyPieceHiding = false;
 // genau einmal pro Frame, wie in Retail. Pruefschalter fuer die Frage, ob der
 // zweite Durchlauf mehr als nur Geometrie erneut ausloest.
 bool g_disableStereoRender = false;
+std::uint64_t g_lastStereoRenderRequestId = 0;
 // Laesst den Client-Input-Hook installiert, schreibt aber keine Kommandobits
 // mehr in Retails CBindMgr. Trennt "Schreibzugriff auf den Bind-Manager" von
 // "Hook auf die Bindungsabfrage und synthetische Tastendruecke".
@@ -4193,8 +4198,25 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     FearVrRenderRequest request{};
     if (!g_getRenderRequest(&request) ||
         (request.flags & FEARVR_RF_VALID) == 0 ||
-        (request.flags & FEARVR_RF_FLATSCREEN) != 0 ||
         request.frameId == 0) {
+        return g_renderCameraWithOverride(
+            renderer, camera, techniqueOverride);
+    }
+    if (g_waitForNewRenderRequest != nullptr &&
+        g_lastStereoRenderRequestId != 0) {
+        g_stereoStep = "wait_for_fresh_render_request";
+        FearVrRenderRequest freshRequest{};
+        constexpr std::uint32_t kMaximumPacingWaitMilliseconds = 20;
+        if (g_waitForNewRenderRequest(
+                request.frameId,
+                kMaximumPacingWaitMilliseconds,
+                &freshRequest) &&
+            (freshRequest.flags & FEARVR_RF_VALID) != 0 &&
+            freshRequest.frameId != 0) {
+            request = freshRequest;
+        }
+    }
+    if ((request.flags & FEARVR_RF_FLATSCREEN) != 0) {
         return g_renderCameraWithOverride(
             renderer, camera, techniqueOverride);
     }
@@ -4530,6 +4552,7 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         return g_renderCameraWithOverride(
             renderer, camera, techniqueOverride);
     }
+    g_lastStereoRenderRequestId = request.frameId;
     if (InterlockedCompareExchange(
             &g_firstStereoFrameLogged, 1, 0) == 0) {
         Report(
@@ -9230,6 +9253,9 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     g_getRenderRequest =
         Resolve<GetRenderRequestFunction>(
             bridge, "FearVr_GetRenderRequest");
+    g_waitForNewRenderRequest =
+        Resolve<WaitForNewRenderRequestFunction>(
+            bridge, "FearVr_WaitForNewRenderRequest");
     g_getInputState =
         Resolve<GetInputStateFunction>(
             bridge, "FearVr_GetInputState");
@@ -9259,7 +9285,9 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
         g_setComfortModeEnabled == nullptr ||
         g_requestRecenter == nullptr ||
         g_registerStereoToggle == nullptr ||
-        g_getRenderRequest == nullptr || g_beginEye == nullptr ||
+        g_getRenderRequest == nullptr ||
+        g_waitForNewRenderRequest == nullptr ||
+        g_beginEye == nullptr ||
         g_captureEye == nullptr || g_endStereoFrame == nullptr) {
         Report(
             "ERROR", "stereo_bridge_exports_missing",

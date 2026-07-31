@@ -427,6 +427,12 @@ können weiterhin direkt in der INI gesetzt werden.
    jump kick and slide kick toggles.
 6. **Advanced:** weapon diagnostics and Reset VR defaults.
 
+When simulated weapon weight is enabled, every shot confirmed by Retail adds
+a short backward kick and muzzle rise. Profile weight scales the impulse,
+while position and rotation follow rates control recovery. The recoil uses the
+same successful fire-vector call as controller vibration, so an empty or
+otherwise rejected trigger pull does not move the weapon.
+
 `Show arms` ist standardmäßig `Off`: Nur Ober- und Unterarme werden über ein
 lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine
 bleiben sichtbar. `On` setzt sofort das unveränderte Retail-Material ein.

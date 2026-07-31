@@ -318,6 +318,13 @@ something is built but not yet verified in-game, it's noted.
   positional follow, rotational follow, and catch-up strength through safe
   presets. Exact values remain available in `fearvr.ini` under `[VR]` or
   `[WeaponWeight.<model-name>]`. Unknown models use the `[VR]` defaults.
+  While simulated weight is enabled, each successful shot adds a short
+  backward kick and muzzle rise to the same spring: heavier profiles recoil
+  less, and their position/rotation follow values control recovery. Empty
+  trigger pulls do not recoil. Initial impulse strength is pending in-game
+  comfort and weapon-feel verification.
+  `WeaponWeightDiagnostics=1` emits rate-limited raw/filter error and velocity
+  telemetry, including the current recoil offsets.
   Recommended ranges are `0.10-4.00`, `2.0-40.0`, `2.0-40.0`, and
   `0.0-4.0`, respectively.
 

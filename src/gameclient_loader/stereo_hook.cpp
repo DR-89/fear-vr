@@ -38,6 +38,7 @@
 #include "two_handed_grip.h"
 #include "two_handed_jump_camera.h"
 #include "vr_menu_scroll.h"
+#include "weapon_recoil.h"
 #include "weapon_weight.h"
 #include "vr_menu_model.h"
 
@@ -318,6 +319,9 @@ volatile LONG g_vrMuzzleFlashCreatedLogged = 0;
 volatile LONG g_vrMuzzleFlashActiveLogged = 0;
 volatile LONG g_vrMuzzleFlashRenderedLogged = 0;
 void RenderVrMuzzleFlash(HLOCALOBJ camera) noexcept;
+ULONGLONG g_lastWeaponRecoilTick = 0;
+volatile LONG g_pendingWeaponRecoilShots = 0;
+volatile LONG g_weaponRecoilActiveLogged = 0;
 std::uint32_t g_lastMenuButtons = 0;
 bool g_lastMenuTriggerDown = false;
 bool g_menuAxisDown[4]{};
@@ -728,6 +732,8 @@ bool g_weaponWeightDiagnosticsEnabled = false;
 WeaponWeightProfile g_defaultWeaponWeightProfile{};
 struct WeightedWeaponInputState {
     WeaponWeightPairState filters;
+    WeaponRecoilState recoil;
+    WeaponRecoilOffset recoilOffset;
     FearVrPose aimPose{};
     FearVrPose gripPose{};
     WeaponWeightDiagnostics aimDiagnostics;
@@ -6289,6 +6295,8 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     ResetWeaponWeightPair(
         g_weightedWeaponInput.filters,
         WeaponWeightResetReason::sceneLoaded);
+    InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+    g_lastWeaponRecoilTick = 0;
 
     if (hadState) {
         Report(
@@ -8592,6 +8600,9 @@ void PrepareWeightedWeaponPoses(
         // sensitive update path, then load an explicit incoming profile.
         ResetWeaponWeightPair(
             weighted.filters, WeaponWeightResetReason::weaponChanged);
+        ResetWeaponRecoil(weighted.recoil);
+        InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+        g_lastWeaponRecoilTick = 0;
         weighted.weapon = weapon;
         weighted.lastSampleId = 0;
         weighted.lastAimValidTick = 0;
@@ -8605,6 +8616,7 @@ void PrepareWeightedWeaponPoses(
             weighted.resetGeneration < 0
                 ? WeaponWeightResetReason::referenceSpaceChanged
                 : WeaponWeightResetReason::teleportedOrRecentered);
+        ResetWeaponRecoil(weighted.recoil);
         weighted.resetGeneration = resetGeneration;
         weighted.lastSampleId = 0;
         weighted.lastAimValidTick = 0;
@@ -8616,6 +8628,9 @@ void PrepareWeightedWeaponPoses(
                 weighted.filters, WeaponWeightResetReason::enabledChanged);
         }
         weighted.enabledOnLastUpdate = false;
+        ResetWeaponRecoil(weighted.recoil);
+        weighted.recoilOffset = {};
+        InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
         return;
     }
     if (!weighted.enabledOnLastUpdate) {
@@ -8687,17 +8702,38 @@ void PrepareWeightedWeaponPoses(
         }
     }
 
+    const LONG pendingRecoilShots =
+        InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+    weighted.recoilOffset = {};
+    if (aimFresh && gripFresh) {
+        UpdateWeaponRecoil(
+            weighted.recoil, MonotonicNanoseconds(), true,
+            weighted.profile,
+            pendingRecoilShots > 0
+                ? static_cast<std::uint32_t>(pendingRecoilShots) : 0U,
+            weighted.recoilOffset);
+        WeaponWeightPose recoilingAim = ToWeaponWeightPose(aimPose);
+        WeaponWeightPose recoilingGrip = ToWeaponWeightPose(gripPose);
+        ApplyWeaponRecoil(
+            weighted.recoilOffset, recoilingAim, recoilingGrip);
+        aimPose = FromWeaponWeightPose(recoilingAim);
+        gripPose = FromWeaponWeightPose(recoilingGrip);
+    } else {
+        ResetWeaponRecoil(weighted.recoil);
+    }
+
     if (g_weaponWeightDiagnosticsEnabled &&
         (weighted.lastDiagnosticTick == 0 ||
          now - weighted.lastDiagnosticTick >= 1000)) {
         weighted.lastDiagnosticTick = now;
-        char message[384]{};
+        char message[448]{};
         std::snprintf(
             message, sizeof(message),
             "profile=%s valid=%d pos_error=%.2fcm angle_error=%.2fdeg "
             "position_omega=%.2f rotation_omega=%.2f "
             "linear_velocity=(%.3f,%.3f,%.3f) "
-            "angular_velocity=(%.3f,%.3f,%.3f) reset=%u",
+            "angular_velocity=(%.3f,%.3f,%.3f) "
+            "recoil=(%.2fcm,%.2fdeg) reset=%u",
             weighted.profileName, aimFresh && gripFresh ? 1 : 0,
             weighted.aimDiagnostics.positionalErrorMeters * 100.0F,
             weighted.aimDiagnostics.angularErrorRadians *
@@ -8710,6 +8746,9 @@ void PrepareWeightedWeaponPoses(
             weighted.aimDiagnostics.angularVelocity.x,
             weighted.aimDiagnostics.angularVelocity.y,
             weighted.aimDiagnostics.angularVelocity.z,
+            weighted.recoilOffset.backwardMeters * 100.0F,
+            weighted.recoilOffset.pitchRadians *
+                (180.0F / 3.14159265358979323846F),
             static_cast<unsigned>(weighted.aimDiagnostics.resetReason));
         Report("INFO", "weapon_weight_diagnostics", message);
     }
@@ -12114,6 +12153,32 @@ void RequestFireHaptic(bool leftWeaponFired) noexcept {
     }
 }
 
+// Queue exactly one spring impulse for each successful Retail shot. Like the
+// haptic path, this is driven by GetFireVectors rather than trigger state, so
+// dry fire and blocked fire modes cannot move the weapon. The pose is rebuilt
+// before Retail fires in the current update, therefore the impulse is consumed
+// on the following update and never changes the bullet that caused it.
+void RequestWeaponRecoil() noexcept {
+    if (!g_weaponWeightEnabled) {
+        return;
+    }
+    constexpr ULONGLONG kMinimumImpulseGapMs = 30;
+    const ULONGLONG now = GetTickCount64();
+    if (g_lastWeaponRecoilTick != 0 &&
+        now - g_lastWeaponRecoilTick < kMinimumImpulseGapMs) {
+        return;
+    }
+    g_lastWeaponRecoilTick = now;
+    InterlockedIncrement(&g_pendingWeaponRecoilShots);
+    if (InterlockedCompareExchange(
+            &g_weaponRecoilActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "simulated_weight_recoil_active",
+            "Successful shots add mass-scaled kick and muzzle-rise impulses "
+            "to the simulated weapon-weight spring.");
+    }
+}
+
 bool __fastcall HookRetailGetFireVectors(
     const void* weapon, void* ignoredEdx,
     LTVector& right, LTVector& up,
@@ -12129,6 +12194,7 @@ bool __fastcall HookRetailGetFireVectors(
     if (result) {
         RequestFireHaptic(leftWeaponFired);
         TriggerVrMuzzleFlash(leftWeaponFired);
+        RequestWeaponRecoil();
     }
     if (!result || !g_weaponAim.valid) {
         return result;
@@ -12299,6 +12365,8 @@ void RemoveWeaponAimHooks() noexcept {
     ResetWeaponWeightPair(
         g_weightedWeaponInput.filters,
         WeaponWeightResetReason::sceneLoaded);
+    InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+    g_lastWeaponRecoilTick = 0;
     // Ohne Aim-Hooks laeuft kein Weapon-Manager-Update mehr, das den Griff
     // wieder loesen koennte. Sprinten und Lehnen duerfen nicht haengen.
     g_twoHandedGripActive = false;

@@ -12,18 +12,22 @@
 #include <Windows.h>
 #include <d3d9.h>
 
+#include "protocol.h"
+
 namespace {
 
 struct Options {
     std::uint64_t frameLimit{900};
     std::uint64_t adapterLuid{0};
     bool classicD3D9{false};
+    bool classicViaEx{false};
     bool stereo{false};
 };
 
 using BeginEyeFunction = void(__cdecl*)(std::uint32_t);
 using CaptureEyeFunction = void(__cdecl*)(std::uint32_t);
-using EndStereoFrameFunction = void(__cdecl*)(std::uint64_t);
+using EndStereoFrameFunction = void(__cdecl*)(
+    std::uint64_t, const FearVrGameCameraSample*);
 
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam,
                                  LPARAM lparam) {
@@ -44,6 +48,10 @@ Options ParseOptions(int argumentCount, char** arguments) {
         const std::string argument = arguments[index];
         if (argument == "--classic-d3d9") {
             options.classicD3D9 = true;
+            continue;
+        }
+        if (argument == "--classic-via-ex") {
+            options.classicViaEx = true;
             continue;
         }
         if (argument == "--stereo") {
@@ -214,7 +222,7 @@ int main(int argumentCount, char** arguments) {
 
     IDirect3DDevice9* device = nullptr;
     HRESULT result = D3DERR_INVALIDCALL;
-    if (options.classicD3D9) {
+    if (options.classicD3D9 || options.classicViaEx) {
         result = d3d->CreateDevice(
             selectedAdapter, D3DDEVTYPE_HAL, window,
             D3DCREATE_HARDWARE_VERTEXPROCESSING |
@@ -253,10 +261,35 @@ int main(int argumentCount, char** arguments) {
         DestroyWindow(window);
         return 5;
     }
+    IDirect3DDevice9Ex* inheritedDeviceEx = nullptr;
+    const HRESULT inheritedExResult = device->QueryInterface(
+        IID_PPV_ARGS(&inheritedDeviceEx));
+    std::printf(
+        "M2 device supports IDirect3DDevice9Ex: %s (HRESULT=0x%08lX)\n",
+        SUCCEEDED(inheritedExResult) ? "yes" : "no",
+        static_cast<unsigned long>(inheritedExResult));
+    if (inheritedDeviceEx != nullptr) {
+        inheritedDeviceEx->Release();
+    }
+    IDirect3DTexture9* managedTexture = nullptr;
+    const HRESULT managedTextureResult = device->CreateTexture(
+        64, 64, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED,
+        &managedTexture, nullptr);
+    std::printf(
+        "M2 device accepts D3DPOOL_MANAGED: %s (HRESULT=0x%08lX)\n",
+        SUCCEEDED(managedTextureResult) ? "yes" : "no",
+        static_cast<unsigned long>(managedTextureResult));
+    if (managedTexture != nullptr) {
+        managedTexture->Release();
+    }
 
     std::printf("M2 D3D9 producer started: frames=%llu mode=%s\n",
-                static_cast<unsigned long long>(frameLimit),
-                options.classicD3D9 ? "classic" : "ex");
+                 static_cast<unsigned long long>(frameLimit),
+                 options.classicD3D9
+                     ? "classic"
+                     : (options.classicViaEx
+                            ? "classic-via-ex"
+                            : "ex"));
     HMODULE proxy = GetModuleHandleW(L"d3d9.dll");
     const auto beginEye = proxy == nullptr
         ? nullptr
@@ -315,7 +348,11 @@ int main(int argumentCount, char** arguments) {
                 beginEye(eye);
                 captureEye(eye);
             }
-            endStereoFrame(frame);
+            FearVrGameCameraSample camera{};
+            camera.frameId = frame;
+            camera.pose.qw = 1.0F;
+            camera.flags = FEARVR_GCF_VALID;
+            endStereoFrame(frame, &camera);
         } else {
             result = device->Clear(
                 0, nullptr, D3DCLEAR_TARGET,

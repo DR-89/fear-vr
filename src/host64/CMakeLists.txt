@@ -30,6 +30,8 @@ add_executable(fearvr-host
   main.cpp
   openxr_host.cpp
   openxr_host.h
+  startup_splash.cpp
+  startup_splash.h
   xr_input.cpp
   xr_input.h
   texture_renderer.cpp
@@ -49,5 +51,7 @@ target_link_libraries(fearvr-host PRIVATE
   d3d11
   d3dcompiler
   dxgi
+  ole32
+  windowscodecs
 )
 set_target_properties(fearvr-host PROPERTIES OUTPUT_NAME "fearvr-host")

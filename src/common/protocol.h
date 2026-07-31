@@ -33,7 +33,7 @@ extern "C" {
 /* ---- Protokoll-Identität ------------------------------------------------- */
 /* 'F','R','V','R' als Little-Endian-uint32 => 0x52565246 */
 #define FEARVR_PROTOCOL_MAGIC   0x52565246u
-#define FEARVR_PROTOCOL_VERSION 5u
+#define FEARVR_PROTOCOL_VERSION 6u
 
 /* Spielkamera und OpenXR-Projektionslayer verwenden dieselbe FOV-Skalierung.
  * Null steht fuer den kompatiblen Standard, falls eine alte Gegenstelle das
@@ -87,6 +87,11 @@ enum {
   FEARVR_HF_VALID = 0x00000001u
 };
 
+/* Spielkamera-Metadaten fuer die Lokomotions-Nachprojektion. */
+enum {
+  FEARVR_GCF_VALID = 0x00000001u
+};
+
 /* ---- Slot-/Frame-Zustände ------------------------------------------------ */
 enum {
   FEARVR_SLOT_EMPTY     = 0u, /* frei, vom Host konsumiert                    */
@@ -136,6 +141,17 @@ typedef struct FearVrEyeView {
   FearVrFov  fov;
 } FearVrEyeView;
 FEARVR_STATIC_ASSERT(sizeof(FearVrEyeView) == 44, "FearVrEyeView size");
+
+/* Weltpose der Basis-Spielkamera (ohne HMD-/Augenversatz).
+ * Die Position ist in Metern, die Rotation in LithTech-Weltachsen. */
+typedef struct FearVrGameCameraSample {
+  uint64_t frameId;
+  FearVrPose pose;
+  uint32_t flags;                   /* FEARVR_GCF_*                          */
+  uint32_t reserved0[2];
+} FearVrGameCameraSample;
+FEARVR_STATIC_ASSERT(sizeof(FearVrGameCameraSample) == 48,
+                     "FearVrGameCameraSample size (48)");
 
 /* ---- Renderauftrag (Host -> Game) ---------------------------------------- */
 typedef struct FearVrRenderRequest {
@@ -189,9 +205,12 @@ typedef struct FearVrSlot {
   uint32_t height;
   uint32_t format;         /* protokoll-eigener Formatcode (siehe unten)     */
   uint64_t generation;     /* monoton, gegen recycelte Slots                 */
+  FearVrGameCameraSample camera; /* Basis-Spielkamera dieses Bildes           */
 } FearVrSlot;
-FEARVR_STATIC_ASSERT(sizeof(FearVrSlot) == 8 + 8 + 4 + 4 + 4 + 4 + 8,
-                     "FearVrSlot size (40)");
+FEARVR_STATIC_ASSERT(
+  sizeof(FearVrSlot) == 8 + 8 + 4 + 4 + 4 + 4 + 8
+    + sizeof(FearVrGameCameraSample),
+  "FearVrSlot size (88)");
 
 /* Protokoll-eigene Formatcodes (keine D3D-Enums über die Grenze schicken). */
 enum {
@@ -214,6 +233,7 @@ typedef struct FearVrSharedHeader {
   uint64_t requestSequence; /* Seqlock: ungerade=Schreibvorgang, gerade=stabil */
   uint64_t inputSequence;  /* Host -> Game, Seqlock für input                */
   uint64_t hapticSequence; /* Game -> Host, Seqlock für haptic              */
+  uint64_t cameraSequence; /* Game -> Host, Seqlock fuer latestCamera        */
   uint64_t hostAdapterLuid; /* HighPart: obere 32 Bit, LowPart: untere 32 Bit */
   uint64_t gameAdapterLuid; /* HighPart: obere 32 Bit, LowPart: untere 32 Bit */
   uint32_t hostProcessId;
@@ -223,15 +243,17 @@ typedef struct FearVrSharedHeader {
   FearVrRenderRequest request; /* neuester vollständig veröffentlichter Auftrag */
   FearVrInputState input;   /* neuester vollständiger Controllerzustand      */
   FearVrHapticRequest haptic; /* neueste Haptikanforderung                   */
+  FearVrGameCameraSample latestCamera; /* neueste gerenderte Spielkamera     */
   /* Slots: [eye][slot] direkt nach dem Header im Mapping. */
   FearVrSlot slot[FEARVR_EYE_COUNT][FEARVR_SLOTS_PER_EYE];
 } FearVrSharedHeader;
 FEARVR_STATIC_ASSERT(
   sizeof(FearVrSharedHeader) ==
-    24 /* 6x uint32 */ + 56 /* 7x uint64 */ + 16 /* 4x uint32 */
+    24 /* 6x uint32 */ + 64 /* 8x uint64 */ + 16 /* 4x uint32 */
     + sizeof(FearVrRenderRequest)
     + sizeof(FearVrInputState)
     + sizeof(FearVrHapticRequest)
+    + sizeof(FearVrGameCameraSample)
     + (uint32_t)(FEARVR_EYE_COUNT * FEARVR_SLOTS_PER_EYE) * sizeof(FearVrSlot),
   "FearVrSharedHeader size");
 

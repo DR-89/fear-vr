@@ -203,8 +203,10 @@ extern "C" void FearVr_CaptureEye(std::uint32_t eye) {
     fearvr::CaptureEye(eye);
 }
 
-extern "C" void FearVr_EndStereoFrame(std::uint64_t frameId) {
-    fearvr::EndStereoFrame(frameId);
+extern "C" void FearVr_EndStereoFrame(
+    std::uint64_t frameId,
+    const FearVrGameCameraSample* camera) {
+    fearvr::EndStereoFrame(frameId, camera);
 }
 
 extern "C" void FearVr_ReportHookStatus(

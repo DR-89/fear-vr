@@ -17,6 +17,16 @@ target_link_libraries(
 )
 add_test(NAME head_tracking_math COMMAND test_head_tracking_math)
 
+add_executable(
+  test_locomotion_reprojection test_locomotion_reprojection.cpp
+)
+target_link_libraries(
+  test_locomotion_reprojection PRIVATE fearvr-common fearvr-warnings
+)
+add_test(
+  NAME locomotion_reprojection COMMAND test_locomotion_reprojection
+)
+
 add_executable(test_stereo_hud_math test_stereo_hud_math.cpp)
 target_link_libraries(
   test_stereo_hud_math PRIVATE fearvr-common fearvr-warnings
@@ -94,11 +104,35 @@ if(MSVC)
 endif()
 add_test(NAME lean_body COMMAND test_lean_body)
 
+add_executable(test_hid_fix test_hid_fix.cpp)
+target_link_libraries(
+  test_hid_fix PRIVATE fearvr-common fearvr-hid-fix fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_hid_fix PRIVATE /UNDEBUG)
+endif()
+add_test(NAME hid_fix COMMAND test_hid_fix)
+
+find_program(FEARVR_POWERSHELL_EXECUTABLE
+  NAMES powershell.exe powershell
+  REQUIRED
+)
+add_test(
+  NAME release_launcher_session
+  COMMAND
+    ${FEARVR_POWERSHELL_EXECUTABLE}
+    -NoProfile
+    -ExecutionPolicy Bypass
+    -File
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_release_launcher_session.ps1
+)
+
 if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND TARGET fearvr-proxy)
   # Isolierter M2-Producer: Der echte System-Import bleibt d3d9.lib; erst
   # nach dem Link wird ausschließlich neben diese Test-EXE der Proxy kopiert.
   add_executable(d3d9_test_producer d3d9_test_producer.cpp)
   target_link_libraries(d3d9_test_producer PRIVATE
+    fearvr-common
     fearvr-warnings
     d3d9
   )

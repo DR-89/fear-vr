@@ -28,6 +28,7 @@ target_include_directories(fearvr-gameclient-loader SYSTEM PRIVATE
 )
 target_link_libraries(fearvr-gameclient-loader PRIVATE
   fearvr-common
+  fearvr-hid-fix
   fearvr-warnings
   minhook
 )

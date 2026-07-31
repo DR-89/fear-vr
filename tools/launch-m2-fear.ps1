@@ -5,7 +5,8 @@
 .DESCRIPTION
     Startet den x64-OpenXR-Host, wartet auf XR-ready und ruft danach Steam mit
     App-ID 21090 auf. Über die offizielle lose archcfg-Schicht wird nur der
-    ABI-neutrale GameClient-Loader geladen; Retail bleibt unverändert.
+    ABI-neutrale GameClient-Loader geladen. Der eigene dinput8-Proxy liegt
+    neben FEAR.exe; originale Retail-Dateien bleiben unverändert.
 
 .PARAMETER Runtime
     Welche OpenXR-Runtime der Host verwenden soll:
@@ -48,15 +49,6 @@ $retailBefore = Assert-RetailFearExe
 # Steam bleibt für den Spielstart nötig (offizieller -applaunch-Weg), die
 # VR-Runtime ist davon aber unabhängig.
 $runtimeInfo = Resolve-OpenXrRuntime $Runtime
-$usesSteamVr = $runtimeInfo.Kind -eq 'steamvr'
-
-# SteamVR 2.x legt beim offiziellen Start eines Nicht-VR-Spiels sonst
-# automatisch eine Theaterfläche über die bereits laufende OpenXR-Szene.
-# Andere Runtimes kennen dieses Verhalten nicht; dort wird die
-# SteamVR-Konfiguration bewusst nicht angefasst.
-if ($usesSteamVr) {
-    & "$PSScriptRoot\disable-steamvr-theater.ps1" -Quiet
-}
 
 $manifestPath = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot (
@@ -94,6 +86,14 @@ foreach ($record in $manifest.files) {
         )
     }
 }
+if ([string]::IsNullOrWhiteSpace($manifest.dinputProxy) -or
+    -not (Test-Path -LiteralPath $manifest.dinputProxy -PathType Leaf) -or
+    (Get-FileSha256 $manifest.dinputProxy) -ne
+        $manifest.dinputProxySha256) {
+    throw (
+        'Der frühe dinput8-HID-Fix fehlt oder wurde verändert. ' +
+        'Stage erneut mit tools\prepare-m2-stage.ps1 vorbereiten.')
+}
 
 $hostExe = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot 'build\x64\src\host64\RelWithDebInfo\fearvr-host.exe'
@@ -129,10 +129,16 @@ $runLogDirectory = Assert-UnderProjectRoot (
 New-Item -ItemType Directory -Force -Path $runLogDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path $manifest.userDirectory | Out-Null
 
+$startupImage = Assert-UnderProjectRoot (
+    Join-Path $cfg.ProjectRoot 'assets\fearvr-startup.jpg')
+if (-not (Test-Path -LiteralPath $startupImage -PathType Leaf)) {
+    throw "Startbild fehlt: $startupImage"
+}
 $hostArguments = @(
     '--ipc-session', $sessionText,
     '--exit-on-game-disconnect',
-    '--log-dir', "`"$runLogDirectory`""
+    '--log-dir', "`"$runLogDirectory`"",
+    '--startup-image', "`"$startupImage`""
 )
 # XR_RUNTIME_JSON wirkt nur auf den erzeugten Kindprozess. Der Wert wird
 # danach wieder auf den Ausgangszustand gesetzt, damit die aufrufende Shell
@@ -176,6 +182,8 @@ $steamArguments = @(
     '-applaunch', $manifest.steamAppId,
     '-fearvr-session', $sessionText,
     '-fearvr-logdir', "`"$runLogDirectory`"",
+    '-fearvr-bridge',
+        "`"$(Join-Path $manifest.moduleDirectory 'fearvr-d3d9.dll')`"",
     '-archcfg', "`"$($manifest.archiveConfig)`"",
     '-userdirectory', "`"$($manifest.userDirectory)`""
 )
@@ -216,9 +224,8 @@ Start-Process -FilePath $manifest.steamExe `
     Out-Null
 
 $fear = $null
-$theaterGuard = $null
 function Stop-StartedM2Processes {
-    foreach ($process in @($theaterGuard, $fear, $hostProcess)) {
+    foreach ($process in @($fear, $hostProcess)) {
         if ($null -ne $process) {
             $process.Refresh()
             if (-not $process.HasExited) {
@@ -240,35 +247,13 @@ if ($null -eq $fear) {
     throw 'Steam startete innerhalb von 25 Sekunden keine FEAR.exe.'
 }
 
-# Der Theaterwächter ist reine SteamVR-Kosmetik und wird nur dort gebraucht.
-if ($usesSteamVr) {
-    $theaterGuardScript = Assert-UnderProjectRoot (
-        Join-Path $cfg.ProjectRoot 'tools\hide-steamvr-theater.ps1'
-    )
-    $theaterGuardLog = Assert-UnderProjectRoot (
-        Join-Path $runLogDirectory 'steamvr-theater-guard.log'
-    )
-    $theaterGuardArguments = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', "`"$theaterGuardScript`"",
-        '-GamePid', $fear.Id,
-        '-LogPath', "`"$theaterGuardLog`""
-    )
-    $theaterGuard = Start-Process `
-        -FilePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
-        -ArgumentList $theaterGuardArguments `
-        -WindowStyle Hidden `
-        -PassThru
-}
-
 $expectedModules = @{
     'GameClient.dll' = Join-Path $manifest.moduleDirectory 'GameClient.dll'
     'GameOrig.dll' = Join-Path $manifest.moduleDirectory 'GameOrig.dll'
-    'fearvr-d3d9.dll' = Join-Path $manifest.moduleDirectory 'fearvr-d3d9.dll'
+    'd3d9.dll' = $manifest.d3d9Proxy
+    'dinput8.dll' = $manifest.dinputProxy
 }
 $loaded = @{}
-$echoPatchPath = $null
 $deadline = (Get-Date).AddSeconds(30)
 do {
     Start-Sleep -Milliseconds 250
@@ -282,20 +267,19 @@ do {
     }
     $moduleLines = @(& $moduleProbe $fear.Id)
     if ($LASTEXITCODE -eq 0) {
-        # EchoPatch ist optional und darf nichts abbrechen; gemeldet wird es
-        # trotzdem, sonst bleibt unklar, ob es beim Lauf aktiv war.
-        foreach ($line in $moduleLines) {
-            $parts = $line -split "`t", 2
-            if ($parts.Count -eq 2 -and $parts[0] -eq 'dinput8.dll') {
-                $echoPatchPath = [IO.Path]::GetFullPath($parts[1])
-            }
-        }
         foreach ($line in $moduleLines) {
             $parts = $line -split "`t", 2
             if ($parts.Count -eq 2 -and
                 $expectedModules.ContainsKey($parts[0])) {
-                $loaded[$parts[0]] =
-                    [IO.Path]::GetFullPath($parts[1])
+                $candidate = [IO.Path]::GetFullPath($parts[1])
+                $expected = [IO.Path]::GetFullPath(
+                    $expectedModules[$parts[0]])
+                # System32 and the local proxy may share the same basename.
+                # Keep the verified local module instead of whichever line
+                # happened to be enumerated last.
+                if ($candidate -eq $expected) {
+                    $loaded[$parts[0]] = $candidate
+                }
             }
         }
     } else {
@@ -376,14 +360,7 @@ Write-Host (
     "F.E.A.R. läuft mit $milestoneLabel-Bridge (PID $($fear.Id))."
 ) `
     -ForegroundColor Green
-# Ohne EchoPatch lädt das Spiel die System-dinput8.dll — das ist der
-# Normalfall und keine Meldung wert. Gemeldet wird nur, was im
-# Retail-Verzeichnis liegt.
-$echoPatchExpected = [IO.Path]::GetFullPath(
-    (Join-Path $cfg.RetailRoot $cfg.EchoPatchDllName))
-if ($echoPatchPath -eq $echoPatchExpected) {
-    Write-Host "EchoPatch: aktiv ($echoPatchPath)."
-}
+Write-Host "HID-Fix: aktiv ($($loaded['dinput8.dll']))."
 if ($Milestone -ne 'M2') {
     if ($stereoReady) {
         Write-Host (

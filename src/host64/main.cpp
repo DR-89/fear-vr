@@ -35,6 +35,7 @@ void PrintUsage() {
         "  --log-dir <Pfad>     Logverzeichnis (Standard: .\\logs)\n"
         "  --max-frames <N>     Nach N eingereichten XR-Frames sauber beenden\n"
         "  --ipc-session <ID>   M2-IPC-ID (dezimal oder 0x-hexadezimal)\n"
+        "  --startup-image <Pfad>  Startbild bis zum ersten Spielframe\n"
         "  --exit-on-game-disconnect  Nach Game-Heartbeat-Timeout beenden\n"
         "  --validate-only      Instance/System/D3D11/Session/Swapchains pruefen\n"
         "  --d3d-debug          D3D11-Debug-Layer anfordern (falls installiert)\n"
@@ -107,6 +108,15 @@ int main(int argc, char** argv) {
                 return 2;
             }
             options.logDirectory = std::filesystem::u8path(argv[index]);
+            continue;
+        }
+        if (argument == "--startup-image") {
+            if (++index >= argc) {
+                std::fprintf(
+                    stderr, "--startup-image benoetigt einen Pfad.\n");
+                return 2;
+            }
+            options.startupImage = std::filesystem::u8path(argv[index]);
             continue;
         }
         if (argument == "--max-frames") {

@@ -66,6 +66,19 @@ add_library(fearvr-common INTERFACE)
 target_include_directories(fearvr-common INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/src/common)
 
+add_library(fearvr-hid-fix STATIC
+  src/common/fear_hid_fix.cpp
+  src/common/fear_hid_fix.h
+)
+target_link_libraries(fearvr-hid-fix PRIVATE
+  fearvr-common
+  fearvr-warnings
+)
+target_compile_definitions(fearvr-hid-fix PRIVATE
+  WIN32_LEAN_AND_MEAN
+  NOMINMAX
+)
+
 message(STATUS "FearVr ${PROJECT_VERSION} | ptr=${CMAKE_SIZEOF_VOID_P}*8 bit "
                "| HOST=${FEARVR_BUILD_HOST} PROXY=${FEARVR_BUILD_PROXY} "
                "TESTS=${FEARVR_BUILD_TESTS}")
@@ -75,6 +88,7 @@ if(FEARVR_BUILD_HOST)
   add_subdirectory(src/host64)
 endif()
 if(FEARVR_BUILD_PROXY)
+  add_subdirectory(src/dinput8_proxy)
   add_subdirectory(src/proxy32)
   add_subdirectory(src/gameclient_loader)
   add_subdirectory(src/launcher)   # Launcher ist x86-nah, baut mit dem Proxy

@@ -47,36 +47,35 @@ if (Test-Path -LiteralPath $exe) {
     Line 'FEAR.exe' "NICHT gefunden: $exe" $false
 }
 
-# --- EchoPatch (optional, liegt bewusst im Retail-Verzeichnis) ---
-# Kein Fehlerkriterium: Der Mod läuft mit und ohne EchoPatch. Gemeldet wird es,
-# weil es die einzige Fremdsoftware in der Retail-Installation ist.
+# --- Früher DirectInput/HID-Fix ----------------------------------------------
 $echoDll = Join-Path $cfg.RetailRoot $cfg.EchoPatchDllName
-$echoIni = Join-Path $cfg.RetailRoot $cfg.EchoPatchIniName
 $echoHash = Get-FileSha256 $echoDll
 if ($null -eq $echoHash) {
-    Info 'EchoPatch' 'nicht installiert (tools\install-echopatch.ps1)'
+    Info 'F.E.A.R.-VR HID-Fix' 'noch nicht installiert (Stage vorbereiten)'
 } elseif ($echoHash -eq $cfg.EchoPatchDllSha256) {
-    Info 'EchoPatch' "$($cfg.EchoPatchVersion) installiert"
-    if (Test-Path -LiteralPath $echoIni -PathType Leaf) {
-        $echoText = Get-Content -Raw -LiteralPath $echoIni
-        # Genau die Werte, deren Rückfall den VR-Betrieb bricht.
-        foreach ($pair in @(
-                @('CheckLAAPatch', '0'),
-                @('SDLGamepadSupport', '0'),
-                @('EnableCrashHandler', '0'),
-                @('HUDScaling', '0'),
-                @('CustomFOV', '0'))) {
-            $matched = $echoText -match
-                "(?m)^\s*$($pair[0])\s*=\s*$($pair[1])\s*$"
-            Line "EchoPatch $($pair[0])" `
-                $(if ($matched) { "= $($pair[1])" } else { 'abweichend' }) `
-                $matched
-        }
-    } else {
-        Line 'EchoPatch.ini' "fehlt: $echoIni" $false
-    }
+    Line 'F.E.A.R.-VR HID-Fix' (
+        "inkompatibler EchoPatch $($cfg.EchoPatchVersion) installiert") $false
 } else {
-    Line 'EchoPatch dinput8.dll' "fremde Datei ($echoHash)" $false
+    $knownDinputHashes = @(
+        Get-ChildItem -LiteralPath (
+            Join-Path $cfg.ProjectRoot 'stage') -Filter '*-deployment.json' `
+            -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try {
+                    (Get-Content -Raw -LiteralPath $_.FullName |
+                        ConvertFrom-Json).dinputProxySha256
+                } catch {
+                    $null
+                }
+            }
+    )
+    $knownDinput = $echoHash -in $knownDinputHashes
+    Line 'F.E.A.R.-VR HID-Fix' (
+        if ($knownDinput) {
+            "installiert ($echoHash)"
+        } else {
+            "fremde dinput8.dll ($echoHash)"
+        }) $knownDinput
 }
 
 # --- OpenXR-Runtime (x64 aktiv, WOW6432Node fehlt erwartungsgemäß) ---

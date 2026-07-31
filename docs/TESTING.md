@@ -14,6 +14,11 @@ Als CMake/CTest-Ziele unter `tests/` (baubar ohne Headset):
       `input_state`: unnormierte und degenerierte Quaternionen)
 - [x] Pose relativ zum Recenter-Ursprung und Yaw-only-Recenter bei geneigtem
       beziehungsweise gesenktem Kopf (`head_tracking_math`)
+- [x] bildsynchrone Spielkamera-Bewegungsmessung einschließlich
+      Achsenrichtung, Basis-Yaw sowie Fail-closed-Fällen für Head-Bob,
+      Teleport, alte Samples und gleichzeitige Drehung
+      (`locomotion_reprojection`); die berechnete Layer-Translation bleibt
+      ohne Tiefenpuffer bewusst deaktiviert
 - [x] FOV-Winkel → gemeinsame symmetrische Projektion (`stereo_math`);
       echte Projektionsmatrizen baut LithTech selbst aus dem gesetzten FOV
 - [x] Ringpuffer-Paarung und Generationen
@@ -557,8 +562,9 @@ unsauberen Arbeitsbaum ausdrücklich (AD-017).
 
 `tools\uninstall-fearvr.ps1` ist ohne `-Apply` ein reiner Trockenlauf.
 
-Außerhalb der Projektwurzel schreibt der Mod genau einen Wert:
-`steamvr.autoShowGameTheater`. Beide Rückstellzweige wurden gegen eine Kopie
+Aktuelle Launcher schreiben keinen SteamVR-Wert mehr. Der Deinstaller behält
+für alte Projektstände die gezielte Wiederherstellung von
+`steamvr.autoShowGameTheater`; beide Rückstellzweige wurden gegen eine Kopie
 der echten Konfiguration getestet:
 
 - Schlüssel war ursprünglich **nicht vorhanden** → die eingefügte Zeile wird
@@ -631,6 +637,28 @@ Einordnung:
 
 Damit ist die Kennzahlenpflicht aus §14 erfüllt.
 
+### Asynchroner Latest-Frame-Transport, geprüft am 31.07.2026
+
+Der Lauf `m5-fear-20260731-003753` nutzte VDXR und den frühen
+Root-`d3d9.dll`-Proxy. Die Logfolge
+`game_device_multithreaded`, `async_cpu_transfer_ready` und
+`frame_ready ... path=async` bestätigt, dass nicht der synchrone Fallback
+gemessen wurde.
+
+| Kennzahl | Vorher synchron | Latest-Frame-Worker |
+|---|---:|---:|
+| Blockierzeit im Present-Thread | Ø 16–17,5 ms, max. ca. 28 ms | meist Ø 0,18–0,28 ms |
+| Readback und Upload | Bestandteil der Blockierzeit | Ø ca. 14–15 ms im Worker |
+| Gesamtes Transportalter | direkt, aber spielthread-blockierend | Ø ca. 22,7–24,1 ms |
+| Neue Spielbilder im Host | häufig ca. 45 fps | ca. 44–49 fps im Gameplay |
+
+Es ist höchstens ein noch nicht begonnener Frame vorgemerkt. Trifft vorher ein
+neuerer Frame ein, wird der alte GPU-Frame nur noch abgeerntet und nicht mehr
+über CPU und D3D9Ex transportiert. Dadurch wächst keine Warteschlange an und
+der Host erhält nach einer Überlastung wieder das aktuellste verfügbare Bild.
+Der Live-Lauf blieb fehlerfrei; der subjektive Test meldete während des Laufs
+ein sehr gutes Ergebnis.
+
 ### Runtime-Unabhängigkeit, geprüft am 25.07.2026
 
 | Prüfung | Ergebnis |
@@ -638,7 +666,7 @@ Damit ist die Kennzahlenpflicht aus §14 erfüllt.
 | `--validate-only` unter VDXR | `VirtualDesktopXR 1.0.10`, `Meta Quest 3`, Adapter-LUID `0x0:D57B`, Swapchains 2×`2688x2880`, Exitcode 0 |
 | `--validate-only` unter SteamVR | `SteamVR/OpenXR 2.16.7`, Swapchains 2×`2064x2208` |
 | Spielstart `-Runtime vdxr` | `logs\m5-fear-20260725-005345`: Runtime VDXR, Bridge verbunden, `ipc_frame` importiert |
-| SteamVR-Schritte unter VDXR | unterbleiben — keine `steamvr-theater-guard.log`, `steamvr.vrsettings` unverändert |
+| SteamVR-Theater-Hilfen | entfernt; weder unter VDXR noch SteamVR wird ein Wächter gestartet oder `steamvr.vrsettings` geändert |
 
 VDXR liefert mit `2688x2880` je Auge eine deutlich höhere Swapchain-Auflösung
 als SteamVR. Das Spielbild bleibt davon unberührt: Es kommt weiterhin als
@@ -648,20 +676,21 @@ Umgeschaltet wird über `-Runtime`, das `XR_RUNTIME_JSON` nur für den
 Hostprozess setzt. Die systemweite Runtime-Einstellung wird nicht verändert
 (AD-018).
 
-## 17. Weitergebbares Paket, geprüft am 25.07.2026
+## 17. Weitergebbares Overlay
 
-`tools\make-release.ps1` erzeugt unter `dist\` Ordner und ZIP (rund 1,7 MB,
-ZIP 0,52 MB). Enthalten sind nur eigene Binaries, Skripte und Doku.
+`tools\make-release.ps1` erzeugt unter `dist\` einen Ordner und ein ZIP, deren
+Inhalt direkt in den Ordner mit `FEAR.exe` entpackt wird.
 
-| Prüfung | Ergebnis |
+| Prüfung | Erwartetes Ergebnis |
 |---|---|
-| Lizenzgegenprobe im Paketskript | bricht bei proprietärem Dateinamen **und** bei dem bekannten Hash des Public-Tools-Moduls ab |
-| `install.ps1` ohne Parameter | findet Retail über die Steam-Bibliotheken, verifiziert Version und SHA-256 |
-| Public-Tools-Erkennung | über den Hash des unveränderten VC7.1-`GameClient.dll` |
-| Paketintegrität | `install.ps1` prüft jede Datei gegen `release-manifest.json` |
-| Installation | 7 Module gestaged, Desktop-Verknüpfung erzeugt, Retail unverändert |
-| Start aus der Installation | Bridge verbunden, `ipc_frame` importiert, VDXR aktiv |
-| Deinstallation | entfernt alles außer `userdata`; Retail unverändert |
+| Archivwurzel | `FEARVR\`, Standardstarter und SteamVR-Starter; kein zusätzlicher Paketordner |
+| Öffentlicher Modus | keine Retail- oder Public-Tools-Datei, Manifest `redistributable=true` |
+| Privater Modus | sieben Laufzeitmodule plus Body-Assets, Manifest `redistributable=false` und Warnhinweis |
+| Paketintegrität | `prepare-overlay.ps1` prüft ausgelieferte Dateien gegen `release-manifest.json` |
+| Erststart öffentlich | Public-Tools-Erkennung über den Hash des unveränderten VC7.1-`GameClient.dll` |
+| SteamVR | Starter setzt für den Hostprozess Valves OpenXR-Manifest; systemweite Runtime bleibt unverändert |
+| Update | neues ZIP über denselben Ordner; `FEARVR\userdata` bleibt erhalten |
+| Entfernung | `FEARVR\` und beide Starter löschen; keine Retail-Datei muss repariert werden |
 
 ### Fehlschlag beim ersten Paketstand
 

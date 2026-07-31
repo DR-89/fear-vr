@@ -1,11 +1,14 @@
 ﻿<#
 .SYNOPSIS
-    Erstellt eine Retail-schonende M2- bis M5-archcfg-Stage.
+    Erstellt eine M2- bis M5-archcfg-Stage samt frühem dinput8-HID-Fix.
 
 .DESCRIPTION
     Kopiert den ABI-neutralen GameClient-Loader, die VR-Bridge und das
-    unveränderte originale VC7.1-GameClient-Modul ausschließlich nach
-    stage\m2-game. Retail wird vor und nach dem Vorgang verifiziert.
+    unveränderte originale VC7.1-GameClient-Modul nach stage\m2-game.
+    Der eigene dinput8-Proxy wird neben FEAR.exe installiert, damit der
+    bekannte F.E.A.R.-1.08-HID-Performancefehler bereits vor der
+    DirectInput-Initialisierung abgeschaltet werden kann. FEAR.exe selbst
+    wird vor und nach dem Vorgang verifiziert und nie verändert.
 #>
 [CmdletBinding()]
 param(
@@ -32,18 +35,89 @@ $loaderSource = Assert-UnderProjectRoot (
 $bridgeSource = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot 'build\x86\src\proxy32\RelWithDebInfo\fearvr-d3d9.dll'
 )
+$dinputSource = Assert-UnderProjectRoot (
+    Join-Path $cfg.ProjectRoot 'build\x86\src\dinput8_proxy\RelWithDebInfo\dinput8.dll'
+)
 
 foreach ($required in @(
     $retailArchCfg,
     $steamExe,
     $originalGameClient,
     $loaderSource,
-    $bridgeSource
+    $bridgeSource,
+    $dinputSource
 )) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "$milestoneLabel-Eingabedatei fehlt: $required"
     }
 }
+
+$dinputDestination = Join-Path $cfg.RetailRoot 'dinput8.dll'
+if (Test-Path -LiteralPath $dinputDestination -PathType Leaf) {
+    $existingDinputHash = Get-FileSha256 $dinputDestination
+    $knownPreviousHashes = @(
+        Get-ChildItem -LiteralPath (
+            Join-Path $cfg.ProjectRoot 'stage') -Filter '*-deployment.json' `
+            -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try {
+                    (Get-Content -Raw -LiteralPath $_.FullName |
+                        ConvertFrom-Json).dinputProxySha256
+                } catch {
+                    $null
+                }
+            }
+    )
+    $sourceHash = Get-FileSha256 $dinputSource
+    if ($existingDinputHash -ne $sourceHash -and
+        $existingDinputHash -notin $knownPreviousHashes) {
+        throw (
+            'Im Retail-Ordner liegt bereits eine fremde dinput8.dll. ' +
+            'Sie wird nicht überschrieben: ' + $dinputDestination)
+    }
+}
+Copy-Item -LiteralPath $dinputSource -Destination $dinputDestination -Force
+
+# Der klassische Renderer wird vor GameClient und DirectInput initialisiert.
+# Nur ein d3d9-Proxy direkt neben FEAR.exe kann daher CreateDevice garantiert
+# vor der Geräteerzeugung sehen und D3DCREATE_MULTITHREADED setzen. Einen
+# bereits vorhandenen Wrapper sichern wir wiederherstellbar und ketten ihn aus
+# unserer Bridge weiter, statt ihn ersatzlos zu verlieren.
+$d3d9Destination = Join-Path $cfg.RetailRoot 'd3d9.dll'
+$d3d9UpstreamDestination =
+    Join-Path $cfg.RetailRoot 'd3d9.fearvr-upstream.dll'
+$bridgeHash = Get-FileSha256 $bridgeSource
+if (Test-Path -LiteralPath $d3d9Destination -PathType Leaf) {
+    $existingD3d9Hash = Get-FileSha256 $d3d9Destination
+    if ($existingD3d9Hash -ne $bridgeHash) {
+        $existingIsPriorFearVr = $false
+        $previousManifestPath = Join-Path $cfg.ProjectRoot (
+            "stage\$milestoneSlug-deployment.json")
+        if (Test-Path -LiteralPath $previousManifestPath -PathType Leaf) {
+            try {
+                $previousManifest = Get-Content -Raw `
+                    -LiteralPath $previousManifestPath | ConvertFrom-Json
+                $existingIsPriorFearVr =
+                    $previousManifest.d3d9ProxySha256 -eq
+                        $existingD3d9Hash
+            } catch {
+                $existingIsPriorFearVr = $false
+            }
+        }
+        if (-not $existingIsPriorFearVr -and
+            (Test-Path -LiteralPath $d3d9UpstreamDestination -PathType Leaf)) {
+            throw (
+                'Ein fremder d3d9.dll-Wrapper und bereits eine andere ' +
+                'F.E.A.R.-VR-Sicherung sind vorhanden. Aus Sicherheitsgründen ' +
+                'wurde nichts überschrieben: ' + $d3d9Destination)
+        }
+        if (-not $existingIsPriorFearVr) {
+            Copy-Item -LiteralPath $d3d9Destination `
+                -Destination $d3d9UpstreamDestination
+        }
+    }
+}
+Copy-Item -LiteralPath $bridgeSource -Destination $d3d9Destination -Force
 
 $expectedOriginalHash =
     'B5F1F1976227FD0E6F1C32BD2BEEDFB117E68A87A07BB42D06BE489DD08A63BA'
@@ -129,6 +203,13 @@ $manifestPath = Assert-UnderProjectRoot (
     archiveConfigSha256 = Get-FileSha256 $archiveConfig
     userDirectory = $userDirectory
     logDirectory = $logDirectory
+    dinputProxy = $dinputDestination
+    dinputProxySha256 = Get-FileSha256 $dinputDestination
+    d3d9Proxy = $d3d9Destination
+    d3d9ProxySha256 = Get-FileSha256 $d3d9Destination
+    d3d9Upstream = if (
+        Test-Path -LiteralPath $d3d9UpstreamDestination -PathType Leaf
+    ) { $d3d9UpstreamDestination } else { $null }
     files = @($records)
 } | ConvertTo-Json -Depth 5 |
     Out-File -Encoding utf8 -LiteralPath $manifestPath
@@ -138,8 +219,10 @@ if ($retailBefore.Sha256 -ne $retailAfter.Sha256) {
     throw 'SICHERHEITSABBRUCH: Retail-FEAR.exe wurde verändert.'
 }
 
-Write-Host "$milestoneLabel-Stage bereit; Retail unverändert." `
+Write-Host "$milestoneLabel-Stage bereit; FEAR.exe unverändert." `
     -ForegroundColor Green
 Write-Host "Module:   $stageRoot"
+Write-Host "HID-Fix:  $dinputDestination"
+Write-Host "D3D9:     $d3d9Destination"
 Write-Host "ArchCfg:  $archiveConfig"
 Write-Host "Manifest: $manifestPath"

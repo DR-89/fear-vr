@@ -54,9 +54,11 @@ if (-not (Test-Path -LiteralPath $InstallDir -PathType Container)) {
 
 $deploymentPath = Join-Path $InstallDir 'deployment.json'
 $retailRoot = $null
+$deploymentData = $null
 if (Test-Path -LiteralPath $deploymentPath -PathType Leaf) {
-    $retailRoot = (Get-Content -Raw -LiteralPath $deploymentPath |
-        ConvertFrom-Json).retailRoot
+    $deploymentData = Get-Content -Raw -LiteralPath $deploymentPath |
+        ConvertFrom-Json
+    $retailRoot = $deploymentData.retailRoot
 }
 $retailBefore = $null
 if ($retailRoot -and (Test-Path -LiteralPath $retailRoot -PathType Container)) {
@@ -67,6 +69,49 @@ function Get-SizeMb([string]$Path) {
     $bytes = (Get-ChildItem -LiteralPath $Path -Recurse -File `
         -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
     return [math]::Round(($bytes / 1MB), 1)
+}
+
+# Remove only the verified root-level proxies that belonged to this
+# deployment. A foreign replacement remains untouched. Development installs
+# may also have preserved a previous D3D9 wrapper for restoration.
+if ($deploymentData -and $retailRoot) {
+    foreach ($proxy in @(
+        @{
+            Path = $deploymentData.dinputProxy
+            Hash = $deploymentData.dinputProxySha256
+            Name = 'dinput8.dll'
+        },
+        @{
+            Path = $deploymentData.d3d9Proxy
+            Hash = $deploymentData.d3d9ProxySha256
+            Name = 'd3d9.dll'
+        }
+    )) {
+        if ([string]::IsNullOrWhiteSpace($proxy.Path) -or
+            [string]::IsNullOrWhiteSpace($proxy.Hash) -or
+            -not (Test-Path -LiteralPath $proxy.Path -PathType Leaf) -or
+            (Get-FileSha256 $proxy.Path) -ne $proxy.Hash) {
+            continue
+        }
+        $upstream = if ($proxy.Name -eq 'd3d9.dll') {
+            Join-Path $retailRoot 'd3d9.fearvr-upstream.dll'
+        } else {
+            $null
+        }
+        if ($upstream -and
+            (Test-Path -LiteralPath $upstream -PathType Leaf)) {
+            Write-Host "  * restore previous $($proxy.Name)"
+            if ($Apply) {
+                Move-Item -LiteralPath $upstream `
+                    -Destination $proxy.Path -Force
+            }
+        } else {
+            Write-Host "  * remove root proxy $($proxy.Name)"
+            if ($Apply) {
+                Remove-Item -LiteralPath $proxy.Path -Force
+            }
+        }
+    }
 }
 
 # userdata is the game's -userdirectory: saved games, profiles, screenshots.

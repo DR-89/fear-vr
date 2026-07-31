@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <utility>
 
@@ -16,6 +17,7 @@
 #include <Windows.h>
 
 #include "ipc_names.h"
+#include "locomotion_reprojection.h"
 #include "protocol_utils.h"
 
 namespace fearvr {
@@ -173,6 +175,9 @@ bool IpcBridge::TryConnect() {
     if ((ReadAtomic64(shared_->hapticSequence) & 1ULL) != 0) {
         InterlockedIncrement64(Atomic64(shared_->hapticSequence));
     }
+    if ((ReadAtomic64(shared_->cameraSequence) & 1ULL) != 0) {
+        InterlockedIncrement64(Atomic64(shared_->cameraSequence));
+    }
     InterlockedOr(AtomicFlags(*shared_), FEARVR_BF_HOST_READY);
     log_("INFO", "ipc_connected",
          "Proxy mapping opened and protocol accepted.");
@@ -204,6 +209,8 @@ void IpcBridge::Disconnect() noexcept {
         gameProcessHandle_ = nullptr;
     }
     gameProcessId_ = 0;
+    latestFrameId_ = 0;
+    latestImageCamera_ = {};
 }
 
 void IpcBridge::UpdateAdapterMatch() {
@@ -363,7 +370,9 @@ bool IpcBridge::ConsumeLatestPair() {
     std::uint32_t slotIndex = 0;
     std::uint64_t frameId = 0;
     std::uint64_t generation = 0;
-    if (!FindAndClaimPair(slotIndex, frameId, generation)) {
+    FearVrGameCameraSample camera{};
+    if (!FindAndClaimPair(
+            slotIndex, frameId, generation, camera)) {
         return false;
     }
 
@@ -422,6 +431,7 @@ bool IpcBridge::ConsumeLatestPair() {
         (std::max)(copyStats_.maxMicroseconds, copyMicroseconds);
 
     latestFrameId_ = frameId;
+    latestImageCamera_ = camera;
     ++consumedFrames_;
     if (consumedFrames_ == 1 || consumedFrames_ % 300 == 0) {
         std::ostringstream message;
@@ -457,7 +467,8 @@ bool IpcBridge::FinishPendingCopy() {
 
 bool IpcBridge::FindAndClaimPair(std::uint32_t& slotIndex,
                                  std::uint64_t& frameId,
-                                 std::uint64_t& generation) {
+                                 std::uint64_t& generation,
+                                 FearVrGameCameraSample& camera) {
     std::array<std::uint32_t, FEARVR_SLOTS_PER_EYE> order{};
     for (std::uint32_t index = 0; index < FEARVR_SLOTS_PER_EYE; ++index) {
         order[index] = index;
@@ -496,6 +507,15 @@ bool IpcBridge::FindAndClaimPair(std::uint32_t& slotIndex,
         slotIndex = candidate;
         frameId = left.frameId;
         generation = left.generation;
+        camera = {};
+        if (left.camera.frameId == frameId &&
+            right.camera.frameId == frameId &&
+            std::memcmp(
+                &left.camera, &right.camera,
+                sizeof(FearVrGameCameraSample)) == 0 &&
+            IsValidGameCameraSample(left.camera)) {
+            camera = left.camera;
+        }
         return true;
     }
     return false;
@@ -667,6 +687,41 @@ ID3D11ShaderResourceView* IpcBridge::ImageView(
 
 std::uint64_t IpcBridge::LatestFrameId() const noexcept {
     return latestFrameId_;
+}
+
+bool IpcBridge::LatestImageCamera(
+    FearVrGameCameraSample& camera) const noexcept {
+    if (!IsValidGameCameraSample(latestImageCamera_) ||
+        latestImageCamera_.frameId != latestFrameId_) {
+        return false;
+    }
+    camera = latestImageCamera_;
+    return true;
+}
+
+bool IpcBridge::LatestGameCamera(
+    FearVrGameCameraSample& camera) const noexcept {
+    if (shared_ == nullptr) {
+        return false;
+    }
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const std::uint64_t before =
+            ReadAtomic64(shared_->cameraSequence);
+        if ((before & 1ULL) != 0 || before == 0) {
+            continue;
+        }
+        const FearVrGameCameraSample snapshot =
+            shared_->latestCamera;
+        MemoryBarrier();
+        const std::uint64_t after =
+            ReadAtomic64(shared_->cameraSequence);
+        if (before == after && (after & 1ULL) == 0 &&
+            IsValidGameCameraSample(snapshot)) {
+            camera = snapshot;
+            return true;
+        }
+    }
+    return false;
 }
 
 BridgeCopyStats IpcBridge::TakeCopyStats() noexcept {

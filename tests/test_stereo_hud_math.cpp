@@ -32,10 +32,10 @@ int main() {
         fearvr::IsSafePostWorldCoverage(1, 100),
         "sparse HUD coverage must be accepted");
     ok &= Expect(
-        fearvr::IsSafePostWorldCoverage(20, 100),
+        fearvr::IsSafePostWorldCoverage(3, 100),
         "the sparse HUD coverage boundary must be accepted");
     ok &= Expect(
-        !fearvr::IsSafePostWorldCoverage(21, 100),
+        !fearvr::IsSafePostWorldCoverage(4, 100),
         "fullscreen-effect coverage must be rejected");
     ok &= Expect(
         !fearvr::IsSafePostWorldCoverage(0, 100),
@@ -59,17 +59,17 @@ int main() {
         fearvr::StereoHudSourceColumn(512, 384, 1024, 768) == 512,
         "the reticle column must remain unchanged");
     ok &= Expect(
-        fearvr::StereoHudSourceRow(500, 768) == 529,
-        "the lower HUD must move up toward the centre");
+        fearvr::StereoHudSourceRow(500, 768) == 500,
+        "post-world text rows must retain exact source pixels");
     ok &= Expect(
-        fearvr::StereoHudSourceColumn(200, 300, 1024, 768) == 122,
-        "the left-side HUD must move inward");
+        fearvr::StereoHudSourceColumn(200, 300, 1024, 768) == 200,
+        "post-world text columns must retain exact source pixels");
     ok &= Expect(
-        fearvr::StereoHudSourceColumn(748, 400, 1024, 768) == 807,
-        "the right-side HUD must move inward");
+        fearvr::StereoHudSourceColumn(748, 400, 1024, 768) == 748,
+        "right-side text must retain exact source pixels");
     ok &= Expect(
-        fearvr::StereoHudSourceRow(20, 768) == 768,
-        "rows whose source lies outside the image must be clipped");
+        fearvr::StereoHudSourceRow(20, 768) == 20,
+        "top rows must remain visible without shrink clipping");
 
     // Der eigentliche Fehler der frueheren Zonenverschiebung: Ein HUD-Element,
     // das eine Zonengrenze kreuzte, wurde zerschnitten. Eine stetige und

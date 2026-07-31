@@ -130,8 +130,24 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   `GetRenderTargetData`, Zeilenkopie und `UpdateSurface` in eine
   D3D9Ex-Shared-Texture. Das Protokoll setzt ausdrücklich
   `FEARVR_BF_CPU_FALLBACK`.
+- **Produktionsoptimierung:** Ein eigener `d3d9.dll`-Proxy neben `FEAR.exe`
+  sieht `CreateDevice` garantiert früh und ergänzt
+  `D3DCREATE_MULTITHREADED`. Der Present-Thread kopiert das fertige Auge nur
+  noch GPU-intern in einen gepufferten Render-Target-Slot. Ein Worker wartet
+  auf dessen GPU-Query, führt `GetRenderTargetData`, Zeilenkopie,
+  `UpdateSurface` und die Slot-Veröffentlichung aus. Es wartet höchstens ein
+  Bild; ein neueres ersetzt das noch nicht gelesene alte Bild
+  („latest frame wins“). Ein vorhandener fremder D3D9-Wrapper wird in der
+  Entwicklungsinstallation als `d3d9.fearvr-upstream.dll` gesichert und von
+  der Bridge weiterverkettet.
+- **Messung/Beleg:** Vor der Umstellung blockierte der Transfer F.E.A.R.s
+  Present-Thread im echten 1920×1080-Stereolauf durchschnittlich 16–17,5 ms
+  (Spitzen bis etwa 28 ms). Im asynchronen Lauf
+  `logs\m5-fear-20260731-003009` sank die Arbeit im Present-Thread auf
+  ungefähr 0,17–0,31 ms. Der verbleibende Readback/Upload läuft mit ungefähr
+  14 ms im Worker. Der Benutzer bewertete den Lauf als „richtig gut“.
 - **Bekannte Nachteile:** Per-Frame-CPU-Readback, zusätzliche Latenz und
-  Bandbreite; die finale Produktionsinvariante ist damit nicht erfüllt.
+  Bandbreite bleiben; die finale Nullkopie-Invariante ist damit nicht erfüllt.
   Seit dem GPU-Kompositor sind es zwei Readbacks pro Bild statt drei — je
   einer pro Auge, und die sind der Preis des klassischen Geräts, nicht des
   HUDs. Weg wären sie erst, wenn das Spielgerät selbst ein D3D9Ex-Gerät
@@ -187,7 +203,20 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   jeder Renderanforderung ihre OpenXR-Pose/FOV zu; der Compositor erhält
   zusammen mit dem importierten Bild exakt dessen Renderpose und kann korrekt
   zeitwarpen.
+- **Lokomotionsmessung seit Protokoll v6:** Der x86-Client veröffentlicht
+  zusätzlich die Basis-Spielkamera jedes Stereo-Bilds sowie die neueste
+  gerenderte Spielkamera. Der Host misst daraus den Weg, den das noch
+  angezeigte Bild hinter der aktuellen Spielkamera liegt. Die Quellpose wird
+  damit bewusst **nicht** verschoben: Ohne Tiefenpuffer würde eine
+  Projektions-Layer-Translation nahe und ferne Objekte gleich behandeln und
+  erzeugte im Live-Test kurzzeitige Mehrfachbilder bei Stick-Lokomotion.
+  Vertikale Kamerabewegung, mehr als 50 cm Abstand, mehr als 16 Frames Alter
+  und eine gleichzeitige Basisdrehung über ungefähr 5 Grad werden für die
+  Telemetrie verworfen.
 - **Bekannte Nachteile:** Der klassische D3D9-CPU-Transfer bleibt teuer.
+  Korrekte positionelle Nachprojektion benötigt einen zum Bild gehörenden
+  Tiefenpuffer; bis dahin wird Stick-Latenz durch frischere Bildübertragung
+  statt durch tiefenlose Layer-Translation reduziert.
   Translation besitzt noch keine Weltkollision und bleibt deshalb
   standardmäßig aus.
 - **Rückfallpfad:** Bei 250 ms ohne frische Pose wird Mono verwendet; die erste
@@ -227,6 +256,9 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 
 ### AD-010 — SteamVR-Desktop-Theater beim Retail-Start unterdrücken
 
+- **Status 31.07.2026:** Verworfen. Die beiden Theater-Hilfsskripte sowie ihre
+  Launcher- und Release-Aufrufe wurden entfernt. Der aktuelle Startpfad
+  verändert keine SteamVR-Konfiguration und startet keinen Wächter.
 - **Problem:** F.E.A.R. muss offiziell mit `steam.exe -applaunch 21090`
   gestartet werden. SteamVR erkennt es trotzdem als Desktopspiel und kann
   verzögert eine Theaterfläche über der bereits aktiven OpenXR-Szene öffnen.
@@ -306,13 +338,19 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   installierten Modells, bestimmt die sechs Arm-Komponenten (beide Seiten und
   drei LODs) und rasterisiert deren UV-Dreiecke in die Alphaebene einer lokal
   erzeugten DXT3-Textur. Eine Kontrollmaske stellt sicher, dass keine Hand-UVs
-  getroffen werden.
+  getroffen werden. Der Generator baut die Alphaebene aller elf DDS-Mipmaps
+  neu auf; die kleineren Mips der undurchsichtigen Retail-Textur dürfen nicht
+  übernommen werden, weil ihre ursprünglich ungenutzten Alpha-Werte Körper und
+  Hände beim Alpha-Test verwerfen würden. Das Material übernimmt
+  `SurfaceFlags=0` von Retails funktionierenden Alpha-Test-Körpermaterialien.
 - **Bekannte Nachteile:** Knochen zu skalieren oder zu verschieben scheidet
   aus. Node-Control liefert nur einen `LTRigidTransform`, und ein Kollabieren
   der Armknochen erzeugt bei geskinnten Meshes einen sichtbaren Splitter vom
   Oberkörper zur Hand.
-- **Rückfallpfad:** `Show arms: ON` bzw. `ShowArms=1` setzt das unveränderte
-  Retail-Material ein. Standard ist AUS; die Wahl wird sofort gespeichert.
+- **Arm-Sichtbarkeit:** Standard ist `Show arms: OFF` bzw. `ShowArms=0`.
+  Das erzeugte Alpha-Test-Material entfernt nur Ober- und Unterarme aus dem
+  gemeinsamen Atlas; Hände, Torso und Beine bleiben sichtbar. `ON` setzt das
+  unveränderte Retail-Material ein. Die Wahl wird sofort gespeichert.
   `HiddenBodyPieces` und F11 bleiben nur als Entwicklerdiagnose erhalten.
 - **Details:** `docs/OPENXR-INPUT.md`, `docs/TESTING.md` §12.
 
@@ -386,12 +424,10 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Gewählte Lösung:** `stage\` wird eintragsweise geleert;
   `userdata-*`-Verzeichnisse bleiben erhalten und verschwinden nur mit
   `-IncludeUserData`. Ohne `-Apply` ist der Lauf ein Trockenlauf.
-- **Externe Änderungen:** Außerhalb der Projektwurzel schreibt der Mod genau
-  `steamvr.autoShowGameTheater`. Zurückgesetzt wird gezielt dieser Schlüssel
-  aus der ältesten Sicherung, nicht die ganze Datei — sonst gingen alle
-  SteamVR-Einstellungen verloren, die seither entstanden sind. War der
-  Schlüssel ursprünglich nicht vorhanden, wird die eingefügte Zeile entfernt.
-  Es gibt keine Registry-Änderung und keinen Retail-Schreibzugriff.
+- **Externe Änderungen:** Der aktuelle Entwicklungsstart schreibt weder in die
+  SteamVR-Konfiguration noch in die Registry oder Retail-Installation. Der
+  Deinstaller behält nur die gezielte Wiederherstellung alter
+  `autoShowGameTheater`-Sicherungen für frühere Revisionen.
 - **Bekannte Nachteile:** Läuft SteamVR noch, überschreibt es seine
   Konfiguration beim Beenden. Das Skript warnt und bietet
   `-Scope ProjectOnly` für genau diesen Fall.
@@ -421,16 +457,14 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 ### AD-018 — Runtime-unabhängiger Betrieb, Umschaltung per XR_RUNTIME_JSON
 
 - **Problem:** Der Mod soll auch über Virtual Desktop laufen und dabei nicht
-  von SteamVR abhängen. Der Host war bereits reines OpenXR, die Startskripte
-  führten aber unbedingt SteamVR-spezifische Schritte aus: `autoShowGameTheater`
-  abschalten und den Theaterwächter starten.
+  von SteamVR abhängen. Der Host war bereits reines OpenXR; inzwischen
+  enthalten auch die Startskripte keine SteamVR-Theater-Sonderbehandlung mehr.
 - **Messung/Beleg:** Mit `ActiveRuntime` auf VDXR meldete
   `fearvr-host.exe --validate-only` am 25.07.2026 `VirtualDesktopXR 1.0.10`,
   erkannte `Meta Quest 3`, wählte dieselbe Adapter-LUID `0x0:D57B` und
   erzeugte zwei Swapchains mit `2688x2880` — gegenüber `2064x2208` unter
   SteamVR. Exitcode 0. Ein vollständiger Spielstart mit `-Runtime vdxr` lief
-  ohne SteamVR; im Laufverzeichnis entstand keine
-  `steamvr-theater-guard.log`.
+  ohne SteamVR.
 - **Getestete Optionen:** (a) `HKLM\...\Khronos\OpenXR\1\ActiveRuntime`
   umschreiben — verworfen, das ist eine systemweite Einstellung und erfordert
   Administratorrechte; (b) `XR_RUNTIME_JSON` nur für den Hostprozess setzen.
@@ -449,26 +483,24 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Rückfallpfad:** Ohne `-Runtime` gilt unverändert die systemweite
   Einstellung.
 
-### AD-019 — Weitergebbares Paket ohne proprietaere Inhalte
+### AD-019 — Direkt entpackbares Retail-Overlay
 
-- **Problem:** M6 verlangt einen lokalen Installer ohne Retail-Inhalte. Von den
-  sieben Dateien der Spielstage stammen fuenf aus den Public Tools
-  (`GameOrig.dll`, `GameServer.dll`, `ClientFx.fxd`, `FEAR.dep`,
-  `FEARMod.Arch00s`) und duerfen nicht weitergegeben werden.
-- **Messung/Beleg:** Eine Suche im Retail-Verzeichnis am 25.07.2026 fand keine
-  dieser Dateien lose; sie existieren dort ueberhaupt nicht. Nur `GameClient.dll`
-  (Loader) und `fearvr-d3d9.dll` sind eigener Code.
-- **Gewählte Lösung:** `tools\make-release.ps1` packt ausschliesslich eigene
-  Binaries, Skripte und Doku (rund 1,7 MB). `install.ps1` holt die fuenf
-  Public-Tools-Module auf dem Zielrechner aus dessen eigener Installation und
-  verifiziert sie ueber den Hash des unveraenderten VC7.1-`GameClient.dll`.
-  Das Paketskript prueft am Ende gegen Dateinamen **und** gegen diesen Hash,
-  dass nichts Proprietaeres mitgepackt wurde, und bricht sonst ab.
-- **Installationsziel:** ein eigener Ordner mit Desktop-Verknuepfung, nicht der
-  Retail-Ordner. Retail bleibt unbeschrieben, die Steam-Dateipruefung sauber,
-  und die Deinstallation ist ein Ordnerloeschen.
-- **Bekannter Nachteil:** Der Empfaenger muss die Public Tools selbst
-  installieren, inklusive des Registry-Tricks `Patch=8`.
+- **Problem:** Der Release soll ohne separaten Mod-Installer direkt über eine
+  vorhandene F.E.A.R.-1.08-Installation entpackt werden. Fünf Laufzeitdateien
+  stammen jedoch aus den Public Tools und deren EULA erlaubt keine öffentliche
+  Weitergabe.
+- **Gewählte Lösung:** Das ZIP enthält `FEARVR\` sowie zwei Doppelklick-Starter
+  und ersetzt keine Retail-Datei. `prepare-overlay.ps1` erzeugt `archcfg` und
+  Deployment-Metadaten am endgültigen Ort. Das öffentliche Paket ergänzt die
+  fünf Public-Tools-Module beim ersten Start aus der lokalen Installation des
+  Besitzers.
+- **Privater Komplettmodus:** `tools\make-release.ps1 -PrivateBundle` nimmt
+  lokale Public-Tools-Module und abgeleitete Body-Assets auf. Damit ist das ZIP
+  nach dem Entpacken sofort startbar; Manifest und Hinweisdatei markieren es
+  ausdrücklich als nicht weiterverteilbar.
+- **SteamVR:** Es gibt keinen getrennten SteamVR-Renderer. Derselbe x64-
+  OpenXR-Host wird über Valves `steamxr_win64.json` an die SteamVR-Runtime
+  gebunden; ein eigener Starter erzwingt diesen Pfad.
 - **Details:** `tools\release\README-PACKAGE.md`, `docs/TESTING.md` §17.
 
 ### AD-020 — Installationsziel nicht unterhalb von %LOCALAPPDATA%

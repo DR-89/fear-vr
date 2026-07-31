@@ -50,6 +50,10 @@ public:
     [[nodiscard]] ID3D11ShaderResourceView* ImageView(
         std::uint32_t eye) const noexcept;
     [[nodiscard]] std::uint64_t LatestFrameId() const noexcept;
+    [[nodiscard]] bool LatestImageCamera(
+        FearVrGameCameraSample& camera) const noexcept;
+    [[nodiscard]] bool LatestGameCamera(
+        FearVrGameCameraSample& camera) const noexcept;
 
     // Liefert die seit dem letzten Aufruf gesammelten Copyzeiten und setzt
     // die Zähler zurück.
@@ -67,7 +71,8 @@ private:
     bool FinishPendingCopy();
     bool FindAndClaimPair(std::uint32_t& slotIndex,
                           std::uint64_t& frameId,
-                          std::uint64_t& generation);
+                          std::uint64_t& generation,
+                          FearVrGameCameraSample& camera);
     bool ValidateAndOpenSource(std::uint32_t eye,
                                std::uint32_t slotIndex);
     bool EnsurePrivateTexture(std::uint32_t eye,
@@ -97,6 +102,7 @@ private:
     ULONGLONG lastGameHeartbeatTick_{0};
     std::uint64_t lastGameHeartbeat_{0};
     std::uint64_t latestFrameId_{0};
+    FearVrGameCameraSample latestImageCamera_{};
     std::uint64_t lastHapticRequestId_{0};
     std::uint64_t consumedFrames_{0};
     BridgeCopyStats copyStats_{};

@@ -23,11 +23,10 @@ $script:FearVr = [ordered]@{
     SdkInstallerRel = 'extras\fear_publictools_108.exe'
     SdkInstallerSize = 671441087
     SdkInstallerSha256 = '11AAA4128528403F7BC9EA5119C68051C62B92A99E6411DFD749AF55E9B19DF8'
-    # --- EchoPatch (Wemino), als dinput8.dll neben FEAR.exe ------------------
-    # Die einzige Fremdsoftware, die bewusst IN der Retail-Installation liegt.
-    # Sie besteht aus genau zwei Dateien und wird von tools\install-echopatch.ps1
-    # gesetzt und wieder entfernt. FEAR.exe selbst bleibt unangetastet, solange
-    # CheckLAAPatch = 0 in der EchoPatch.ini steht.
+    # --- Historische EchoPatch-Testdaten -------------------------------------
+    # Nur noch für Erkennung und saubere Entfernung alter Testinstallationen.
+    # Der aktive Mod verwendet stattdessen den eigenen, minimalen dinput8-Proxy
+    # aus src\dinput8_proxy.
     EchoPatchVersion = '4.2.1'
     EchoPatchZipRel = 'vendor-local\echopatch\EchoPatch-4.2.1.zip'
     EchoPatchZipSize = 1978793

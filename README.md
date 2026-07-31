@@ -29,8 +29,8 @@ F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
 ## Installation
 
-The installer finds the usual paths on its own. When it cannot, it asks for
-them and shows examples — nothing has to be edited by hand.
+The release is a binary overlay: extract it directly into the existing game
+folder that contains `FEAR.exe`.
 
 **What you need**
 
@@ -38,7 +38,8 @@ them and shows examples — nothing has to be edited by hand.
   Edition is confirmed in-game; GOG and retail-disc copies of 1.08 install and
   launch, but are untested — see [Game editions](#game-editions). Versions
   below 1.08 are rejected, because the Public Tools modules do not match them.
-- The official **Public Tools 1.08**, installed on this machine (see step 1).
+- A public archive needs the official **Public Tools 1.08** installed locally.
+  A personal `-PrivateBundle` already contains the required runtime modules.
 - A headset with **SteamVR** or **Virtual Desktop (VDXR)** as the active
   OpenXR runtime. Native SteamVR hardware is covered by explicit Valve Index
   and HTC Vive Wand controller profiles; Lighthouse headsets without bundled
@@ -54,125 +55,99 @@ Steam/non-Steam option, then click **Install**. That's it — install it and be
 happy. F.E.A.R. VR recognizes both the original Steam executable and the
 executable patched by this texture mod.
 
-### 1. Install the Public Tools 1.08
+### 1. Get the overlay
 
-Five modules (`GameClient.dll`, `GameServer.dll`, `ClientFx.fxd`, `FEAR.dep`,
-`FEARMod.Arch00s`) are proprietary and must not ship with this mod. They come
-from Monolith's own installer `fear_publictools_108.exe`, which the Ultimate
-Shooter Edition includes under `extras\`. The installer copies them out of
-your local Public Tools installation.
-
-The Public Tools installer refuses the Steam version: it reads
-`HKLM\SOFTWARE\WOW6432Node\Monolith Productions\FEAR\1.00.0000\Patch` and
-expects the value **8**, while Steam sets **10**. Set it to 8, install, set it
-back to 10:
-
-```powershell
-$key = 'HKLM:\SOFTWARE\WOW6432Node\Monolith Productions\FEAR\1.00.0000'
-Set-ItemProperty $key -Name Patch -Value 8      # before installing
-Set-ItemProperty $key -Name Patch -Value 10     # after installing
-```
-
-### 2. Get the package
-
-Either download a release archive and unpack it anywhere, or build one
-yourself from this repository:
+Download a release ZIP, or build one:
 
 ```powershell
 pwsh -File tools\make-release.ps1
 ```
 
-### 3. Run the installer
-
-In the unpacked package, double-click **`Install.cmd`**. The window stays open
-at the end so the result stays readable. From a shell it is:
+Developers who own the Public Tools can build an immediately playable
+personal archive:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\install.ps1
+pwsh -File tools\make-release.ps1 -PrivateBundle
 ```
 
-That is the whole command for a normal setup. It detects the game and the
-Public Tools, builds an isolated stage under `%USERPROFILE%\FearVR`, and
-creates a desktop shortcut named **F.E.A.R. VR**. The retail installation is
-only read, never written — a Steam file verification stays clean.
+That private archive contains proprietary Public Tools runtime files. It is
+marked **not for redistribution** because their EULA does not grant public
+redistribution rights.
 
-If a path cannot be detected, the installer prints examples and asks for it.
-You can also pass paths up front:
+### 2. Extract over the game
+
+Extract the ZIP directly into the folder containing `FEAR.exe`. It adds:
+
+```text
+dinput8.dll
+d3d9.dll
+FEARVR\
+Start F.E.A.R. VR.cmd
+Start F.E.A.R. VR - SteamVR.cmd
+```
+
+No retail executable or archive is replaced. `dinput8.dll` is F.E.A.R. VR's
+own early DirectInput proxy; it disables the base game's known accumulating
+HID performance bug before input initialization, then forwards to Windows'
+real DirectInput implementation. `d3d9.dll` is the early renderer bridge that
+enables the non-blocking transfer worker before the game creates its graphics
+device. If another graphics wrapper already uses that filename, preserve it
+before extraction; the development installer chains such a preserved wrapper
+as `d3d9.fearvr-upstream.dll`. Updating is the same operation: extract the
+newer ZIP over the same folder. Saves, configuration and logs stay below
+`FEARVR\`.
+
+### 3. Public Tools for the public archive
+
+On first launch, the public archive copies five proprietary runtime modules
+from the owner's local Public Tools installation. The official
+`fear_publictools_108.exe` is included with the Steam Ultimate Shooter Edition
+under `extras\`.
+
+The old installer expects registry value `Patch=8`, while Steam normally uses
+10. Set it to 8 for installation and restore 10 afterwards:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\install.ps1 `
-  -InstallDir "D:\Games\FearVR" `
-  -RetailRoot "D:\SteamLibrary\steamapps\common\FEAR Ultimate Shooter Edition" `
-  -PublicToolsGame "C:\Program Files (x86)\Monolith Productions\FEAR Public Tools"
+$key = 'HKLM:\SOFTWARE\WOW6432Node\Monolith Productions\FEAR\1.00.0000'
+Set-ItemProperty $key -Name Patch -Value 8
+# run extras\fear_publictools_108.exe
+Set-ItemProperty $key -Name Patch -Value 10
 ```
 
-**Path examples**
-
-| Option | What to enter | Examples |
-|---|---|---|
-| `-RetailRoot` | The folder containing `FEAR.exe` | `C:\Program Files (x86)\Steam\steamapps\common\FEAR Ultimate Shooter Edition`<br>`D:\SteamLibrary\steamapps\common\FEAR Ultimate Shooter Edition`<br>`C:\GOG Games\FEAR`<br>`C:\Program Files (x86)\Sierra\FEAR` |
-| `-PublicToolsGame` | The Public Tools folder, or its `Dev\Runtime\Game` subfolder | `C:\Program Files (x86)\Monolith Productions\FEAR Public Tools`<br>`C:\Program Files (x86)\Monolith Productions\FEAR Public Tools\Dev\Runtime\Game` |
-| `-InstallDir` | Where the mod's own files go (default `%USERPROFILE%\FearVR`) | `C:\Users\You\FearVR`<br>`D:\Games\FearVR` |
-
-Quotes are required around paths with spaces, and pasted quotes are stripped
-automatically. Further options: `-NoShortcut` (no desktop shortcut) and
-`-NonInteractive` (never prompt — fail instead, for unattended installs).
-
-> **Do not install below `%LOCALAPPDATA%`.** The LithTech engine then fails to
-> load its archive configuration and aborts with "Failed to initialize client -
-> unable to load game resources". This was measured with a byte-identical
-> configuration in different locations; only the location decides. The
-> installer rejects such targets and asks for another one.
-
-### 4. Updating
-
-Double-click `Install.cmd` in the new package — there is nothing to uninstall
-first.
-
-It detects the existing installation, reuses the paths and launch mode from
-last time (so no arguments are needed even if you passed some originally),
-replaces the modules, and drops any module a newer package no longer uses.
-**Saved games and profiles under `userdata` are kept.** Close the game first —
-the installer refuses to run while `FEAR.exe` is open, because the staged
-modules are locked then.
-
-Add `-Clean` to wipe the install folder except `userdata` before staging
-again, if an installation ever ends up in a strange state.
-
-### 5. Play
-
-Start SteamVR or the Virtual Desktop Streamer first, then use the desktop
-shortcut, or:
+For a custom location, pass its root or `Dev\Runtime\Game` folder:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\play.ps1
+.\Start F.E.A.R. VR.cmd -PublicToolsGame "D:\FEAR Public Tools\Dev\Runtime\Game"
 ```
 
-Steam has to be running as the store front (`-applaunch 21090`); SteamVR
-itself is optional if you use VDXR. To pick a runtime explicitly, add
-`-Runtime steamvr` or `-Runtime vdxr`.
+### 4. Play
 
-### 6. Uninstall
+Start the headset runtime, then double-click `Start F.E.A.R. VR.cmd`. To force
+Valve's runtime, use `Start F.E.A.R. VR - SteamVR.cmd`.
 
-Double-click `Uninstall.cmd`. It lists what would be removed and deletes only
-after you confirm with **Y**. From a shell:
+SteamVR is an OpenXR runtime, so this uses the same x64 host binary with
+Valve's runtime manifest—not a separate renderer or a compatibility wrapper.
+VDXR can be selected with `-Runtime vdxr`; the system-wide OpenXR setting is
+never changed.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1          # dry run
-powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -Apply   # remove
-```
+Steam still has to run as the store front for a Steam copy
+(`-applaunch 21090`). This is independent of which VR runtime renders.
 
-Saved games and profiles under `<InstallDir>\userdata` are kept unless you add
-`-IncludeUserData`. Since nothing was ever written into the retail folder,
-there is nothing to repair there.
+### 5. Remove
+
+Delete `dinput8.dll`, `d3d9.dll`, the `FEARVR` folder and the two
+`Start F.E.A.R. VR*.cmd` files. No original retail file was replaced, so a
+Steam file verification is unnecessary.
 
 ### Game editions
 
-The mod is not bound to a specific store. Every byte signature it relies on
-lives in `GameOrig.dll`, the stock client that comes from the Public Tools —
-`FEAR.exe` itself is only hooked through its import table, which no build-
-specific address is derived from. What differs between editions is how the
-game is started:
+The mod is not bound to a specific store. Most byte signatures live in
+`GameOrig.dll`, the stock client from the Public Tools. The early HID fix also
+checks two F.E.A.R. 1.08 code regions in the in-memory `FEAR.exe`; it applies
+only when timestamp, image size and every still-unpatched byte match. A
+supported wrapper may already have safely patched either region; the proxy
+then completes only the other verified region. It never edits the executable
+on disk. What differs between editions is how the game starts:
 
 | Edition | Launch | Status |
 |---|---|---|
@@ -181,14 +156,13 @@ game is started:
 | GOG (1.08) | `FEAR.exe` directly, same arguments | Should work, untested |
 | Retail disc, patched to 1.08 | `FEAR.exe` directly, same arguments | Should work, untested |
 
-The installer picks the launch mode itself: a copy under `steamapps\common`
-goes through Steam, anything else is started directly. Override it with
-`-LaunchMode steam` or `-LaunchMode direct`.
+The overlay picks the launch mode itself: a copy under `steamapps\common`
+goes through Steam, anything else is started directly.
 
-An unknown `FEAR.exe` build is no longer an error. The installer prints its
-SHA-256 with a warning that this build is untested and continues. If you run
-a GOG or disc copy, that hash plus a note whether it worked is exactly what's
-needed to list the build as confirmed.
+An unknown `FEAR.exe` build is no longer an error. The overlay records its
+SHA-256 with a warning and continues; on a byte mismatch the HID patch remains
+off rather than touching unknown code. If you run a GOG or disc copy, that hash
+plus the `fear_hid_fix` result from the log is what is needed to confirm it.
 
 The HDTextures4FEAR/XP v2.0.2 installer replaces the Steam executable. Its
 patched hash and the original Steam hash are both recognized. Installing or
@@ -201,9 +175,10 @@ require reinstalling the VR mod; unknown executable changes are still rejected.
 |---|---|
 | `Wrong FEAR.exe version` | Not patched to 1.08, or `-RetailRoot` points at a different installation. |
 | `This FEAR.exe build has not been tested` | A 1.08 build other than Steam's (GOG, disc). Installation continues; please report whether it works. |
-| `Public Tools 1.08 not found` | Not installed, or installed to a custom folder — pass `-PublicToolsGame` (see step 1 for the `Patch=8` trick). |
-| `unable to load game resources` at startup | The install folder is below `%LOCALAPPDATA%`; reinstall with `-InstallDir "D:\Games\FearVR"`. |
+| `Public Tools 1.08 not found` | The public archive could not find them—install the copy under `extras\`, pass `-PublicToolsGame`, or use a local `-PrivateBundle`. |
 | `Package file is missing or was modified` | The package was altered after it was built; unpack it again. |
+| Steam creates no `FEAR.exe` after three launch attempts | The launcher now falls back to the verified executable directly while Steam remains running, then still verifies that the matching VR bridge loaded. |
+| `vrmonitor.exe` reports missing `d3dx10_43.dll` | SteamVR's legacy status window is missing the DirectX End-User Runtimes (June 2010). A private bundle supplies the local x64 redistributable through the child-process path without modifying SteamVR. |
 
 ## Features
 
@@ -221,9 +196,16 @@ something is built but not yet verified in-game, it's noted.
   initialized automatically.
 - **Optional HMD translation** up to 25 cm (`-Translation`). Without world
   collision, deliberately opt-in.
-- **Stereo HUD.** Ammo, health and hints are overlaid into both eyes instead
-  of flat over the left image. The HUD is evenly compressed toward the screen
-  center (5/4) so edge elements stay within the comfortable field of view.
+- **Support-wrist status HUD.** Looking directly at the inside of the support
+  wrist opens a compact technical line display for health, armor, total ammo,
+  frag grenades, proximity mines, remote charges, medkits and air. It renders
+  in front of the hand without depth occlusion and stays closed while the
+  support hand holds the weapon. The classic status panels are hidden only
+  during active stereo gameplay and restored before pause, ESC and fullscreen
+  menus render.
+- **Stereo overlay for remaining HUD messages.** Hints and other non-status
+  overlays are still lifted into both eyes instead of being left flat over
+  one eye.
 - **Flat-screen mode for fullscreen UI.** Menus, loading screens, movies and
   the mission briefing appear as a world-locked 2.4 × 1.8 m panel at 2 m
   distance. Detection is based on the retail game state
@@ -261,9 +243,10 @@ something is built but not yet verified in-game, it's noted.
 - **Red aim laser** from the muzzle, toggleable on/off.
 - **Point instead of look.** Activate and pick-up follow the weapon laser
   with approx. 1.5 m range, instead of head direction.
-- **Hand flashlight in the left hand.** It follows the hand's position and aim
-  direction and toggles with X. The second,
-  non-toggleable retail flashlight is removed.
+- **Configurable VR flashlight.** It can follow the left hand, the headset or
+  the weapon (default) and toggles with X. Head mode keeps world shadows but suppresses
+  shadows from the player's body, hands and weapon so they cannot block the
+  head-mounted beam. The second, non-toggleable retail flashlight is removed.
 - **Full gesture melee.** A forward thrust of either available hand produces
   the weapon or off-hand strike. The same thrust becomes a jump kick during a
   player-initiated jump. Sprinting forward plus a physical 25 cm crouch or
@@ -285,21 +268,34 @@ something is built but not yet verified in-game, it's noted.
   and collision capsule remain at the player position. No locomotion axes are
   injected, preventing counter-steering or oscillation. Switchable as
   `Physical lean` in the VR settings.
+- **Physical duck.** Lowering the headset by 26 cm engages Retail crouch and
+  releases above an 18 cm hysteresis threshold. It is independently
+  switchable in VR settings; the classic stick crouch always remains active.
 - **Leaning via hand tilt.** Tilting the left hand sideways leans around
   corners; inverted and hanging hands are handled.
 - **Haptics per shot**, including full-auto — triggered on the retail shot,
-  not on the trigger edge. Empty magazine = no vibration.
+  not on the trigger edge. Empty magazine = no vibration; Dual Pistols pulse
+  the controller whose pistol actually fired.
+- **Native Dual Pistols in both hands.** The left pistol follows the support
+  controller with its own muzzle and aim ray. Left trigger fires left, right
+  trigger fires right; holding both lets Retail alternate its dual-pistol
+  cadence. While they are equipped, X controls slow-mo and leaves the current
+  flashlight state unchanged.
 
 ### Menu and Settings
 
 - **Native VR settings page** in the ESC menu ("VR SETTINGS"), usable with
   the controller: Stereo rendering, Stereo HUD, Turn speed, Red aim
-  guide, Controller vibration, Controls (right/left-handed), Ladder climbing
-  (hands or classic), Melee (gestures or classic), Show arms, FOV scale,
+  guide, Controller vibration, Flashlight mount (left hand/head/weapon),
+  Controls (right/left-handed), Ladder climbing (hands or classic), Physical
+  lean, Physical duck, Melee (gestures or classic), Show arms, FOV scale,
   Recenter 2D panel, Reset VR defaults.
 - **Persistence in `fearvr.ini`**, including settings not exposed in the menu:
   HMD translation, head bob, comfort screen and four individual melee moves.
-- **Body visibility switch** saved as `ShowArms` (`0` by default). F11 remains
+- **Body visibility switch** saved as `ShowArms` (`0` by default). The
+  generated Alpha-Test material hides only upper and lower arms; hands, torso
+  and legs remain visible, while the head is hidden through its separate
+  material slot. F11 remains
   a developer diagnostic for isolating Retail body pieces, not the arm-hiding
   mechanism.
 
@@ -310,10 +306,10 @@ something is built but not yet verified in-game, it's noted.
   If the host crashes, the game continues flat.
 - **Runtime selection at launch:** SteamVR and VirtualDesktopXR are confirmed;
   `-Runtime` sets `XR_RUNTIME_JSON` only for the host process.
-- **SteamVR Desktop Theater** is automatically disabled and monitored; under
-  VDXR this is skipped entirely.
-- **Structured JSON logs** for host and bridge with perf counters; each run
-  writes to its own directory under `logs\`.
+- **No SteamVR configuration helpers:** launching through SteamVR no longer
+  edits `steamvr.vrsettings` or starts a theater watchdog.
+- **Structured JSON logs** for launcher, host and bridge with perf counters;
+  each run writes to its own directory under `logs\`.
 - **Version-bound with fail-safe.** All retail hooks check timestamp, image
   size and expected byte patterns. If something doesn't match, the hook stays
   disabled and the game continues. Diagnostic switches like `-fearvr-safe`,
@@ -324,10 +320,10 @@ something is built but not yet verified in-game, it's noted.
 
 ## Core Principles
 
-- **Retail stays untouched.** Nothing is written into the Steam installation
-  and no original EXE/DLL/archive file is overwritten. All work happens in an
-  isolated stage under the project root (`stage/`) with its own
-  `-userdirectory`.
+- **Original retail files stay untouched.** The development and release
+  launchers add their own `dinput8.dll` and `d3d9.dll` proxies beside
+  `FEAR.exe`; no original EXE/archive is overwritten. Game modules, saves and
+  logs remain in the isolated stage or `FEARVR\` overlay.
 - **No retail/SDK/asset files in Git.** See `.gitignore`.
 - **Separate processes by bitness:** an x64 OpenXR host owns the OpenXR
   session; the x86 `FEAR.exe` renders via a `d3d9.dll` bridge and a locally
@@ -341,7 +337,7 @@ SteamVR / OpenXR (x64)
    ^  OpenXR + XR_KHR_D3D11_enable
 fearvr-host.exe (x64, D3D11)
    ^  versioned IPC (poses, FOV, shared texture handles)
-FEAR.exe (x86, D3D9) + d3d9.dll bridge + GameClient module (x86)
+FEAR.exe (x86) + early dinput8 HID fix + D3D9 bridge + GameClient module
    v  LithTech RenderCamera, twice per frame
 ```
 
@@ -355,6 +351,7 @@ Details: `docs/ARCHITECTURE.md`.
 | `src/common/` | shared IPC contract (`protocol.h`) + math |
 | `src/host64/` | x64 OpenXR host (`fearvr-host.exe`) |
 | `src/proxy32/` | x86 D3D9 proxy/bridge |
+| `src/dinput8_proxy/` | early x86 DirectInput forwarder and guarded HID fix |
 | `src/gameclient_loader/` | ABI-neutral loader for the real `archcfg` stage |
 | `src/launcher/` | Launcher (starts host, then isolated `FEAR.exe`) |
 | `game-source-overlay/` | only **newly written** GameClient project files |
@@ -386,16 +383,15 @@ Checks retail path, `FEAR.exe` hash/version, OpenXR runtime, registry and
 available build tools, and reports missing components — without changing
 anything.
 
-## EchoPatch (tried, then removed)
+## Base-game HID slowdown fix
 
-[EchoPatch](https://github.com/Wemino/EchoPatch) was evaluated as a companion
-patch and is **not** installed. Its crash handler is a vectored exception
-handler and killed the game on startup, because this mod deliberately probes
-retail internals behind `__try/__except`. With that disabled, EchoPatch aborted
-on a missing signature — it patches the game modules, and this mod renames the
-retail client to `GameOrig.dll`. Everything EchoPatch is known for (FOV, HUD
-scaling, SSAA, gamepad) had to be switched off for VR anyway. Full reasoning
-and a reproducible install script, should anyone want to retry:
+The original game can initialize general HID devices as controllers and then
+degrade permanently after several minutes until the process is restarted.
+F.E.A.R. VR now includes only the isolated correction for those redundant
+input blocks plus the legacy input-hook latency block. The patch validates all
+original bytes before replacing them with NOPs and records `fear_hid_fix` in
+each run log. The full EchoPatch remains uninstalled because its unrelated
+module hooks and exception handler conflict with this VR mod. Details:
 `docs/ECHOPATCH.md`.
 
 ## Build
@@ -486,9 +482,8 @@ permanently, do so in the Virtual Desktop Streamer or SteamVR respectively.
 `tools\verify-install.ps1` shows the active runtime and which ones are
 installed.
 
-Only under SteamVR are SteamVR-specific steps executed (disable
-`autoShowGameTheater`, theater watchdog). Under VDXR they are skipped
-entirely, and no SteamVR file is touched.
+Runtime selection only affects the host's OpenXR manifest. Neither SteamVR nor
+VDXR launch edits SteamVR settings or starts an auxiliary theater process.
 
 **Steam is still required** — but only as the store: F.E.A.R. is officially
 launched via `steam.exe -applaunch 21090`. This is independent of which VR
@@ -500,19 +495,25 @@ Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click performs a melee attack in the 3D world and re-anchors the panel in 2D.
 A switches weapons, B reloads (short press) or
 throws a grenade (hold), X toggles the flashlight, Y opens pause. Right grip
-uses, the left trigger toggles slow-mo, and the right trigger
-fires. Tilting the left hand sideways leans around corners.
+uses, the left trigger toggles slow-mo, and the right trigger fires. With Dual
+Pistols equipped, left/right trigger fire the matching pistol and X controls
+slow-mo without changing the flashlight. Tilting the left hand sideways leans
+around corners.
 On Vive Wands, the trackpads replace the sticks, trackpad clicks replace the
 primary face buttons, grip clicks provide sprint/use, the left menu button
 opens pause and the right menu button reloads on a short press or throws a
 grenade when held. Vive Wands have no physical stick clicks: medkit remains
 available on the keyboard, while the normal motion gesture provides melee.
 Holding the weapon with both hands steers longer weapons along the line
-between the hands; sprinting and leaning rest while that grab is held.
+between the hands. The visible support hand snaps to the weapon-specific grip
+from Retail's original animation instead of freezing at the controller's grab
+position; the physical controller still steers the weapon. Sprinting and
+leaning rest while that grab is held.
 `Controls: LEFT-HANDED` in the VR menu mirrors every binding between the
 hands.
-The flashlight is in the left hand, follows its position and aim direction,
-and toggles with X. Every shot vibrates. Mouse,
+The flashlight mount can be switched between left hand, head and weapon in the
+VR menu and toggles with X, except while Dual Pistols reserve X for slow-mo.
+Every shot vibrates. Mouse,
 keyboard and gamepad remain usable in parallel. Details:
 `docs/OPENXR-INPUT.md`.
 
@@ -520,8 +521,9 @@ In first-person view, hands, torso, legs and weapon remain visible; only upper
 and lower arms are hidden by default. `Show arms: ON / OFF` in the VR menu
 switches immediately between the original Retail material and the VR arm mask.
 
-The M5 launch enables the confirmed stereo HUD by default and closes SteamVR's
-delayed F.E.A.R. Desktop Theater automatically. Options:
+The M5 launch enables the stereo overlay and support-wrist status HUD by
+default.
+Options:
 
 - `-Translation`: limited HMD translation up to 25 cm, without world
   collision;
@@ -540,30 +542,30 @@ Keys in-game:
 The ESC menu in M5 contains the English-labeled entry "VR SETTINGS" directly
 after "Options". The page is deliberately short and single-page: Stereo
 rendering, Stereo HUD, Turn speed, Red aim guide, Controller vibration,
-right/left-handed controls, ladder climbing, gesture/classic melee, Show arms,
-FOV scale, Recenter 2D panel, Reset VR defaults and BACK. HMD translation, head
-bob, comfort screen and the four individual melee switches remain configurable
-in `fearvr.ini`
+flashlight mount, right/left-handed controls, ladder climbing, physical lean,
+gesture/classic melee, Show arms, FOV scale, Recenter 2D panel, Reset VR
+defaults and BACK. HMD translation, head bob, comfort screen and the four
+individual melee switches remain configurable in `fearvr.ini`
 without cluttering the native menu. Selection is saved to
 `stage/userdata-m5/fearvr.ini`. Stick navigates, A or trigger confirms and B
 goes back.
 
 ## Uninstall
 
-Outside the project root, the mod writes exactly **one** file:
-`steamvr.vrsettings`, and there only the key
-`steamvr.autoShowGameTheater`. There is no registry change and no write to the
-retail installation. (`tools\install-echopatch.ps1` would place two files in
-the retail folder, but EchoPatch is not installed — see above.)
+The development launcher does not change the registry or SteamVR configuration.
+Stage preparation installs only F.E.A.R. VR's own guarded `dinput8.dll` beside
+`FEAR.exe`; original retail files remain unchanged.
 
 ```powershell
 pwsh -File tools\uninstall-fearvr.ps1          # dry run, changes nothing
 pwsh -File tools\uninstall-fearvr.ps1 -Apply   # actually remove
 ```
 
-Removes `stage\`, `build\`, `dist\`, `local-runtime\`, `logs\` and EchoPatch.
-Beforehand, `autoShowGameTheater` is specifically restored from the oldest
-backup — only that one key, so later custom SteamVR settings are preserved.
+Removes `stage\`, `build\`, `dist\`, `local-runtime\`, `logs\` and the verified
+F.E.A.R.-VR `dinput8.dll`.
+For installations made by older revisions, the uninstaller can still restore
+the legacy `autoShowGameTheater` backup without replacing other SteamVR
+settings.
 
 **Save games are not removed.** `stage\userdata-*` is the game's
 `-userdirectory` and contains saves, profiles and screenshots. Those are user
@@ -571,8 +573,8 @@ data, not mod files; they are only removed with `-IncludeUserData`.
 Additional switches: `-KeepLogs`, `-IncludeVendor` and
 `-Scope SteamVrOnly|ProjectOnly`.
 
-A Steam file integrity check is not needed, because retail was never written
-to. The script verifies the SHA-256 of `FEAR.exe` before and after.
+A Steam file integrity check is not needed, because no original retail file is
+replaced. The script verifies the SHA-256 of `FEAR.exe` before and after.
 
 SteamVR should be closed during uninstall: it rewrites its configuration on
 shutdown and would otherwise overwrite the restoration. The script warns if
@@ -583,7 +585,11 @@ it sees SteamVR running.
 - The classic D3D9 path still requires a CPU readback per eye and frame
   (`FEARVR_BF_CPU_FALLBACK`). F.E.A.R. creates a plain `IDirect3DDevice9`, and
   D3D9 can only share surfaces across processes from a D3D9Ex device — so this
-  is the one remaining copy. The zero-copy `DirectShared` path already exists
+  is the one remaining copy. The readback no longer stalls F.E.A.R.'s
+  Present thread: the early root-level `d3d9.dll` creates the game device
+  multithread-safe, and a latest-frame worker performs readback plus D3D9Ex
+  upload in the background. Existing queued images are superseded instead of
+  building latency. The zero-copy `DirectShared` path already exists
   and engages the moment the device is an Ex device; getting there needs a
   wrapper for textures and buffers, because `D3DPOOL_MANAGED` does not exist on
   Ex devices. **The stereo HUD compositor no longer reads back**: the pixel
@@ -594,10 +600,9 @@ it sees SteamVR running.
 - HMD translation has no world collision and therefore remains opt-in
   (`-Translation`).
 - The version-dependent hooks verify byte signatures, image size and timestamp
-  of the **F.E.A.R. 1.08** Public Tools modules. On a mismatch the affected
-  hook stays disabled and the game continues flat. `FEAR.exe` itself is only
-  hooked through its import table, which is why other 1.08 builds are expected
-  to work (see [Game editions](#game-editions)).
+  of the **F.E.A.R. 1.08** Public Tools modules. The early HID fix performs the
+  same full validation on its two small `FEAR.exe` regions. On a mismatch the
+  affected hook stays disabled instead of patching unknown code.
 - On Touch controllers SteamVR captures the left system/menu button; Y remains
   the pause binding. Vive Wand application-menu buttons remain available and
   are mapped explicitly.

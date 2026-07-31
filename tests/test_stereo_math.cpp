@@ -2,8 +2,11 @@
 #include <cstdlib>
 #include <iostream>
 
+#include "camera_collision.h"
+#include "physical_duck.h"
 #include "stereo_math.h"
 #include "vertical_camera_height.h"
+#include "wrist_hud_visibility.h"
 
 namespace {
 
@@ -19,6 +22,76 @@ int Fail(const char* message) {
 } // namespace
 
 int main() {
+    if (!fearvr::UpdatePhysicalDuck(
+            true, true, 1.43F, 1.70F, false) ||
+        !fearvr::UpdatePhysicalDuck(
+            true, true, 1.51F, 1.70F, true) ||
+        fearvr::UpdatePhysicalDuck(
+            true, true, 1.53F, 1.70F, true) ||
+        fearvr::UpdatePhysicalDuck(
+            false, true, 1.40F, 1.70F, true)) {
+        return Fail("physical duck hysteresis is incorrect");
+    }
+
+    if (!fearvr::IsLookingAtWrist(0.88F) ||
+        !fearvr::IsLookingAtWrist(0.84F, true) ||
+        fearvr::IsLookingAtWrist(0.87F) ||
+        fearvr::IsLookingAtWrist(0.83F, true) ||
+        fearvr::IsLookingAtWrist(NAN) ||
+        !fearvr::IsWristBackTilted(0.72F) ||
+        !fearvr::IsWristBackTilted(0.58F, true) ||
+        fearvr::IsWristBackTilted(0.71F) ||
+        fearvr::IsWristBackTilted(0.57F, true) ||
+        fearvr::IsWristBackTilted(NAN)) {
+        return Fail(
+            "wrist HUD must require gaze plus a pronounced watch pose");
+    }
+    if (!fearvr::IsDualPistolWristReadingPose(
+            0.20F, 0.80F, 0.0F) ||
+        !fearvr::IsDualPistolWristReadingPose(
+            0.60F, 0.58F, 0.54F, true) ||
+        fearvr::IsDualPistolWristReadingPose(
+            0.75F, 0.80F, 0.0F) ||
+        fearvr::IsDualPistolWristReadingPose(
+            -0.75F, 0.80F, 0.0F) ||
+        fearvr::IsDualPistolWristReadingPose(
+            0.20F, 0.71F, 0.0F) ||
+        fearvr::IsDualPistolWristReadingPose(
+            0.20F, 0.80F, 0.55F)) {
+        return Fail(
+            "dual-pistol HUD must require a deliberate wrist-reading pose");
+    }
+    std::uint64_t wristCandidateSince = 0;
+    if (fearvr::UpdateDualPistolWristDwell(
+            true, 1000, wristCandidateSince) ||
+        wristCandidateSince != 1000 ||
+        fearvr::UpdateDualPistolWristDwell(
+            true,
+            1000 + fearvr::kDualPistolWristDwellMilliseconds - 1,
+            wristCandidateSince) ||
+        !fearvr::UpdateDualPistolWristDwell(
+            true,
+            1000 + fearvr::kDualPistolWristDwellMilliseconds,
+            wristCandidateSince) ||
+        fearvr::UpdateDualPistolWristDwell(
+            false, 1200, wristCandidateSince) ||
+        wristCandidateSince != 0) {
+        return Fail(
+            "dual-pistol wrist-reading dwell timing is incorrect");
+    }
+
+    if (fearvr::IsCharacterCollisionObject(0) ||
+        !fearvr::IsCharacterCollisionObject(
+            fearvr::kCharacterUserFlag) ||
+        !fearvr::IsCharacterCollisionObject(
+            fearvr::kCharacterHitBoxUserFlag) ||
+        !fearvr::IsCharacterCollisionObject(
+            fearvr::kCharacterUserFlag |
+            fearvr::kCharacterHitBoxUserFlag)) {
+        return Fail(
+            "VR camera character collision filtering is incorrect");
+    }
+
     FearVrRenderRequest request{};
     request.eye[FEARVR_EYE_LEFT].pose.px = -0.032F;
     request.eye[FEARVR_EYE_RIGHT].pose.px = 0.032F;

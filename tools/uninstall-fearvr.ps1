@@ -3,13 +3,15 @@
     Entfernt alle lokalen F.E.A.R.-VR-Artefakte (ANWEISUNG.md §13, M6-Gate).
 
 .DESCRIPTION
-    Außerhalb der Projektwurzel entstehen genau drei Dateien:
+    Außerhalb der Projektwurzel kann eine eigene Datei entstehen:
 
-      * steamvr.vrsettings — dort ausschließlich der Schlüssel
-        steamvr.autoShowGameTheater. Er wird aus der ältesten Sicherung
-        wiederhergestellt.
-      * dinput8.dll und EchoPatch.ini im Retail-Verzeichnis, sofern EchoPatch
-        installiert wurde. Beide werden wieder entfernt.
+      * dinput8.dll neben FEAR.exe. Sie enthält den frühen, abgesicherten
+        DirectInput/HID-Fix und wird wieder entfernt, wenn ihr Hash zu einem
+        bekannten F.E.A.R.-VR-Deployment passt.
+
+    Ältere Revisionen können zusätzlich eine historische SteamVR-Theater-
+    Sicherung oder EchoPatch-Testinstallation hinterlassen haben; beide werden
+    weiterhin erkannt und bereinigt.
 
     Danach werden die projektinternen Arbeitsverzeichnisse gelöscht.
 
@@ -177,18 +179,92 @@ if (-not $doProject) {
     Step 'Kein Modulbackup vorhanden; nichts wiederherzustellen.'
 }
 
-# --- 2b. EchoPatch aus dem Retail-Verzeichnis entfernen ---------------------
-# Die beiden einzigen Dateien, die dieses Projekt in die Retail-Installation
-# legt. FEAR.exe bleibt dabei unangetastet; eine fremde dinput8.dll fasst das
-# gerufene Skript nicht an.
-Write-Host '--- EchoPatch ---'
+# --- 2b. Frühen F.E.A.R.-VR-HID-Fix entfernen -------------------------------
+# Nur ein Hash aus einem Deployment-Manifest oder der aktuelle Build wird
+# entfernt; fremde DirectInput-Wrapper bleiben unangetastet.
+Write-Host '--- dinput8-HID-Fix ---'
 $echoDllPath = Join-Path $cfg.RetailRoot $cfg.EchoPatchDllName
 if (-not $doProject) {
     Step 'Übersprungen (Scope)'
 } elseif (Test-Path -LiteralPath $echoDllPath -PathType Leaf) {
-    Step "EchoPatch aus $($cfg.RetailRoot) entfernen"
-    if ($Apply) {
-        & "$PSScriptRoot\install-echopatch.ps1" -Apply -Remove | Out-Null
+    $installedHash = Get-FileSha256 $echoDllPath
+    $fearVrDinputHashes = @(
+        Get-ChildItem -LiteralPath (
+            Join-Path $cfg.ProjectRoot 'stage') -Filter '*-deployment.json' `
+            -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try {
+                    (Get-Content -Raw -LiteralPath $_.FullName |
+                        ConvertFrom-Json).dinputProxySha256
+                } catch {
+                    $null
+                }
+            }
+    )
+    $currentBuildDinput = Join-Path $cfg.ProjectRoot (
+        'build\x86\src\dinput8_proxy\RelWithDebInfo\dinput8.dll')
+    if (Test-Path -LiteralPath $currentBuildDinput -PathType Leaf) {
+        $fearVrDinputHashes += Get-FileSha256 $currentBuildDinput
+    }
+    if ($installedHash -in $fearVrDinputHashes) {
+        Step "F.E.A.R.-VR-dinput8.dll aus $($cfg.RetailRoot) entfernen"
+        if ($Apply) {
+            Remove-Item -LiteralPath $echoDllPath -Force
+        }
+    } elseif ($installedHash -eq $cfg.EchoPatchDllSha256) {
+        Step "alte EchoPatch-Testinstallation aus $($cfg.RetailRoot) entfernen"
+        if ($Apply) {
+            & "$PSScriptRoot\install-echopatch.ps1" -Apply -Remove | Out-Null
+        }
+    } else {
+        Step 'Fremde dinput8.dll erkannt; bleibt unangetastet.'
+    }
+} else {
+    Step 'Nicht installiert; nichts zu entfernen.'
+}
+
+# --- 2c. Frühen D3D9-Proxy entfernen / vorhandenen Wrapper wiederherstellen --
+Write-Host '--- d3d9-Bridge ---'
+$d3d9Path = Join-Path $cfg.RetailRoot 'd3d9.dll'
+$d3d9UpstreamPath =
+    Join-Path $cfg.RetailRoot 'd3d9.fearvr-upstream.dll'
+if (-not $doProject) {
+    Step 'Übersprungen (Scope)'
+} elseif (Test-Path -LiteralPath $d3d9Path -PathType Leaf) {
+    $installedHash = Get-FileSha256 $d3d9Path
+    $fearVrD3d9Hashes = @(
+        Get-ChildItem -LiteralPath (
+            Join-Path $cfg.ProjectRoot 'stage') -Filter '*-deployment.json' `
+            -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try {
+                    (Get-Content -Raw -LiteralPath $_.FullName |
+                        ConvertFrom-Json).d3d9ProxySha256
+                } catch {
+                    $null
+                }
+            }
+    )
+    $currentBuildD3d9 = Join-Path $cfg.ProjectRoot (
+        'build\x86\src\proxy32\RelWithDebInfo\fearvr-d3d9.dll')
+    if (Test-Path -LiteralPath $currentBuildD3d9 -PathType Leaf) {
+        $fearVrD3d9Hashes += Get-FileSha256 $currentBuildD3d9
+    }
+    if ($installedHash -in $fearVrD3d9Hashes) {
+        if (Test-Path -LiteralPath $d3d9UpstreamPath -PathType Leaf) {
+            Step 'Vorherigen d3d9.dll-Wrapper wiederherstellen'
+            if ($Apply) {
+                Move-Item -LiteralPath $d3d9UpstreamPath `
+                    -Destination $d3d9Path -Force
+            }
+        } else {
+            Step 'F.E.A.R.-VR-d3d9.dll entfernen'
+            if ($Apply) {
+                Remove-Item -LiteralPath $d3d9Path -Force
+            }
+        }
+    } else {
+        Step 'Fremde d3d9.dll erkannt; bleibt unangetastet.'
     }
 } else {
     Step 'Nicht installiert; nichts zu entfernen.'

@@ -77,6 +77,15 @@ if(MSVC)
 endif()
 add_test(NAME weapon_recoil COMMAND test_weapon_recoil)
 
+add_executable(test_weapon_collision test_weapon_collision.cpp)
+target_link_libraries(
+  test_weapon_collision PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_weapon_collision PRIVATE /UNDEBUG)
+endif()
+add_test(NAME weapon_collision COMMAND test_weapon_collision)
+
 add_executable(test_melee_thrust test_melee_thrust.cpp)
 target_link_libraries(
   test_melee_thrust PRIVATE fearvr-common fearvr-warnings

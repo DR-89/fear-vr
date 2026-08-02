@@ -102,14 +102,11 @@ inline FearVrCommandValue MapControllerCommand(
         (input.activeHands & FEARVR_HAND_MASK_LEFT) != 0;
     const bool rightActive =
         (input.activeHands & FEARVR_HAND_MASK_RIGHT) != 0;
-    const float moveX =
+    const InputVector2 move =
         leftActive
-            ? ApplyInputDeadzone(input.moveX, kStickDeadzone)
-            : 0.0F;
-    const float moveY =
-        leftActive
-            ? ApplyInputDeadzone(input.moveY, kStickDeadzone)
-            : 0.0F;
+            ? ApplyRadialInputDeadzone(
+                  input.moveX, input.moveY, kStickDeadzone)
+            : InputVector2{};
     const float turnX =
         rightActive
             ? ApplyInputDeadzone(input.turnX, kStickDeadzone)
@@ -121,9 +118,9 @@ inline FearVrCommandValue MapControllerCommand(
 
     switch (command) {
     case FEARVR_CMD_FORWARD_AXIS:
-        return {moveY, moveY != 0.0F};
+        return {move.y, move.y != 0.0F};
     case FEARVR_CMD_STRAFE_AXIS:
-        return {moveX, moveX != 0.0F};
+        return {move.x, move.x != 0.0F};
     case FEARVR_CMD_YAW_ACCEL:
         return {turnX, turnX != 0.0F};
     case FEARVR_CMD_YAW_POS:
@@ -131,13 +128,13 @@ inline FearVrCommandValue MapControllerCommand(
     case FEARVR_CMD_YAW_NEG:
         return {1.0F, turnX < 0.0F};
     case FEARVR_CMD_FORWARD:
-        return {1.0F, moveY > 0.0F};
+        return {1.0F, move.y > 0.0F};
     case FEARVR_CMD_REVERSE:
-        return {1.0F, moveY < 0.0F};
+        return {1.0F, move.y < 0.0F};
     case FEARVR_CMD_STRAFE_LEFT:
-        return {1.0F, moveX < 0.0F};
+        return {1.0F, move.x < 0.0F};
     case FEARVR_CMD_STRAFE_RIGHT:
-        return {1.0F, moveX > 0.0F};
+        return {1.0F, move.x > 0.0F};
     case FEARVR_CMD_FIRING:
         return {
             1.0F,

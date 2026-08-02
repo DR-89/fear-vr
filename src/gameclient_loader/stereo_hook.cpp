@@ -579,6 +579,9 @@ LTRotation EffectiveFlashlightRotation() noexcept {
 // Linkshaenderbelegung: gespiegelt wird ausschliesslich der eingehende
 // Controllerzustand, nie eine einzelne Zuordnung.
 bool g_leftHandedBindings = false;
+// Forward follows the horizontal HMD direction by default. Body-relative
+// movement remains available for classic-FPS muscle memory.
+bool g_headRelativeMovement = true;
 bool g_headBobEnabled = false;
 bool g_forceHeadBobDisabled = false;
 // Diagnoseschalter zum Eingrenzen des Absturzes an einer bestimmten
@@ -720,6 +723,7 @@ VrMenuToggle g_vrMenuAimGuide;
 VrMenuToggle g_vrMenuHaptics;
 // `enabled` zeigt die Rechtshaenderbelegung, `disabled` die gespiegelte.
 VrMenuToggle g_vrMenuHandedness;
+VrMenuToggle g_vrMenuMovementDirection;
 // `enabled` zeigt das Klettern mit den Haenden, `disabled` die
 // Retail-Steuerung ueber den Stick.
 VrMenuToggle g_vrMenuClimbing;
@@ -981,6 +985,7 @@ enum VrMenuCommand : std::uint32_t {
     kVrMenuToggleAimGuide,
     kVrMenuToggleHaptics,
     kVrMenuToggleHandedness,
+    kVrMenuToggleHeadRelativeMovement,
     kVrMenuToggleClimbing,
     kVrMenuTogglePhysicalLean,
     kVrMenuCycleLeanScale,
@@ -1673,6 +1678,8 @@ void InitializeVrSettings() noexcept {
         std::clamp(ReadVrSetting(L"LeanScale", 200), 100, 400);
     g_leftHandedBindings =
         ReadVrSetting(L"LeftHanded", 0) != 0;
+    g_headRelativeMovement =
+        ReadVrSetting(L"HeadRelativeMovement", 1) != 0;
     g_showPlayerArms =
         ReadVrSetting(L"ShowArms", 0) != 0;
     g_fovScalePreset = FovScalePresetForPercent(
@@ -1804,6 +1811,8 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(L"LeanScale", g_leanScalePercent);
     WriteVrSetting(
         L"LeftHanded", g_leftHandedBindings ? 1 : 0);
+    WriteVrSetting(
+        L"HeadRelativeMovement", g_headRelativeMovement ? 1 : 0);
     WriteVrSetting(L"ShowArms", g_showPlayerArms ? 1 : 0);
     WriteVrSetting(
         L"FovScale",
@@ -1971,6 +1980,7 @@ void HideRetailVrSettingsControls() noexcept {
         g_vrMenuAimGuide,
         g_vrMenuHaptics,
         g_vrMenuHandedness,
+        g_vrMenuMovementDirection,
         g_vrMenuClimbing,
         g_vrMenuPhysicalLean,
         g_vrMenuMelee,
@@ -2103,6 +2113,8 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
         SetRetailVrPresetVisible(
             g_vrMenuTurnSpeed,
             static_cast<std::size_t>(g_turnSpeedPreset));
+        SetRetailVrToggleVisible(
+            g_vrMenuMovementDirection, g_headRelativeMovement);
         SetRetailVrToggleVisible(
             g_vrMenuPhysicalLean, g_physicalLeanEnabled);
         SetRetailVrPresetVisible(
@@ -2333,6 +2345,7 @@ void ApplyVrDefaults() noexcept {
     g_controllerHapticsEnabled = true;
     g_twoHandedGripEnabled = true;
     g_leftHandedBindings = false;
+    g_headRelativeMovement = true;
     g_turnSpeedPreset = 1;
     g_fovScalePreset = 0;
     ApplyFovScalePreset();
@@ -2476,6 +2489,10 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
         L"Controls: Right-handed", kVrMenuToggleHandedness);
     g_vrMenuHandedness.disabled = AddRetailVrMenuControl(
         L"Controls: Left-handed", kVrMenuToggleHandedness);
+    g_vrMenuMovementDirection.enabled = AddRetailVrMenuControl(
+        L"Move direction: Head", kVrMenuToggleHeadRelativeMovement);
+    g_vrMenuMovementDirection.disabled = AddRetailVrMenuControl(
+        L"Move direction: Body", kVrMenuToggleHeadRelativeMovement);
     g_vrMenuClimbing.enabled = AddRetailVrMenuControl(
         L"Ladder climbing: Hands", kVrMenuToggleClimbing);
     g_vrMenuClimbing.disabled = AddRetailVrMenuControl(
@@ -2551,13 +2568,13 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
     g_vrMenuFovScale[3] = AddRetailVrMenuControl(
         L"FOV scale: 130%", kVrMenuCycleFovScale);
     g_vrMenuTurnSpeed[0] = AddRetailVrMenuControl(
-        L"Turn speed: Slow",
+        L"Smooth turn: Slow",
         kVrMenuCycleTurnSpeed);
     g_vrMenuTurnSpeed[1] = AddRetailVrMenuControl(
-        L"Turn speed: Normal",
+        L"Smooth turn: Normal",
         kVrMenuCycleTurnSpeed);
     g_vrMenuTurnSpeed[2] = AddRetailVrMenuControl(
-        L"Turn speed: Fast",
+        L"Smooth turn: Fast",
         kVrMenuCycleTurnSpeed);
     g_vrMenuWeaponWeightValue[0] = AddRetailVrMenuControl(
         L"Weight: 0.25x", kVrMenuCycleWeaponWeight);
@@ -2808,6 +2825,16 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             g_leftHandedBindings
                 ? "Controller bindings are mirrored for left-handed play."
                 : "Controller bindings use the right-handed default.");
+        break;
+    case kVrMenuToggleHeadRelativeMovement:
+        g_headRelativeMovement = !g_headRelativeMovement;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMovementDirection, g_headRelativeMovement);
+        Report(
+            "INFO", "vr_movement_direction_changed",
+            g_headRelativeMovement
+                ? "Forward movement follows horizontal HMD direction."
+                : "Forward movement follows the Retail player body.");
         break;
     case kVrMenuToggleClimbing:
         g_climbingEnabled = !g_climbingEnabled;
@@ -9421,6 +9448,24 @@ void PollControllerInput() noexcept {
     // physisch anderen Stick, skaliert wird aber der Drehstick.
     if (g_leftHandedBindings) {
         MirrorInputHandedness(input);
+    }
+    // Retail interprets its axes in player-body space, while VR users can
+    // freely turn their head without rotating that body. Convert only the
+    // locomotion stick into the current horizontal HMD frame. If tracking is
+    // unavailable, fail softly to body-relative input rather than dropping a
+    // held movement command.
+    const bool headPoseFresh =
+        g_headTracking.centered && !g_headTracking.trackingLost &&
+        g_headTracking.lastFreshFrameTick != 0 &&
+        now - g_headTracking.lastFreshFrameTick <= 250;
+    if (g_headRelativeMovement && headPoseFresh) {
+        const HeadRelativeMovement movement = RotateMovementByHeadYaw(
+            g_headTracking.recenter, g_headTracking.currentCenter,
+            input.moveX, input.moveY);
+        if (movement.valid) {
+            input.moveX = movement.x;
+            input.moveY = movement.y;
+        }
     }
     constexpr float kTurnSpeedScale[] = {0.75F, 1.0F, 1.25F};
     const int turnPreset = std::clamp(g_turnSpeedPreset, 0, 2);

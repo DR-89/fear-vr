@@ -69,6 +69,26 @@ int main() {
         return Fail("turning the HMD left must turn LithTech forward left");
     }
 
+    const FearVrPose headLeft = Pose(
+        0.0F, 0.0F, 0.0F,
+        xrYawLeft.x, xrYawLeft.y, xrYawLeft.z, xrYawLeft.w);
+    const fearvr::HeadRelativeMovement forwardWhileLookingLeft =
+        fearvr::RotateMovementByHeadYaw(identity, headLeft, 0.0F, 1.0F);
+    if (!forwardWhileLookingLeft.valid ||
+        !Near(forwardWhileLookingLeft.x, -1.0F) ||
+        !Near(forwardWhileLookingLeft.y, 0.0F)) {
+        return Fail(
+            "head-relative forward must follow horizontal HMD yaw");
+    }
+    const fearvr::HeadRelativeMovement strafeWhileLookingLeft =
+        fearvr::RotateMovementByHeadYaw(identity, headLeft, 1.0F, 0.0F);
+    if (!strafeWhileLookingLeft.valid ||
+        !Near(strafeWhileLookingLeft.x, 0.0F) ||
+        !Near(strafeWhileLookingLeft.y, 1.0F)) {
+        return Fail(
+            "head-relative strafe must remain perpendicular to forward");
+    }
+
     const fearvr::TrackingQuaternion xrPitchUp{
         kHalfSqrtTwo, 0.0F, 0.0F, kHalfSqrtTwo};
     const fearvr::TrackingQuaternion ltPitchUp =

@@ -102,6 +102,23 @@ Tastatur erreichbar; der manuelle Stick-Klick-Nahkampf wird durch die bereits
 vorhandene Waffenhand-/Off-Hand-Geste ersetzt. Maus, Tastatur und Gamepad
 bleiben parallel aktiv.
 
+### Bewegungsrichtung und Stick-Kennlinie
+
+Fortbewegung folgt standardmäßig der horizontalen HMD-Richtung. Kopfneigung
+und -rollen werden dabei verworfen: Nach oben sehen darf die Geschwindigkeit
+nicht verringern, und ein geneigter Kopf darf keine Seitwärtsbewegung
+erzeugen. `Move direction: Head / Body` im Menü **Movement & Comfort** schaltet
+auf Retails klassische körperrelative Richtung zurück; gespeichert wird die
+Auswahl als `HeadRelativeMovement` in `fearvr.ini`.
+
+Die 22-Prozent-Totzone des Bewegungssticks ist radial. Sie verändert nur den
+Radius, nicht den Winkel des Stickvektors, und begrenzt volle Diagonalen auf
+Einheitslänge. Dadurch ziehen kleine diagonale Eingaben nicht mehr zu den
+Hauptachsen und diagonales Laufen wird nicht schneller als gerades Laufen.
+Der Drehstick bleibt eine eindimensionale Retail-Drehachse mit eigener
+Totzone; Sprung und Ducken werten weiterhin den unveränderten vertikalen
+Stickweg ab 80 Prozent aus.
+
 ### Physisches Lehnen (`Physical lean`, Standard an)
 
 F.E.A.R.s eigenes Lehnen ist ausschließlich eine Drehung: `CLeanMgr` berechnet
@@ -504,7 +521,8 @@ können weiterhin direkt in der INI gesetzt werden.
 
 1. **Display & HUD:** Stereo rendering, Stereo HUD, FOV scale.
 2. **Movement & Comfort:** HMD translation, head bob, comfort screen,
-   turn speed, physical leaning, physical duck and lean strength.
+   movement direction, smooth-turn speed, physical leaning, physical duck and
+   lean strength.
 3. **Controls:** handedness, controller vibration, ladder climbing,
    flashlight mount and Recenter 2D panel.
 4. **Weapons:** three nested pages keep the list bounded: Handling & appearance

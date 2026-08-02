@@ -27,6 +27,12 @@ struct RelativeEyePose {
     bool valid{false};
 };
 
+struct HeadRelativeMovement {
+    float x{0.0F};
+    float y{0.0F};
+    bool valid{false};
+};
+
 inline bool IsFinite(const TrackingVector& value) noexcept {
     return std::isfinite(value.x) && std::isfinite(value.y) &&
            std::isfinite(value.z);
@@ -192,6 +198,35 @@ inline FearVrPose YawOnlyRecenterPose(
     recenter.qz = 0.0F;
     recenter.qw = std::cos(halfYaw);
     return recenter;
+}
+
+// Rotate a horizontal movement stick from the user's current HMD-facing
+// frame into Retail's body-relative strafe/forward frame. Pitch and roll are
+// deliberately removed: looking up must not reduce forward speed, and head
+// roll must never introduce strafing. The input magnitude is preserved.
+inline HeadRelativeMovement RotateMovementByHeadYaw(
+    const FearVrPose& recenter, const FearVrPose& currentCenter,
+    float moveX, float moveY) noexcept {
+    if (!IsValidPose(recenter) || !IsValidPose(currentCenter) ||
+        !std::isfinite(moveX) || !std::isfinite(moveY)) {
+        return {};
+    }
+    const FearVrPose currentYaw = YawOnlyRecenterPose(currentCenter);
+    if (!IsValidPose(currentYaw)) {
+        return {};
+    }
+    const TrackingQuaternion relativeYaw = Multiply(
+        Conjugate(PoseRotation(recenter)), PoseRotation(currentYaw));
+    const TrackingVector right =
+        Rotate(relativeYaw, {1.0F, 0.0F, 0.0F});
+    const TrackingVector forward =
+        Rotate(relativeYaw, {0.0F, 0.0F, -1.0F});
+    const float x = moveX * right.x + moveY * forward.x;
+    const float y = -(moveX * right.z + moveY * forward.z);
+    if (!std::isfinite(x) || !std::isfinite(y)) {
+        return {};
+    }
+    return {x, y, true};
 }
 
 // OpenXR is right-handed with -Z forward. LithTech uses +X right, +Y up and

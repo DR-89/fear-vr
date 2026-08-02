@@ -69,6 +69,28 @@ int main() {
         return Fail("deadzone normalization is incorrect");
     }
 
+    const fearvr::InputVector2 radialDiagonal =
+        fearvr::ApplyRadialInputDeadzone(0.3F, 0.8F, 0.2F);
+    const float sourceRatio = 0.3F / 0.8F;
+    if (!(radialDiagonal.x > 0.0F) ||
+        !(radialDiagonal.y > radialDiagonal.x) ||
+        !Near(radialDiagonal.x / radialDiagonal.y, sourceRatio)) {
+        return Fail("radial deadzone must preserve diagonal direction");
+    }
+    const fearvr::InputVector2 radialFull =
+        fearvr::ApplyRadialInputDeadzone(1.0F, 1.0F, 0.2F);
+    if (!Near(
+            std::sqrt(radialFull.x * radialFull.x +
+                      radialFull.y * radialFull.y),
+            1.0F)) {
+        return Fail("radial deadzone must normalize full diagonals");
+    }
+    const fearvr::InputVector2 radialCenter =
+        fearvr::ApplyRadialInputDeadzone(0.1F, 0.1F, 0.2F);
+    if (radialCenter.x != 0.0F || radialCenter.y != 0.0F) {
+        return Fail("radial deadzone must neutralize the center circle");
+    }
+
     // A roll about the pose's own forward axis must come back signed, with
     // positive meaning the top of the hand is tipped to the user's left.
     FearVrPose upright{};

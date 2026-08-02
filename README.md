@@ -534,6 +534,10 @@ runtime renders. SteamVR itself does not need to run under VDXR.
 
 Touch/Index bindings: left stick moves, left grip sprints — or, with that hand placed on
 the weapon, holds it as a second hand; left stick click uses a medkit.
+Movement is head-relative by default, so forward follows the HMD's horizontal
+facing direction even when the Retail body is pointed elsewhere. `Move
+direction: Body` restores classic body-relative movement. The locomotion
+stick uses a circular deadzone that preserves diagonal direction and speed.
 Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click performs a melee attack in the 3D world and re-anchors the panel in 2D.
 A switches weapons, B reloads (short press) or

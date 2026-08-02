@@ -14,9 +14,9 @@ fearvr::WeaponRecoilOffset FireAtWeight(float weight) {
     fearvr::WeaponRecoilState state;
     fearvr::WeaponRecoilOffset output;
     fearvr::UpdateWeaponRecoil(
-        state, 1'000'000'000ULL, true, profile, 0, output);
+        state, 1'000'000'000ULL, true, profile, {}, 0, output);
     assert(fearvr::UpdateWeaponRecoil(
-        state, 1'011'111'111ULL, true, profile, 1, output));
+        state, 1'011'111'111ULL, true, profile, {}, 1, output));
     return output;
 }
 
@@ -29,12 +29,12 @@ int main() {
     WeaponRecoilState state;
     WeaponRecoilOffset output;
     assert(!UpdateWeaponRecoil(
-        state, 1'000'000'000ULL, true, profile, 0, output));
+        state, 1'000'000'000ULL, true, profile, {}, 0, output));
     assert(output.backwardMeters == 0.0F);
     assert(output.pitchRadians == 0.0F);
 
     assert(UpdateWeaponRecoil(
-        state, 1'011'111'111ULL, true, profile, 1, output));
+        state, 1'011'111'111ULL, true, profile, {}, 1, output));
     assert(output.backwardMeters > 0.0F);
     assert(output.pitchRadians > 0.0F);
     assert(output.backwardMeters < 0.025F);
@@ -53,7 +53,7 @@ int main() {
         UpdateWeaponRecoil(
             state,
             1'000'000'000ULL + frame * 11'111'111ULL,
-            true, profile, 0, output);
+            true, profile, {}, 0, output);
         peakPitch = (std::max)(peakPitch, output.pitchRadians);
     }
     assert(peakPitch > normal.pitchRadians);
@@ -65,23 +65,48 @@ int main() {
     WeaponRecoilOffset single;
     WeaponRecoilOffset burst;
     UpdateWeaponRecoil(
-        singleState, 2'000'000'000ULL, true, profile, 0, single);
+        singleState, 2'000'000'000ULL, true, profile, {}, 0, single);
     UpdateWeaponRecoil(
-        burstState, 2'000'000'000ULL, true, profile, 0, burst);
+        burstState, 2'000'000'000ULL, true, profile, {}, 0, burst);
     UpdateWeaponRecoil(
-        singleState, 2'010'000'000ULL, true, profile, 1, single);
+        singleState, 2'010'000'000ULL, true, profile, {}, 1, single);
     UpdateWeaponRecoil(
-        burstState, 2'010'000'000ULL, true, profile, 3, burst);
+        burstState, 2'010'000'000ULL, true, profile, {}, 3, burst);
     assert(burst.backwardMeters > single.backwardMeters);
     assert(burst.pitchRadians > single.pitchRadians);
 
     assert(!UpdateWeaponRecoil(
-        burstState, 2'020'000'000ULL, false, profile, 1, burst));
+        burstState, 2'020'000'000ULL, false, profile, {}, 1, burst));
     assert(!burstState.initialized);
     assert(!UpdateWeaponRecoil(
-        state, 5'000'000'000ULL, true, profile, 1, output));
+        state, 5'000'000'000ULL, true, profile, {}, 1, output));
     assert(state.backwardMeters == 0.0F);
     assert(state.pitchRadians == 0.0F);
+
+    WeaponRecoilState mildState;
+    WeaponRecoilState strongState;
+    WeaponRecoilOffset mild;
+    WeaponRecoilOffset strong;
+    UpdateWeaponRecoil(
+        mildState, 6'000'000'000ULL, true, profile,
+        {0.5F, 0.5F, 1.0F}, 0, mild);
+    UpdateWeaponRecoil(
+        strongState, 6'000'000'000ULL, true, profile,
+        {2.0F, 2.0F, 1.0F}, 0, strong);
+    UpdateWeaponRecoil(
+        mildState, 6'011'111'111ULL, true, profile,
+        {0.5F, 0.5F, 1.0F}, 1, mild);
+    UpdateWeaponRecoil(
+        strongState, 6'011'111'111ULL, true, profile,
+        {2.0F, 2.0F, 1.0F}, 1, strong);
+    assert(strong.backwardMeters > mild.backwardMeters);
+    assert(strong.pitchRadians > mild.pitchRadians);
+
+    const WeaponRecoilProfile sanitized = SanitizeWeaponRecoilProfile(
+        {-1.0F, 99.0F, 0.0F});
+    assert(sanitized.strength == 0.25F);
+    assert(sanitized.muzzleRise == 3.0F);
+    assert(sanitized.recovery == 0.25F);
 
     WeaponWeightPose aim{
         {1.0F, 2.0F, 3.0F}, {0.0F, 0.0F, 0.0F, 1.0F}};

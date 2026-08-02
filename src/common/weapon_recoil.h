@@ -17,6 +17,24 @@ struct WeaponRecoilOffset {
     float pitchRadians{0.0F};
 };
 
+struct WeaponRecoilProfile {
+    float strength{1.5F};
+    float muzzleRise{1.0F};
+    float recovery{1.0F};
+};
+
+inline WeaponRecoilProfile SanitizeWeaponRecoilProfile(
+    const WeaponRecoilProfile& profile) noexcept {
+    WeaponRecoilProfile result = profile;
+    result.strength = std::isfinite(result.strength)
+        ? std::clamp(result.strength, 0.25F, 5.0F) : 1.5F;
+    result.muzzleRise = std::isfinite(result.muzzleRise)
+        ? std::clamp(result.muzzleRise, 0.0F, 3.0F) : 1.0F;
+    result.recovery = std::isfinite(result.recovery)
+        ? std::clamp(result.recovery, 0.25F, 3.0F) : 1.0F;
+    return result;
+}
+
 struct WeaponRecoilState {
     bool initialized{false};
     std::uint64_t lastUpdateTimestampNs{0};
@@ -45,6 +63,7 @@ inline bool WeaponRecoilStateIsFinite(
 inline bool UpdateWeaponRecoil(
     WeaponRecoilState& state, std::uint64_t timestampNs, bool enabled,
     const WeaponWeightProfile& requestedProfile,
+    const WeaponRecoilProfile& requestedRecoilProfile,
     std::uint32_t successfulShots,
     WeaponRecoilOffset& output) noexcept {
     output = {};
@@ -74,30 +93,39 @@ inline bool UpdateWeaponRecoil(
 
     const WeaponWeightProfile profile =
         SanitizeWeaponWeightProfile(requestedProfile);
+    const WeaponRecoilProfile recoilProfile =
+        SanitizeWeaponRecoilProfile(requestedRecoilProfile);
     const float mass = profile.weight;
     const float massScale = std::sqrt(mass);
     const std::uint32_t shots = (std::min)(successfulShots, 8U);
     if (shots != 0) {
-        constexpr float kBackwardImpulseMetersPerSecond = 0.22F;
-        constexpr float kPitchImpulseRadiansPerSecond = 2.20F;
+        // The initial conservative calibration was barely perceptible in a
+        // headset. Apply a stronger base impulse while leaving the menu
+        // multiplier available for comfort tuning.
+        constexpr float kEffectMultiplier = 3.0F;
+        constexpr float kBackwardImpulseMetersPerSecond =
+            0.22F * kEffectMultiplier;
+        constexpr float kPitchImpulseRadiansPerSecond =
+            2.20F * kEffectMultiplier;
         state.backwardVelocity +=
             kBackwardImpulseMetersPerSecond *
-            static_cast<float>(shots) / mass;
+            recoilProfile.strength * static_cast<float>(shots) / mass;
         state.pitchVelocity +=
             kPitchImpulseRadiansPerSecond *
+            recoilProfile.strength * recoilProfile.muzzleRise *
             static_cast<float>(shots) / mass;
         // Bound automatic-fire accumulation without clipping ordinary shots.
         state.backwardVelocity =
-            (std::min)(state.backwardVelocity, 0.65F);
+            (std::min)(state.backwardVelocity, 1.95F);
         state.pitchVelocity =
-            (std::min)(state.pitchVelocity, 6.5F);
+            (std::min)(state.pitchVelocity, 19.5F);
     }
 
     if (deltaSeconds > 0.0F) {
         const float positionOmega =
-            profile.positionalFollow / massScale;
+            profile.positionalFollow / massScale * recoilProfile.recovery;
         const float rotationOmega =
-            profile.rotationalFollow / massScale;
+            profile.rotationalFollow / massScale * recoilProfile.recovery;
         SolveCriticallyDampedComponent(
             state.backwardMeters, state.backwardVelocity,
             positionOmega, deltaSeconds);
@@ -106,9 +134,9 @@ inline bool UpdateWeaponRecoil(
             rotationOmega, deltaSeconds);
     }
 
-    constexpr float kMaximumBackwardMeters = 0.025F;
+    constexpr float kMaximumBackwardMeters = 0.075F;
     constexpr float kMaximumPitchRadians =
-        9.0F * 3.14159265358979323846F / 180.0F;
+        27.0F * 3.14159265358979323846F / 180.0F;
     state.backwardMeters = std::clamp(
         state.backwardMeters, 0.0F, kMaximumBackwardMeters);
     state.pitchRadians = std::clamp(

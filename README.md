@@ -291,20 +291,30 @@ something is built but not yet verified in-game, it's noted.
   with keyboard, mouse, or controller. Six submenus cover Display & HUD,
   Movement & Comfort, Controls, Weapons, Melee, and Advanced settings. B/Back
   returns to the category list before leaving VR settings.
+- **Floating live-tuning panel during gameplay.** Hold both grip buttons and
+  press B to place the panel in front of your current view. Its Recoil, Weight,
+  Weapon, Move, Melee, and VR tabs expose the settings that are safe and useful
+  to change during play. Point at a tab or row and press trigger or A; the right
+  stick navigates rows and switches tabs. B closes the panel. Changes apply
+  immediately and save to `fearvr.ini`; controller gameplay commands are
+  captured while it is open.
 - **All normal VR preferences are editable in game** and persist immediately
   to `fearvr.ini`, including HMD translation, head bob, comfort screen,
   physical leaning, all four individual melee gestures, and simulated weapon
-  weight. The Advanced page contains diagnostics and the global defaults reset.
-- **Per-weapon simulated weight profiles** can be tuned from the Weapons page.
+  weight. The Weapons page is split into Handling & appearance, Simulated
+  weight, and Recoil pages. The Advanced page contains diagnostics and the
+  global defaults reset.
+- **Per-weapon simulated weight profiles** can be tuned from the Simulated
+  weight page.
   Choose the currently held weapon or the global default, then adjust weight,
   positional follow, rotational follow, and catch-up strength through safe
   presets. Exact values remain available in `fearvr.ini` under `[VR]` or
   `[WeaponWeight.<model-name>]`. Unknown models use the `[VR]` defaults.
-  While simulated weight is enabled, each successful shot adds a short
-  backward kick and muzzle rise to the same spring: heavier profiles recoil
-  less, and their position/rotation follow values control recovery. Empty
-  trigger pulls do not recoil. Initial impulse strength is pending in-game
-  comfort and weapon-feel verification.
+  **Weapon recoil is independently switchable** and defaults on. Its page has
+  presets for overall strength (up to 500%), muzzle rise, and recovery speed,
+  so recoil
+  remains active even when simulated weight is off. Per-weapon weight still
+  scales the kick when configured. Empty trigger pulls do not recoil.
   `WeaponWeightDiagnostics=1` emits rate-limited raw/filter error and velocity
   telemetry, including the current recoil offsets.
   Recommended ranges are `0.10-4.00`, `2.0-40.0`, `2.0-40.0`, and
@@ -544,6 +554,11 @@ individual melee switches, physical lean and simulated weapon-weight profiles.
 Changes are applied immediately and saved to `fearvr.ini`. Stick navigates,
 A or trigger confirms, and B returns to the category list before leaving VR
 settings.
+
+For faster testing without pausing, hold both grips and press B during gameplay
+to open the world-space live-tuning panel. The right-controller ray selects a
+tab or row, trigger or A confirms/changes it, right-stick left/right switches
+tabs, right-stick up/down selects rows, and B closes it.
 
 ## Uninstall
 

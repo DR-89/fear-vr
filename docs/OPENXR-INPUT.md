@@ -419,19 +419,50 @@ können weiterhin direkt in der INI gesetzt werden.
 1. **Display & HUD:** Stereo rendering, Stereo HUD, FOV scale.
 2. **Movement & Comfort:** HMD translation, head bob, comfort screen,
    turn speed, physical leaning and lean strength.
-3. **Controls:** handedness, controller vibration, ladder climbing,
-   two-handed grip and Recenter 2D panel.
-4. **Weapons:** red aim guide, show arms, simulated weapon weight, plus
-   Weight, Position follow, Rotation follow and Catch-up strength.
+3. **Controls:** handedness, controller vibration, ladder climbing and
+   Recenter 2D panel.
+4. **Weapons:** three nested pages keep the list bounded: Handling & appearance
+   contains red aim guide, show arms and two-handed grip; Simulated weight
+   contains its per-weapon profile controls; Recoil contains its independent
+   toggle, overall strength, muzzle rise and recovery speed.
 5. **Melee:** master toggle and individual weapon strike, off-hand strike,
    jump kick and slide kick toggles.
 6. **Advanced:** weapon diagnostics and Reset VR defaults.
 
-When simulated weapon weight is enabled, every shot confirmed by Retail adds
-a short backward kick and muzzle rise. Profile weight scales the impulse,
-while position and rotation follow rates control recovery. The recoil uses the
-same successful fire-vector call as controller vibration, so an empty or
-otherwise rejected trigger pull does not move the weapon.
+Weapon recoil defaults on independently of simulated weapon weight. Every shot
+confirmed by Retail adds a short backward kick and muzzle rise; strength,
+muzzle-rise and recovery presets are applied immediately; overall strength
+extends to 500%. Values are persisted as
+`WeaponRecoilStrength`, `WeaponRecoilMuzzleRise` and `WeaponRecoilRecovery` in
+the `[VR]` section. The recoil uses the same successful fire-vector call as
+controller vibration, so an empty or otherwise rejected trigger pull does not
+move the weapon.
+
+### Floating live tuning
+
+During gameplay, holding both grip buttons and pressing B opens a world-space
+developer panel at the current view. The verified right-hand weapon ray is also
+used for panel hit testing: point at a tab or row and press trigger or A to
+select, toggle or cycle it. Right-stick left/right switches tabs and up/down
+moves the row selection when a ray hit is unavailable; B closes the panel.
+
+The panel has six bounded tabs:
+
+1. **Recoil:** enabled, strength, muzzle rise and recovery.
+2. **Weight:** enabled, profile target, weight, position/rotation follow and
+   catch-up.
+3. **Weapon:** aim guide, arm visibility and two-handed grip.
+4. **Move:** HMD translation, head bob, physical lean/strength, turn speed and
+   hand climbing.
+5. **Melee:** master gesture switch and each individual strike/kick.
+6. **VR:** stereo HUD, FOV scale, handedness, haptics and weapon diagnostics.
+
+Changes take effect immediately and use the same `SaveVrSettings` path as the
+native menu, including per-weapon weight profiles. Stereo disable, comfort
+screen, panel recenter and Reset Defaults remain pause-menu-only because they
+would hide the live panel or are too easy to trigger accidentally. Controller
+gameplay injection, gesture pulses and climbing are suppressed while the panel
+is open and remain suppressed until the opening/closing controls are released.
 
 `Show arms` ist standardmäßig `Off`: Nur Ober- und Unterarme werden über ein
 lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine

@@ -121,6 +121,15 @@ if(MSVC)
 endif()
 add_test(NAME vr_menu_model COMMAND test_vr_menu_model)
 
+add_executable(test_dev_menu_model test_dev_menu_model.cpp)
+target_link_libraries(
+  test_dev_menu_model PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_dev_menu_model PRIVATE /UNDEBUG)
+endif()
+add_test(NAME dev_menu_model COMMAND test_dev_menu_model)
+
 add_executable(test_render_scale test_render_scale.cpp)
 target_link_libraries(
   test_render_scale PRIVATE fearvr-common fearvr-warnings

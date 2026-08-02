@@ -379,11 +379,23 @@ LithTech camera transforms. The complete axis and quaternion derivation is in
 
 Verified Retail menu hooks add `VR Settings` to the native pause menu. Its root
 opens six bounded subpages: Display & HUD, Movement & Comfort, Controls,
-Weapons, Melee, and Advanced. The page/back state and numeric-preset selection
-are isolated in `src/common/vr_menu_model.h`; the Retail adapter creates and
-shows the native controls in `stereo_hook.cpp`. Settings are applied immediately
-and persisted in `fearvr.ini`. The bridge receives explicit menu/comfort state
-so it can clear `FEARVR_BF_STEREO_ACTIVE`.
+Weapons, Melee, and Advanced. Weapons adds a second bounded level for Handling,
+Simulated Weight, and Recoil rather than crowding every weapon option into one
+list. The page/back state and numeric-preset selection are isolated in
+`src/common/vr_menu_model.h`; the Retail adapter creates and shows the native
+controls in `stereo_hook.cpp`. Settings are applied immediately and persisted
+in `fearvr.ini`. The bridge receives explicit menu/comfort state so it can clear
+`FEARVR_BF_STEREO_ACTIVE`.
+
+A separate gameplay-only live-tuning panel is anchored in world space from the
+current camera and drawn after each stereo-eye world render. Its compact 5x7
+bitmap labels, panel, highlight, pointer and right-controller ray all use
+world-space draw primitives, so they follow the same stereo and capture path.
+`src/common/dev_menu_model.h` performs the controller-ray/plane/row hit test.
+The same model distinguishes tab-strip hits from setting-row hits. Six bounded
+tabs reuse the native menu's setting state and side effects, then write through
+the existing settings/profile persistence functions. The panel captures
+controller command injection until the buttons used to close it are released.
 
 When that flag is clear, the host renders the latest mono image into one eye
 swapchain and submits it as a 2.4 m by 1.8 m quad anchored 2 m in front of the
@@ -415,6 +427,7 @@ testability boundary for logic that does not need LithTech, D3D, or OpenXR:
 - OpenXR session transitions;
 - stereo FOV/IPD and head-tracking math;
 - controller mapping and input freshness;
+- floating dev-menu ray and row hit testing;
 - HUD coverage/coordinate math;
 - two-handed grip and weapon-weight filters;
 - melee gesture/action classification;

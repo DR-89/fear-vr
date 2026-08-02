@@ -18,6 +18,9 @@ enum class VrSettingsPage : std::uint8_t {
     Comfort,
     Controls,
     Weapons,
+    WeaponHandling,
+    WeaponWeight,
+    WeaponRecoil,
     Melee,
     Advanced,
 };
@@ -36,6 +39,10 @@ inline constexpr VrSettingsPage ParentVrSettingsPage(
     case VrSettingsPage::Melee:
     case VrSettingsPage::Advanced:
         return VrSettingsPage::Root;
+    case VrSettingsPage::WeaponHandling:
+    case VrSettingsPage::WeaponWeight:
+    case VrSettingsPage::WeaponRecoil:
+        return VrSettingsPage::Weapons;
     case VrSettingsPage::Root:
     case VrSettingsPage::None:
     default:

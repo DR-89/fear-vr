@@ -25,6 +25,15 @@ int main() {
         fearvr::ParentVrSettingsPage(VrSettingsPage::Weapons) ==
         VrSettingsPage::Root);
     static_assert(
+        fearvr::ParentVrSettingsPage(VrSettingsPage::WeaponHandling) ==
+        VrSettingsPage::Weapons);
+    static_assert(
+        fearvr::ParentVrSettingsPage(VrSettingsPage::WeaponWeight) ==
+        VrSettingsPage::Weapons);
+    static_assert(
+        fearvr::ParentVrSettingsPage(VrSettingsPage::WeaponRecoil) ==
+        VrSettingsPage::Weapons);
+    static_assert(
         fearvr::ParentVrSettingsPage(VrSettingsPage::Melee) ==
         VrSettingsPage::Root);
     static_assert(

@@ -45,30 +45,51 @@ constexpr float kTwoHandMinSteerSeparationMeters = 0.12F;
 constexpr float kTwoHandSoftSteerRadians = 0.96F;  // rund 55 Grad
 constexpr float kTwoHandMaxSteerRadians = 1.57F;   // rund 90 Grad
 
-// How much the line between both hands takes over the aim direction, by
-// weapon length. A pistol keeps following the right hand alone; a rifle is
-// carried by both hands, which is what makes the off-hand worth using.
-//
-// Die Grenzen stammen aus gemessenen Werten, nicht aus einer Schaetzung: Das
-// Log `two_handed_grip_active` und die Muendungsdiagnose ergaben am 26.07.2026
-// rund 13 cm fuer eine Pistole und 37 cm fuer ein Gewehr. Die erste Fassung
-// setzte 28 bis 55 cm an und gab dem Gewehr deshalb nur 0.19 — der Benutzer
-// merkte von der Stuetzhand fast nichts. Die Rampe liegt jetzt zwischen
-// Pistole und Gewehr, damit ein Gewehr den vollen Anteil bekommt.
-constexpr float kTwoHandShortWeaponMeters = 0.20F;
-constexpr float kTwoHandLongWeaponMeters = 0.35F;
-// 0.85 war zu viel, solange die Waffe beim Zugreifen noch sprang: Die rechte
-// Hand hatte dann keine Wirkung mehr. Mit dem gemerkten Winkelversatz gibt es
-// diesen Sprung nicht mehr, und 0.75 laesst die Stuetzhand deutlich fuehren,
-// ohne der Waffenhand den Drehpunkt zu nehmen.
-constexpr float kTwoHandMaximumBlend = 0.75F;
-
 // Position of the left grip in the right hand's aim frame.
 struct TwoHandedSupportOffset {
     float forwardMeters{0.0F};
     float lateralMeters{0.0F};
     bool valid{false};
 };
+
+struct TwoHandedPivotTranslation {
+    TrackingVector primaryPosition;
+    TrackingVector correction;
+    bool valid{false};
+};
+
+// Translate a rigid two-grab object so its stored secondary attachment lands
+// on the tracked secondary hand. Rotation is solved separately; once that
+// rotated attachment offset is known, this makes the support hand the pivot
+// without scaling the object or changing the distance between its grips.
+// Units are deliberately arbitrary as long as all three inputs match.
+inline TwoHandedPivotTranslation SolveSecondaryGripPivot(
+    const TrackingVector& primaryPosition,
+    const TrackingVector& secondaryPosition,
+    const TrackingVector& rotatedSecondaryOffset,
+    float influence = 1.0F) noexcept {
+    TwoHandedPivotTranslation result{};
+    if (!IsFinite(primaryPosition) || !IsFinite(secondaryPosition) ||
+        !IsFinite(rotatedSecondaryOffset) || !std::isfinite(influence)) {
+        return result;
+    }
+    const float amount = std::clamp(influence, 0.0F, 1.0F);
+    const TrackingVector predictedSecondary{
+        primaryPosition.x + rotatedSecondaryOffset.x,
+        primaryPosition.y + rotatedSecondaryOffset.y,
+        primaryPosition.z + rotatedSecondaryOffset.z};
+    result.correction = {
+        (secondaryPosition.x - predictedSecondary.x) * amount,
+        (secondaryPosition.y - predictedSecondary.y) * amount,
+        (secondaryPosition.z - predictedSecondary.z) * amount};
+    result.primaryPosition = {
+        primaryPosition.x + result.correction.x,
+        primaryPosition.y + result.correction.y,
+        primaryPosition.z + result.correction.z};
+    result.valid = IsFinite(result.primaryPosition) &&
+        IsFinite(result.correction);
+    return result;
+}
 
 inline TwoHandedSupportOffset LeftHandSupportOffset(
     const FearVrInputState& state) noexcept {
@@ -164,21 +185,6 @@ inline float SoftLimitedSteerAngle(float angleRadians) noexcept {
         (angleRadians - kTwoHandSoftSteerRadians) / range;
     return kTwoHandSoftSteerRadians +
            range * (1.0F - std::exp(-excess));
-}
-
-// Weight of the hand-to-hand line in the aim direction, from the distance
-// between the weapon's origin and its muzzle.
-inline float TwoHandedAimBlend(float barrelLengthMeters) noexcept {
-    if (!std::isfinite(barrelLengthMeters) ||
-        barrelLengthMeters <= kTwoHandShortWeaponMeters) {
-        return 0.0F;
-    }
-    const float span =
-        kTwoHandLongWeaponMeters - kTwoHandShortWeaponMeters;
-    const float ramp =
-        (barrelLengthMeters - kTwoHandShortWeaponMeters) / span;
-    return kTwoHandMaximumBlend *
-           std::clamp(ramp, 0.0F, 1.0F);
 }
 
 } // namespace fearvr

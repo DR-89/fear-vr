@@ -537,18 +537,13 @@ bool g_climbWasGripping = false;
 bool g_climbOnLadder = false;
 bool g_climbActive = false;
 float g_climbAxis = 0.0F;
-// Rund 0,1 s bei 60 Bildern: kurz genug, um nicht traege zu wirken.
-constexpr float kTwoHandBlendRampPerFrame = 0.15F;
 struct TwoHandedGripState {
-    // Dreht die Handlinie auf die Waffenachse, wie sie beim Zugreifen stand.
-    LTRotation offset;
     // Griffpunkt und Handhaltung im Waffenraum. Damit klebt die sichtbare
     // linke Hand an der Waffe, statt frei daneben zu schweben — der
     // Controller darf sich bewegen, die Hand bleibt am Vordergriff.
     LTVector grabOffsetInWeapon;
     LTRotation grabRotationInWeapon;
-    float blendRamp{0.0F};
-    bool offsetValid{false};
+    bool geometryValid{false};
     bool placementValid{false};
 };
 TwoHandedGripState g_twoHandedGrip;
@@ -8225,8 +8220,8 @@ bool CurrentSupportDirection(LTVector& direction) noexcept {
 // ein `return` wuerde sie deshalb schlagartig auf Einhand-Zielen und damit in
 // die Bildmitte zuruecksetzen. Stattdessen wird der Winkel weich gedaempft.
 bool ClampTwoHandedTargetDirection(
-    const LTVector& forward, LTVector& target) noexcept {
-    const float dot = std::clamp(forward.Dot(target), -1.0F, 1.0F);
+    const LTVector& baseDirection, LTVector& target) noexcept {
+    const float dot = std::clamp(baseDirection.Dot(target), -1.0F, 1.0F);
     const float angle = std::acos(dot);
     const float limited = SoftLimitedSteerAngle(angle);
     if (!std::isfinite(limited) || limited >= angle - 0.0001F) {
@@ -8235,26 +8230,26 @@ bool ClampTwoHandedTargetDirection(
 
     // Das Kreuzprodukt von Hand: `LTVector::Cross` dreht die Operanden-
     // reihenfolge gegenueber dem rechtshaendigen Kreuzprodukt um
-    // (COORDINATE-SYSTEM.md §1). Mit `forward.Cross(target)` zeigte die
+    // (COORDINATE-SYSTEM.md §1). Mit `baseDirection.Cross(target)` zeigte die
     // Drehachse deshalb genau in die Gegenrichtung, und die begrenzte Waffe
     // kippte auf die falsche Seite der Zielachse — der Sprung, den der
     // Benutzer am 28.07.2026 als "ploetzlich nach links" gemeldet hat.
     // `RotationBetweenDirections` rechnet aus demselben Grund von Hand.
     LTVector axis(
-        forward.y * target.z - forward.z * target.y,
-        forward.z * target.x - forward.x * target.z,
-        forward.x * target.y - forward.y * target.x);
+        baseDirection.y * target.z - baseDirection.z * target.y,
+        baseDirection.z * target.x - baseDirection.x * target.z,
+        baseDirection.x * target.y - baseDirection.y * target.x);
     if (axis.MagSqr() < 0.0001F) {
         // Handlinie und Waffenachse sind (anti)parallel: jede senkrechte
         // Achse taugt, die Richtung ist hier ohnehin nicht bestimmt.
         const LTVector reference =
-            std::fabs(forward.y) < 0.9F
+            std::fabs(baseDirection.y) < 0.9F
                 ? LTVector(0.0F, 1.0F, 0.0F)
                 : LTVector(1.0F, 0.0F, 0.0F);
         axis.Init(
-            forward.y * reference.z - forward.z * reference.y,
-            forward.z * reference.x - forward.x * reference.z,
-            forward.x * reference.y - forward.y * reference.x);
+            baseDirection.y * reference.z - baseDirection.z * reference.y,
+            baseDirection.z * reference.x - baseDirection.x * reference.z,
+            baseDirection.x * reference.y - baseDirection.y * reference.x);
     }
     if (axis.MagSqr() < 0.0001F) {
         return false;
@@ -8263,7 +8258,7 @@ bool ClampTwoHandedTargetDirection(
 
     LTRotation limit;
     limit.Init(axis, limited);
-    target = limit.RotateVector(forward);
+    target = limit.RotateVector(baseDirection);
     return target.MagSqr() > 0.0001F;
 }
 
@@ -8282,105 +8277,110 @@ void UpdateTwoHandedGrip() noexcept {
         return;
     }
 
-    g_twoHandedGripActive = true;
-    g_twoHandedGrip.blendRamp = 0.0F;
-    // Der Winkelversatz zwischen Handlinie und Waffe im Moment des Zugreifens.
-    // Ohne ihn schnappt die Waffe beim Greifen auf die Handlinie — genau das
-    // Verschieben, das der Benutzer gemeldet hat. Mit ihm bleibt sie stehen,
-    // und erst die weitere Handbewegung dreht sie.
-    LTVector support;
-    LTVector forward = g_weaponAim.fireTransform.m_rRot.Forward();
-    g_twoHandedGrip.offsetValid =
-        CurrentSupportDirection(support) &&
-        forward.MagSqr() > 0.0001F &&
-        RotationBetweenDirections(
-            support, forward, g_twoHandedGrip.offset);
-
-    // Griffpunkt im Waffenraum festhalten. Die Waffe sitzt im rechten Griff,
-    // ihre Ausrichtung ist die Feuerachse — beides ist hier aktuell.
+    // Preserve the exact secondary attachment in weapon-local space. At the
+    // grab frame this makes the dual-anchor solve an identity operation, so
+    // it needs no partial blend or transition ramp to avoid snapping.
     const LTRotation weaponRotationInverse =
         g_weaponAim.fireTransform.m_rRot.Conjugate();
     g_twoHandedGrip.grabOffsetInWeapon =
         weaponRotationInverse.RotateVector(
             g_weaponAim.leftGripTransform.m_vPos -
             g_weaponAim.gripTransform.m_vPos);
+    const float minimumSeparation =
+        kTwoHandMinSteerSeparationMeters * kGameUnitsPerMeter;
+    g_twoHandedGrip.geometryValid =
+        g_twoHandedGrip.grabOffsetInWeapon.MagSqr() >
+            minimumSeparation * minimumSeparation;
+    if (!g_twoHandedGrip.geometryValid) {
+        g_twoHandedGrip = TwoHandedGripState{};
+        return;
+    }
+    g_twoHandedGripActive = true;
     g_twoHandedGrip.grabRotationInWeapon =
         weaponRotationInverse * g_weaponAim.leftGripTransform.m_rRot;
     g_twoHandedGrip.placementValid = g_weaponAim.leftGripValid;
 
     if (InterlockedCompareExchange(
             &g_twoHandedGripActiveLogged, 1, 0) == 0) {
-        const float barrelLengthMeters = CurrentBarrelLengthMeters();
         char message[192]{};
         std::snprintf(
             message, sizeof(message),
-            "The left hand is supporting the weapon; barrel length "
-            "%.1f cm gives an aim blend of %.2f. The grab holds until "
-            "the button is released; sprint and leaning rest until then.",
-            barrelLengthMeters * 100.0F,
-            TwoHandedAimBlend(barrelLengthMeters));
+            "The left hand is supporting the weapon as a rigid secondary "
+            "pivot. Both tracked grip attachments drive the weapon until "
+            "release; sprint and leaning rest meanwhile.");
         Report("INFO", "two_handed_grip_active", message);
     }
 }
 
-// Beim beidhaendigen Halten fuehrt die Linie zwischen beiden Haenden die
-// Waffe. Wie stark, haengt an der Waffenlaenge: eine Pistole bleibt allein an
-// der rechten Hand, ein Gewehr liegt in beiden. Gedreht wird ueber die
-// kuerzeste Drehung, damit die Waffenneigung der rechten Hand erhalten bleibt.
+// Rigid two-anchor solve. The dominant controller contributes the base
+// orientation (including roll), the line between both tracked grips corrects
+// its direction, and translation then places the stored support attachment
+// exactly at the left controller. Moving the right hand around a stationary
+// support hand therefore rotates around the support pivot instead of dragging
+// the visible left hand around a right-hand origin.
 void ApplyTwoHandedAimSupport() noexcept {
-    if (!g_twoHandedGripActive || !g_twoHandedGrip.offsetValid) {
-        return;
-    }
-    const float blend =
-        TwoHandedAimBlend(CurrentBarrelLengthMeters());
-    if (blend <= 0.0F) {
+    if (!g_twoHandedGripActive || !g_twoHandedGrip.geometryValid) {
         return;
     }
 
     LTVector support;
     if (!CurrentSupportDirection(support)) {
+        // A collapsed hand line has no stable rigid solution. Release the
+        // secondary attachment rather than reverting to right-origin motion
+        // and dragging the visible support hand.
+        g_twoHandedGripActive = false;
+        g_twoHandedGrip = TwoHandedGripState{};
         return;
     }
-    LTVector forward = g_weaponAim.fireTransform.m_rRot.Forward();
-    if (forward.MagSqr() < 0.0001F) {
+    LTVector predictedSupport =
+        g_weaponAim.fireTransform.m_rRot.RotateVector(
+            g_twoHandedGrip.grabOffsetInWeapon);
+    if (predictedSupport.MagSqr() < 0.0001F) {
         return;
     }
-    forward.Normalize();
-
-    // Die Handlinie im Rahmen des Zugreifens: Beim Griff ist das exakt die
-    // damalige Waffenachse, danach dreht jede Handbewegung sie weiter.
-    LTVector target = g_twoHandedGrip.offset.RotateVector(support);
-    if (target.MagSqr() < 0.0001F) {
-        return;
-    }
-    target.Normalize();
+    predictedSupport.Normalize();
     // Zwei Haende an derselben Waffe koennen nicht beliebig zueinander
     // stehen. Laeuft die Stuetzhand zu weit weg, wird die Lenkung am Rand des
     // erlaubten Kegels begrenzt. Ein harter Abbruch hier wuerde auf die zuvor
     // berechnete Einhandpose zurueckfallen und die Waffe in die Bildmitte
     // springen lassen.
-    if (!ClampTwoHandedTargetDirection(forward, target)) {
+    if (!ClampTwoHandedTargetDirection(predictedSupport, support)) {
         return;
     }
 
-    // Der Anteil faehrt ueber wenige Bilder hoch. Der Versatz allein macht den
-    // Griff schon sprungfrei; die Rampe faengt zusaetzlich den Ruck ab, wenn
-    // die Hand im Moment des Zugreifens noch in Bewegung ist.
-    g_twoHandedGrip.blendRamp = (std::min)(
-        1.0F, g_twoHandedGrip.blendRamp + kTwoHandBlendRampPerFrame);
-    const float effectiveBlend = blend * g_twoHandedGrip.blendRamp;
-
-    LTVector blended = forward + (target - forward) * effectiveBlend;
-    if (blended.MagSqr() < 0.0001F) {
-        return;
-    }
-    blended.Normalize();
     LTRotation correction;
-    if (!RotationBetweenDirections(forward, blended, correction)) {
+    if (!RotationBetweenDirections(
+            predictedSupport, support, correction)) {
         return;
     }
     g_weaponAim.fireTransform.m_rRot =
         correction * g_weaponAim.fireTransform.m_rRot;
+    g_weaponAim.fireTransform.m_rRot.Normalize();
+
+    const LTVector rotatedSupportOffset =
+        g_weaponAim.fireTransform.m_rRot.RotateVector(
+            g_twoHandedGrip.grabOffsetInWeapon);
+    const TwoHandedPivotTranslation pivot = SolveSecondaryGripPivot(
+        {g_weaponAim.gripTransform.m_vPos.x,
+         g_weaponAim.gripTransform.m_vPos.y,
+         g_weaponAim.gripTransform.m_vPos.z},
+        {g_weaponAim.leftGripTransform.m_vPos.x,
+         g_weaponAim.leftGripTransform.m_vPos.y,
+         g_weaponAim.leftGripTransform.m_vPos.z},
+        {rotatedSupportOffset.x, rotatedSupportOffset.y,
+         rotatedSupportOffset.z});
+    if (!pivot.valid) {
+        return;
+    }
+    const LTVector pivotCorrection(
+        pivot.correction.x, pivot.correction.y, pivot.correction.z);
+    g_weaponAim.gripTransform.m_vPos = LTVector(
+        pivot.primaryPosition.x,
+        pivot.primaryPosition.y,
+        pivot.primaryPosition.z);
+    // Aim and grip poses originate on the same controller. Preserve their
+    // measured offset when the rigid weapon origin moves to honor the pivot.
+    g_weaponAim.fireTransform.m_vPos += pivotCorrection;
 }
 
 struct WeaponCollisionBoxGeometry {

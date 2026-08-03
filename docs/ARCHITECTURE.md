@@ -307,6 +307,17 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   drei LODs) und rasterisiert deren UV-Dreiecke in die Alphaebene einer lokal
   erzeugten DXT3-Textur. Eine Kontrollmaske stellt sicher, dass keine Hand-UVs
   getroffen werden.
+- **Arm-IK:** Ober- und Unterarm verwenden einen analytischen Zwei-Knochen-
+  Solver mit gemessenen Retail-Knochenlaengen. Ein koerperrelativer Polvektor
+  fuehrt beide Ellenbogen nach aussen, unten und leicht hinter den Brustkorb;
+  die zuletzt gueltige Beugehemisphaere bleibt an gestreckten oder zum
+  Polvektor parallelen Posen erhalten. Der Hand-Socket wird anschliessend
+  weiterhin exakt auf die OpenXR-Grip-Pose gesetzt.
+- **Live-Kalibrierung:** Das schwebende IK-Menue kann die gemeinsamen
+  koerperrelativen Polkomponenten und den linken Handversatz zur Laufzeit
+  veraendern. Die linke sichtbare Hand verwendet fuer Position und Rotation
+  dieselbe OpenXR-Grip-Pose; ein lokaler Sechs-Achsen-Versatz wird erst danach
+  angewendet und veraendert weder Waffensteuerung noch Schussachse.
 - **Bekannte Nachteile:** Knochen zu skalieren oder zu verschieben scheidet
   aus. Node-Control liefert nur einen `LTRigidTransform`, und ein Kollabieren
   der Armknochen erzeugt bei geskinnten Meshes einen sichtbaren Splitter vom

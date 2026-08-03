@@ -28,8 +28,8 @@ int main() {
     panel.right = {1.0F, 0.0F, 0.0F};
     panel.up = {0.0F, 1.0F, 0.0F};
     panel.normal = {0.0F, 0.0F, -1.0F};
-    panel.tabCount = 6;
-    panel.rowCount = 10;
+    panel.tabCount = 8;
+    panel.rowCount = 7;
 
     DevMenuRayHit hit;
     assert(HitTestDevMenuPanel(
@@ -45,7 +45,7 @@ int main() {
         panel, {0.0F, 0.0F, 0.0F},
         {0.0F, tabCenterY, -1.0F}, hit));
     assert(hit.region == DevMenuHitRegion::tab);
-    assert(hit.tab == 3U);
+    assert(hit.tab == 4U);
 
     const float rowZeroY =
         panel.height * 0.5F - panel.headerHeight -
@@ -66,7 +66,7 @@ int main() {
     panel.rowCount = 0;
     assert(!HitTestDevMenuPanel(
         panel, {0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, -1.0F}, hit));
-    panel.rowCount = 10;
+    panel.rowCount = 7;
     panel.tabCount = 0;
     assert(!HitTestDevMenuPanel(
         panel, {0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, -1.0F}, hit));

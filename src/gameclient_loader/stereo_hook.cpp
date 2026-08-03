@@ -20,6 +20,7 @@
 #include <iltrenderer.h>
 #include <MinHook.h>
 
+#include "arm_ik.h"
 #include "controller_mapping.h"
 #include "dev_menu_model.h"
 #include "head_tracking_math.h"
@@ -192,6 +193,8 @@ struct HandNodeControlState {
     LTVector forearmOffsetFromUpperArm;
     LTVector socketOffsetFromForearm;
     LTVector desiredElbowWorld;
+    LTVector bendDirectionWorld;
+    float elbowSideSign{0.0F};
     bool installed{false};
     bool upperArmInstalled{false};
     bool forearmInstalled{false};
@@ -199,6 +202,7 @@ struct HandNodeControlState {
     bool forearmOffsetFromUpperArmValid{false};
     bool socketOffsetFromForearmValid{false};
     bool desiredElbowValid{false};
+    bool bendDirectionValid{false};
 };
 HandNodeControlState g_rightHandControl;
 HandNodeControlState g_leftHandControl;
@@ -293,7 +297,7 @@ ULONGLONG g_menuActivationHoldUntil = 0;
 bool g_menuFocusKnown = false;
 bool g_menuFocusActive = false;
 bool g_escapeWasDown = false;
-constexpr std::size_t kDevMenuTabCount = 7;
+constexpr std::size_t kDevMenuTabCount = 8;
 constexpr float kDevMenuDistanceMeters = 1.15F;
 constexpr float kDevMenuVerticalOffsetMeters = 0.08F;
 constexpr float kDevMenuWidthMeters = 0.64F;
@@ -307,15 +311,16 @@ enum class DevMenuTab : std::size_t {
     weight,
     collision,
     weapon,
+    ik,
     movement,
     melee,
     vr,
 };
 constexpr std::array<const wchar_t*, kDevMenuTabCount> kDevMenuTabLabels{
-    L"RECOIL", L"WEIGHT", L"COLLIDE", L"WEAPON", L"MOVE", L"MELEE",
-    L"VR"};
+    L"RECOIL", L"WEIGHT", L"COLLIDE", L"WEAPON", L"IK", L"MOVE",
+    L"MELEE", L"VR"};
 constexpr std::array<std::size_t, kDevMenuTabCount> kDevMenuTabRowCounts{
-    5U, 6U, 7U, 3U, 6U, 5U, 6U};
+    5U, 6U, 7U, 3U, 7U, 6U, 5U, 6U};
 
 std::size_t DevMenuRowCount(DevMenuTab tab) noexcept {
     const std::size_t index = static_cast<std::size_t>(tab);
@@ -547,6 +552,8 @@ struct TwoHandedGripState {
     bool placementValid{false};
 };
 TwoHandedGripState g_twoHandedGrip;
+ArmIkTuning g_armIkTuning{};
+bool g_devMenuIkLeftHandPage = false;
 
 // Sichtbare Lage der linken Hand. Waehrend des Zweihandgriffs klebt sie am
 // gemerkten Griffpunkt der Waffe, statt frei daneben zu schweben.
@@ -559,20 +566,38 @@ bool LeftHandOnWeapon() noexcept {
 }
 
 LTVector EffectiveLeftHandPosition() noexcept {
-    if (!LeftHandOnWeapon()) {
-        return g_weaponAim.leftGripTransform.m_vPos;
-    }
-    return g_weaponAim.gripTransform.m_vPos +
-           g_weaponAim.fireTransform.m_rRot.RotateVector(
-               g_twoHandedGrip.grabOffsetInWeapon);
+    const bool onWeapon = LeftHandOnWeapon();
+    const LTVector basePosition = onWeapon
+        ? g_weaponAim.gripTransform.m_vPos +
+              g_weaponAim.fireTransform.m_rRot.RotateVector(
+                  g_twoHandedGrip.grabOffsetInWeapon)
+        : g_weaponAim.leftGripTransform.m_vPos;
+    const LTRotation baseRotation = onWeapon
+        ? g_weaponAim.fireTransform.m_rRot *
+              g_twoHandedGrip.grabRotationInWeapon
+        : g_weaponAim.leftGripTransform.m_rRot;
+    const LTVector localOffset(
+        g_armIkTuning.leftHandRightMeters * kGameUnitsPerMeter,
+        g_armIkTuning.leftHandUpMeters * kGameUnitsPerMeter,
+        g_armIkTuning.leftHandForwardMeters * kGameUnitsPerMeter);
+    return basePosition + baseRotation.RotateVector(localOffset);
 }
 
 LTRotation EffectiveLeftHandRotation() noexcept {
-    if (!LeftHandOnWeapon()) {
-        return g_weaponAim.leftAimTransform.m_rRot;
-    }
-    return g_weaponAim.fireTransform.m_rRot *
-           g_twoHandedGrip.grabRotationInWeapon;
+    const LTRotation baseRotation = LeftHandOnWeapon()
+        ? g_weaponAim.fireTransform.m_rRot *
+              g_twoHandedGrip.grabRotationInWeapon
+        : g_weaponAim.leftGripTransform.m_rRot;
+    constexpr float kDegreesToRadians =
+        3.14159265358979323846F / 180.0F;
+    LTRotation correction(
+        g_armIkTuning.leftHandPitchDegrees * kDegreesToRadians,
+        g_armIkTuning.leftHandYawDegrees * kDegreesToRadians,
+        g_armIkTuning.leftHandRollDegrees * kDegreesToRadians);
+    correction.Normalize();
+    LTRotation result = baseRotation * correction;
+    result.Normalize();
+    return result;
 }
 
 // Die Taschenlampe folgt sonst der Hand. Klebt die Hand an der Waffe, zeigt
@@ -759,6 +784,9 @@ constexpr std::array<float, 8> kWeaponCollisionHeightPresets{
 constexpr std::array<float, 9> kWeaponCollisionOffsetPresets{
     -0.20F, -0.15F, -0.10F, -0.05F, 0.00F,
      0.05F,  0.10F,  0.15F, 0.20F};
+constexpr float kIkElbowStep = 0.05F;
+constexpr float kIkHandPositionStepMeters = 0.005F;
+constexpr float kIkHandRotationStepDegrees = 5.0F;
 
 VrMenuControl g_vrMenuEntry;
 VrMenuControl g_vrMenuTitle;
@@ -1730,6 +1758,17 @@ void InitializeVrSettings() noexcept {
         ReadVrFloat(L"VR", L"WeaponPositionalFollow", 18.0F),
         ReadVrFloat(L"VR", L"WeaponRotationalFollow", 20.0F),
         ReadVrFloat(L"VR", L"WeaponCatchUpStrength", 1.5F)});
+    g_armIkTuning = SanitizeArmIkTuning({
+        ReadVrFloat(L"VR", L"IkElbowOutward", 1.0F),
+        ReadVrFloat(L"VR", L"IkElbowDown", 0.45F),
+        ReadVrFloat(L"VR", L"IkElbowBack", 0.15F),
+        ReadVrSetting(L"IkElbowContinuity", 1) != 0,
+        ReadVrFloat(L"VR", L"IkLeftHandRight", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandUp", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandForward", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandPitch", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandYaw", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandRoll", 0.0F)});
     SetBooleanOption(
         g_setStereoEnabled,
         ReadVrSetting(
@@ -1909,6 +1948,33 @@ void SaveVrSettings() noexcept {
     WriteVrFloat(
         L"VR", L"WeaponCatchUpStrength",
         g_defaultWeaponWeightProfile.catchUpStrength);
+    WriteVrFloat(
+        L"VR", L"IkElbowOutward", g_armIkTuning.elbowOutward);
+    WriteVrFloat(
+        L"VR", L"IkElbowDown", g_armIkTuning.elbowDown);
+    WriteVrFloat(
+        L"VR", L"IkElbowBack", g_armIkTuning.elbowBack);
+    WriteVrSetting(
+        L"IkElbowContinuity",
+        g_armIkTuning.preserveElbowContinuity ? 1 : 0);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandRight",
+        g_armIkTuning.leftHandRightMeters);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandUp",
+        g_armIkTuning.leftHandUpMeters);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandForward",
+        g_armIkTuning.leftHandForwardMeters);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandPitch",
+        g_armIkTuning.leftHandPitchDegrees);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandYaw",
+        g_armIkTuning.leftHandYawDegrees);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandRoll",
+        g_armIkTuning.leftHandRollDegrees);
     WriteVrSetting(L"HeadBob", g_headBobEnabled ? 1 : 0);
     WriteVrSetting(
         L"AimGuide", g_weaponAimGuideEnabled ? 1 : 0);
@@ -2520,6 +2586,17 @@ void RequestVrPanelRecenter() noexcept {
     }
 }
 
+void ResetArmIkBendMemory() noexcept {
+    g_rightHandControl.bendDirectionValid = false;
+    g_leftHandControl.bendDirectionValid = false;
+}
+
+void ResetArmIkTuning() noexcept {
+    g_armIkTuning = ArmIkTuning{};
+    ResetArmIkBendMemory();
+    g_twoHandedGrip = TwoHandedGripState{};
+}
+
 void ApplyVrDefaults() noexcept {
     SetBooleanOption(g_setStereoEnabled, true);
     SetBooleanOption(g_setTranslationEnabled, false);
@@ -2565,6 +2642,7 @@ void ApplyVrDefaults() noexcept {
     g_meleeJumpKickEnabled = true;
     g_meleeSlideKickEnabled = true;
     g_showPlayerArms = false;
+    ResetArmIkTuning();
     ResetMeleeActions(g_meleeActions);
     g_meleePulseUntil = 0;
     g_slideDuckPulseUntil = 0;
@@ -4454,6 +4532,101 @@ void FormatDevMenuRow(
             _snwprintf_s(text, textCount, _TRUNCATE, L"TWO-HAND GRIP: %s",
                          onOff[g_twoHandedGripEnabled ? 1 : 0]);
             break;
+        }
+        break;
+    case DevMenuTab::ik:
+        if (!g_devMenuIkLeftHandPage) {
+            switch (row) {
+            case 0:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"IK PAGE: ELBOWS");
+                break;
+            case 1:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"SHOW ARMS: %s",
+                    onOff[g_showPlayerArms ? 1 : 0]);
+                break;
+            case 2:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"ELBOW OUTWARD: %.0f%%",
+                    static_cast<double>(
+                        g_armIkTuning.elbowOutward * 100.0F));
+                break;
+            case 3:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"ELBOW DOWN: %.0f%%",
+                    static_cast<double>(
+                        g_armIkTuning.elbowDown * 100.0F));
+                break;
+            case 4:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"ELBOW BACK: %+.0f%%",
+                    static_cast<double>(
+                        g_armIkTuning.elbowBack * 100.0F));
+                break;
+            case 5:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"ELBOW STABILITY: %s",
+                    onOff[g_armIkTuning.preserveElbowContinuity ? 1 : 0]);
+                break;
+            case 6:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"RESET ALL IK");
+                break;
+            }
+        } else {
+            switch (row) {
+            case 0:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"IK PAGE: LEFT HAND");
+                break;
+            case 1:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND RIGHT: %+.1f CM",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandRightMeters * 100.0F));
+                break;
+            case 2:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND UP: %+.1f CM",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandUpMeters * 100.0F));
+                break;
+            case 3:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND FORWARD: %+.1f CM",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandForwardMeters * 100.0F));
+                break;
+            case 4:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND PITCH: %+.0f DEG",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandPitchDegrees));
+                break;
+            case 5:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND YAW: %+.0f DEG",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandYawDegrees));
+                break;
+            case 6:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND ROLL: %+.0f DEG",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandRollDegrees));
+                break;
+            }
         }
         break;
     case DevMenuTab::movement: {
@@ -8132,8 +8305,8 @@ void UpdateTwoHandedGrip() noexcept {
             g_weaponAim.leftGripTransform.m_vPos -
             g_weaponAim.gripTransform.m_vPos);
     g_twoHandedGrip.grabRotationInWeapon =
-        weaponRotationInverse * g_weaponAim.leftAimTransform.m_rRot;
-    g_twoHandedGrip.placementValid = g_weaponAim.leftAimValid;
+        weaponRotationInverse * g_weaponAim.leftGripTransform.m_rRot;
+    g_twoHandedGrip.placementValid = g_weaponAim.leftGripValid;
 
     if (InterlockedCompareExchange(
             &g_twoHandedGripActiveLogged, 1, 0) == 0) {
@@ -8896,49 +9069,41 @@ bool ApplyUpperArmTarget(
         control.forearmOffsetFromUpperArm.Mag();
     const float lowerLength =
         control.socketOffsetFromForearm.Mag();
-    LTVector targetDirection =
-        targetPosition - currentWorld.m_vPos;
-    const float targetDistance = targetDirection.Mag();
-    if (upperLength < 0.01F || lowerLength < 0.01F ||
-        targetDistance < 0.01F) {
-        return false;
-    }
-    targetDirection /= targetDistance;
-
-    const float minimumReach =
-        std::fabs(upperLength - lowerLength) + 0.01F;
-    const float maximumReach =
-        upperLength + lowerLength - 0.01F;
-    const float solvedDistance = (std::max)(
-        minimumReach, (std::min)(maximumReach, targetDistance));
-    const float along =
-        (upperLength * upperLength -
-         lowerLength * lowerLength +
-         solvedDistance * solvedDistance) /
-        (2.0F * solvedDistance);
-    const float bendHeight = std::sqrt((std::max)(
-        0.0F, upperLength * upperLength - along * along));
-
     LTVector currentUpperDirection =
         currentWorld.m_rRot.RotateVector(
             control.forearmOffsetFromUpperArm);
-    LTVector bendDirection =
-        currentUpperDirection -
-        targetDirection *
-            currentUpperDirection.Dot(targetDirection);
-    if (bendDirection.MagSqr() < 0.0001F) {
-        bendDirection = LTVector(0.0F, -1.0F, 0.0F) -
-            targetDirection * -targetDirection.y;
+    const LTRotation& bodyRotation =
+        data.m_pModelTransform->m_rRot;
+    const LTVector bodyRight = bodyRotation.Right();
+    const LTVector bodyUp =
+        bodyRotation.RotateVector(LTVector(0.0F, 1.0F, 0.0F));
+    const LTVector bodyForward = bodyRotation.Forward();
+    // Elbows prefer an anatomical plane beside and slightly below/behind
+    // the chest. Unlike the prior animated-arm projection this pole remains
+    // stable while Retail changes locomotion or weapon animations.
+    const LTVector poleDirection =
+        bodyRight * (
+            control.elbowSideSign * g_armIkTuning.elbowOutward) -
+        bodyUp * g_armIkTuning.elbowDown -
+        bodyForward * g_armIkTuning.elbowBack;
+    const TwoBoneElbowSolution solution = SolveTwoBoneElbow(
+        {currentWorld.m_vPos.x, currentWorld.m_vPos.y,
+         currentWorld.m_vPos.z},
+        {targetPosition.x, targetPosition.y, targetPosition.z},
+        upperLength, lowerLength,
+        {poleDirection.x, poleDirection.y, poleDirection.z},
+        {control.bendDirectionWorld.x,
+         control.bendDirectionWorld.y,
+         control.bendDirectionWorld.z},
+        control.bendDirectionValid &&
+            g_armIkTuning.preserveElbowContinuity,
+        {currentUpperDirection.x, currentUpperDirection.y,
+         currentUpperDirection.z});
+    if (!solution.valid) {
+        return false;
     }
-    if (bendDirection.MagSqr() < 0.0001F) {
-        bendDirection = LTVector(1.0F, 0.0F, 0.0F);
-    }
-    bendDirection.Normalize();
-
-    const LTVector desiredElbow =
-        currentWorld.m_vPos +
-        targetDirection * along +
-        bendDirection * bendHeight;
+    const LTVector desiredElbow(
+        solution.elbow.x, solution.elbow.y, solution.elbow.z);
     LTRotation upperCorrection;
     if (!RotationBetweenDirections(
             currentUpperDirection,
@@ -8956,6 +9121,11 @@ bool ApplyUpperArmTarget(
     data.m_pNodeTransform->m_rRot = desiredObject.m_rRot;
     control.desiredElbowWorld = desiredElbow;
     control.desiredElbowValid = true;
+    control.bendDirectionWorld = LTVector(
+        solution.bendDirection.x,
+        solution.bendDirection.y,
+        solution.bendDirection.z);
+    control.bendDirectionValid = true;
     return true;
 }
 
@@ -9110,7 +9280,7 @@ void RightHandNodeControl(
 void LeftHandNodeControl(
     const NodeControlData& data, void* userData) {
     (void)userData;
-    if (!g_weaponAim.leftGripValid || !g_weaponAim.leftAimValid) {
+    if (!g_weaponAim.leftGripValid) {
         return;
     }
     const LTRigidTransform desiredSocket(
@@ -9217,6 +9387,7 @@ bool InstallHandNodeControl(
     const char* forearmNodeName,
     const char* socketName, NodeControlFn handCallback,
     NodeControlFn upperArmCallback, NodeControlFn forearmCallback,
+    float elbowSideSign,
     HandNodeControlState& control,
     const char* installedEvent) noexcept {
     HMODELNODE node = INVALID_MODEL_NODE;
@@ -9249,6 +9420,7 @@ bool InstallHandNodeControl(
     }
 
     control.node = node;
+    control.elbowSideSign = elbowSideSign;
     control.socketFromNode =
         nodeWorld.GetInverse() * socketWorld;
     control.socketFromNodeValid = true;
@@ -9671,6 +9843,7 @@ void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
                 model, playerBody, "Right_hand", "Right_armu",
                 "Right_arml", "RightHand", &RightHandNodeControl,
                 &RightUpperArmNodeControl, &RightForearmNodeControl,
+                1.0F,
                 g_rightHandControl,
                 "weapon_hand_tracking_installed") && success;
         }
@@ -9679,6 +9852,7 @@ void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
                 model, playerBody, "Left_hand", "Left_armu",
                 "Left_arml", "LeftHand", &LeftHandNodeControl,
                 &LeftUpperArmNodeControl, &LeftForearmNodeControl,
+                -1.0F,
                 g_leftHandControl,
                 "left_hand_tracking_installed") && success;
         }
@@ -10741,6 +10915,95 @@ void ActivateFloatingDevMenuRow(
             }
             break;
         }
+        break;
+    case DevMenuTab::ik:
+        if (row == 0) {
+            g_devMenuIkLeftHandPage = !g_devMenuIkLeftHandPage;
+            g_devMenu.selectedRow = 0;
+            break;
+        }
+        if (!g_devMenuIkLeftHandPage) {
+            switch (row) {
+            case 1:
+                g_showPlayerArms = !g_showPlayerArms;
+                break;
+            case 2:
+                g_armIkTuning.elbowOutward =
+                    NextVrSteppedValue(
+                        g_armIkTuning.elbowOutward,
+                        0.20F, 2.00F, kIkElbowStep);
+                ResetArmIkBendMemory();
+                break;
+            case 3:
+                g_armIkTuning.elbowDown =
+                    NextVrSteppedValue(
+                        g_armIkTuning.elbowDown,
+                        0.00F, 1.50F, kIkElbowStep);
+                ResetArmIkBendMemory();
+                break;
+            case 4:
+                g_armIkTuning.elbowBack =
+                    NextVrSteppedValue(
+                        g_armIkTuning.elbowBack,
+                        -1.00F, 1.00F, kIkElbowStep);
+                ResetArmIkBendMemory();
+                break;
+            case 5:
+                g_armIkTuning.preserveElbowContinuity =
+                    !g_armIkTuning.preserveElbowContinuity;
+                ResetArmIkBendMemory();
+                break;
+            case 6:
+                ResetArmIkTuning();
+                break;
+            }
+        } else {
+            switch (row) {
+            case 1:
+                g_armIkTuning.leftHandRightMeters =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandRightMeters,
+                        -0.20F, 0.20F,
+                        kIkHandPositionStepMeters);
+                break;
+            case 2:
+                g_armIkTuning.leftHandUpMeters =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandUpMeters,
+                        -0.20F, 0.20F,
+                        kIkHandPositionStepMeters);
+                break;
+            case 3:
+                g_armIkTuning.leftHandForwardMeters =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandForwardMeters,
+                        -0.20F, 0.20F,
+                        kIkHandPositionStepMeters);
+                break;
+            case 4:
+                g_armIkTuning.leftHandPitchDegrees =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandPitchDegrees,
+                        -180.0F, 180.0F,
+                        kIkHandRotationStepDegrees);
+                break;
+            case 5:
+                g_armIkTuning.leftHandYawDegrees =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandYawDegrees,
+                        -180.0F, 180.0F,
+                        kIkHandRotationStepDegrees);
+                break;
+            case 6:
+                g_armIkTuning.leftHandRollDegrees =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandRollDegrees,
+                        -180.0F, 180.0F,
+                        kIkHandRotationStepDegrees);
+                break;
+            }
+        }
+        g_armIkTuning = SanitizeArmIkTuning(g_armIkTuning);
         break;
     case DevMenuTab::movement:
         switch (row) {

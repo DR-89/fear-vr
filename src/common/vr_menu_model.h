@@ -86,4 +86,25 @@ inline std::size_t NextVrPresetIndex(
     return (ClosestVrPresetIndex(value, presets) + 1U) % Size;
 }
 
+// Fine live-tuning controls are more useful as uniform steps than as a long
+// preset table. Snap the current value to the nearest step, advance once and
+// wrap from the inclusive maximum back to the minimum.
+inline float NextVrSteppedValue(
+    float value, float minimum, float maximum, float step) noexcept {
+    if (!std::isfinite(minimum) || !std::isfinite(maximum) ||
+        !std::isfinite(step) || minimum > maximum || step <= 0.0F) {
+        return value;
+    }
+    if (!std::isfinite(value)) {
+        return minimum;
+    }
+    const float clamped = (std::max)(minimum, (std::min)(maximum, value));
+    const float stepIndex = std::round((clamped - minimum) / step);
+    const float next = minimum + (stepIndex + 1.0F) * step;
+    if (next > maximum + step * 0.25F) {
+        return minimum;
+    }
+    return (std::max)(minimum, (std::min)(maximum, next));
+}
+
 } // namespace fearvr

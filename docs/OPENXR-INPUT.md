@@ -464,7 +464,7 @@ used for panel hit testing: point at a tab or row and press trigger or A to
 select, toggle or cycle it. Right-stick left/right switches tabs and up/down
 moves the row selection when a ray hit is unavailable; B closes the panel.
 
-The panel has seven bounded tabs:
+The panel has eight bounded tabs:
 
 1. **Recoil:** enabled, Default/Current profile target, strength, muzzle rise
    and recovery.
@@ -473,10 +473,16 @@ The panel has seven bounded tabs:
 3. **Collide:** world collision, visible collision box, Default/Current
    profile target, box length, width, height and forward offset.
 4. **Weapon:** aim guide, arm visibility and two-handed grip.
-5. **Move:** HMD translation, head bob, physical lean/strength, turn speed and
+5. **IK:** two live pages. Elbows exposes arm visibility, body-relative
+   outward/down/back pole components, continuity through straight-arm poses,
+   and an IK reset. Left Hand exposes controller-local right/up/forward offsets
+   plus pitch/yaw/roll correction.
+   Each activation advances elbow components by 5 percent, hand translation
+   by 0.5 cm, or hand rotation by 5 degrees, with safe-range wraparound.
+6. **Move:** HMD translation, head bob, physical lean/strength, turn speed and
    hand climbing.
-6. **Melee:** master gesture switch and each individual strike/kick.
-7. **VR:** stereo HUD, FOV scale, handedness, haptics, weapon diagnostics and
+7. **Melee:** master gesture switch and each individual strike/kick.
+8. **VR:** stereo HUD, FOV scale, handedness, haptics, weapon diagnostics and
    live stereo render scale (100/125/150/175/200 percent).
 
 Changes take effect immediately and use the same `SaveVrSettings` path as the
@@ -494,6 +500,13 @@ override continues to use its global `[VR]` values. The collision wireframe is
 also shown automatically while the Collide tab is open. Green means clear,
 red means a probe is obstructed, and blue means visualization is active while
 world collision is disabled.
+
+The visible left hand now uses the OpenXR grip pose for both position and
+rotation. Earlier builds mixed grip position with the independently calibrated
+aim-pose rotation, which could twist the Retail hand away from the physical
+controller. IK values persist in `[VR]` as `IkElbow*` and `IkLeftHand*` keys;
+the hand offsets are applied in controller-local space and therefore follow
+the controller naturally while it rotates.
 
 `Show arms` ist standardmäßig `Off`: Nur Ober- und Unterarme werden über ein
 lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine

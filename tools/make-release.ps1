@@ -135,7 +135,8 @@ foreach ($name in @('disable-steamvr-theater.ps1', 'hide-steamvr-theater.ps1')) 
 foreach ($document in @(
     @{ Source = 'LICENSE'; Target = 'LICENSE' },
     @{ Source = 'THIRD_PARTY_NOTICES.md'; Target = 'THIRD_PARTY_NOTICES.md' },
-    @{ Source = 'docs\OPENXR-INPUT.md'; Target = 'docs\OPENXR-INPUT.md' }
+    @{ Source = 'docs\OPENXR-INPUT.md'; Target = 'docs\OPENXR-INPUT.md' },
+    @{ Source = 'docs\WEAPON_COLLISION.md'; Target = 'docs\WEAPON_COLLISION.md' }
 )) {
     $source = Join-Path $cfg.ProjectRoot $document.Source
     if (Test-Path -LiteralPath $source -PathType Leaf) {

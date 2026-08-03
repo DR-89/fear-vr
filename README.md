@@ -293,12 +293,13 @@ something is built but not yet verified in-game, it's noted.
   returns to the category list before leaving VR settings.
 - **Floating live-tuning panel during gameplay.** Hold both grip buttons and
   press B to place the panel in front of your current view. Its Recoil, Weight,
-  Weapon, Move, Melee, and VR tabs expose the settings that are safe and useful
-  to change during play. Point at a tab or row and press trigger or A; the right
-  stick navigates rows and switches tabs. B closes the panel. Changes apply
-  immediately and save to `fearvr.ini`; controller gameplay commands are
-  captured while it is open. The VR tab can change stereo world render scale
-  live from 100% through 200% without changing the desktop resolution.
+  Collide, Weapon, Move, Melee, and VR tabs expose the settings that are safe
+  and useful to change during play. Point at a tab or row and press trigger or
+  A; the right stick navigates rows and switches tabs. B closes the panel.
+  Changes apply immediately and save to `fearvr.ini`; controller gameplay
+  commands are captured while it is open. The VR tab can change stereo world
+  render scale live from 100% through 200% without changing the desktop
+  resolution.
 - **All normal VR preferences are editable in game** and persist immediately
   to `fearvr.ini`, including HMD translation, head bob, comfort screen,
   physical leaning, all four individual melee gestures, and simulated weapon
@@ -318,6 +319,16 @@ something is built but not yet verified in-game, it's noted.
   telemetry, including the current recoil offsets.
   Recommended ranges are `0.10-4.00`, `2.0-40.0`, `2.0-40.0`, and
   `0.0-4.0`, respectively.
+- **Per-weapon world-collision boxes** use the measured grip-to-muzzle length
+  and nine stable longitudinal probes across an adjustable width and height. A
+  solid hit resolves the rendered weapon, muzzle, and attached hands along the
+  contacted level-polygon normal without moving the physical controller.
+  Object-only/AABB hits are deliberately excluded so invisible Retail helper
+  volumes cannot move the weapon. The Collide tab selects Current or Default
+  and tunes length, width, height, and forward offset. Its wireframe box is
+  green when clear and red while obstructed;
+  collision and visualization have independent switches. Overrides persist under
+  `[WeaponCollision.<model-name>]`.
 - **Body visibility switch** saved as `ShowArms` (`0` by default). F11 remains
   a developer diagnostic for isolating Retail body pieces, not the arm-hiding
   mechanism.

@@ -125,6 +125,12 @@ number of pixels. The floating tool menu's VR tab can also change and persist
 100/125/150/175/200 percent live. An explicit `-RenderScale` value overrides
 that saved value for one launch.
 
+During gameplay, hold both grips and press B to open the floating tuning
+panel. Its Collide tab enables per-weapon world collision and adjusts the
+equipped weapon's collision-box length, width, height, and forward offset.
+The visible wireframe is green when clear and red while obstructed. See
+`docs\WEAPON_COLLISION.md` for profile and configuration details.
+
 A Steam copy needs the Steam client running, because F.E.A.R. officially
 starts through `steam.exe -applaunch 21090`. GOG and disc copies do not need
 Steam at all. Either way this is independent of which VR runtime renders;

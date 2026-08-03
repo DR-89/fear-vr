@@ -464,30 +464,36 @@ used for panel hit testing: point at a tab or row and press trigger or A to
 select, toggle or cycle it. Right-stick left/right switches tabs and up/down
 moves the row selection when a ray hit is unavailable; B closes the panel.
 
-The panel has six bounded tabs:
+The panel has seven bounded tabs:
 
 1. **Recoil:** enabled, Default/Current profile target, strength, muzzle rise
    and recovery.
 2. **Weight:** enabled, Default/Current profile target, weight,
    position/rotation follow and catch-up.
-3. **Weapon:** aim guide, arm visibility and two-handed grip.
-4. **Move:** HMD translation, head bob, physical lean/strength, turn speed and
+3. **Collide:** world collision, visible collision box, Default/Current
+   profile target, box length, width, height and forward offset.
+4. **Weapon:** aim guide, arm visibility and two-handed grip.
+5. **Move:** HMD translation, head bob, physical lean/strength, turn speed and
    hand climbing.
-5. **Melee:** master gesture switch and each individual strike/kick.
-6. **VR:** stereo HUD, FOV scale, handedness, haptics, weapon diagnostics and
+6. **Melee:** master gesture switch and each individual strike/kick.
+7. **VR:** stereo HUD, FOV scale, handedness, haptics, weapon diagnostics and
    live stereo render scale (100/125/150/175/200 percent).
 
 Changes take effect immediately and use the same `SaveVrSettings` path as the
-native menu, including per-weapon weight and recoil profiles. A render-scale change
-recreates the off-screen eye resources on the next frame while leaving the
-Retail backbuffer unchanged. Stereo disable, comfort
+native menu, including per-weapon weight, recoil, and collision profiles. A
+render-scale change recreates the off-screen eye resources on the next frame
+while leaving the Retail backbuffer unchanged. Stereo disable, comfort
 screen, panel recenter and Reset Defaults remain pause-menu-only because they
 would hide the live panel or are too easy to trigger accidentally. Controller
 gameplay injection, gesture pulses and climbing are suppressed while the panel
 is open and remain suppressed until the opening/closing controls are released.
-The Recoil, Weight, and Weapon tab headers show the equipped model. Current
-recoil overrides are stored under `[WeaponRecoil.<model-name>]`; a weapon with
-no override continues to use the global `[VR]` recoil values.
+The Recoil, Weight, Collide, and Weapon tab headers show the equipped model.
+Current recoil overrides are stored under `[WeaponRecoil.<model-name>]` and
+collision overrides under `[WeaponCollision.<model-name>]`; a weapon with no
+override continues to use its global `[VR]` values. The collision wireframe is
+also shown automatically while the Collide tab is open. Green means clear,
+red means a probe is obstructed, and blue means visualization is active while
+world collision is disabled.
 
 `Show arms` ist standardmäßig `Off`: Nur Ober- und Unterarme werden über ein
 lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine

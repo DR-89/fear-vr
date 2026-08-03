@@ -312,7 +312,7 @@ enum class DevMenuTab : std::size_t {
 constexpr std::array<const wchar_t*, kDevMenuTabCount> kDevMenuTabLabels{
     L"RECOIL", L"WEIGHT", L"WEAPON", L"MOVE", L"MELEE", L"VR"};
 constexpr std::array<std::size_t, kDevMenuTabCount> kDevMenuTabRowCounts{
-    4U, 6U, 3U, 6U, 5U, 6U};
+    5U, 6U, 3U, 6U, 5U, 6U};
 
 std::size_t DevMenuRowCount(DevMenuTab tab) noexcept {
     const std::size_t index = static_cast<std::size_t>(tab);
@@ -656,10 +656,12 @@ struct WeightedWeaponInputState {
     const void* weapon{nullptr};
     LONG resetGeneration{-1};
     WeaponWeightProfile profile{};
+    WeaponRecoilProfile recoilProfile{};
     char profileName[96]{};
     bool aimValid{false};
     bool gripValid{false};
     bool enabledOnLastUpdate{false};
+    bool recoilProfileExplicit{false};
 };
 thread_local WeightedWeaponInputState g_weightedWeaponInput;
 
@@ -682,6 +684,7 @@ bool g_vrMenuControlsBuilt = false;
 bool g_vrSettingsPageActive = false;
 VrSettingsPage g_vrSettingsPage = VrSettingsPage::None;
 bool g_vrWeaponProfileEditsCurrent = true;
+bool g_vrRecoilProfileEditsCurrent = true;
 int g_vrOriginalItemSpacing = 0;
 bool g_vrOriginalItemSpacingKnown = false;
 
@@ -1569,6 +1572,7 @@ void WriteVrSetting(const wchar_t* name, int value) noexcept;
 void WriteVrFloat(
     const wchar_t* section, const wchar_t* name, float value) noexcept;
 void SaveActiveWeaponWeightProfile() noexcept;
+void SaveActiveWeaponRecoilProfile() noexcept;
 
 bool QueryBooleanOption(
     GetBooleanOptionFunction getter, bool fallback) noexcept {
@@ -1860,6 +1864,7 @@ void SaveVrSettings() noexcept {
         static_cast<int>(g_renderScalePercent));
     WriteVrSetting(L"TurnSpeed", g_turnSpeedPreset);
     SaveActiveWeaponWeightProfile();
+    SaveActiveWeaponRecoilProfile();
     g_vrSettingsFilePresent = true;
 }
 
@@ -2094,7 +2099,10 @@ VrMenuControl SetRetailVrPresetVisible(
 }
 
 bool HasCurrentWeaponWeightProfile() noexcept {
-    return g_weightedWeaponInput.profileName[0] != '\0';
+    return g_weightedWeaponInput.weapon != nullptr &&
+           g_weightedWeaponInput.profileName[0] != '\0' &&
+           std::strcmp(
+               g_weightedWeaponInput.profileName, "default") != 0;
 }
 
 bool EditingCurrentWeaponWeightProfile() noexcept {
@@ -2106,6 +2114,34 @@ WeaponWeightProfile& EditableWeaponWeightProfile() noexcept {
     return EditingCurrentWeaponWeightProfile()
         ? g_weightedWeaponInput.profile
         : g_defaultWeaponWeightProfile;
+}
+
+bool EditingCurrentWeaponRecoilProfile() noexcept {
+    return g_vrRecoilProfileEditsCurrent &&
+           HasCurrentWeaponWeightProfile();
+}
+
+const WeaponRecoilProfile& DisplayedWeaponRecoilProfile() noexcept {
+    return EditingCurrentWeaponRecoilProfile()
+        ? g_weightedWeaponInput.recoilProfile
+        : g_weaponRecoilProfile;
+}
+
+WeaponRecoilProfile& EditableWeaponRecoilProfile() noexcept {
+    if (!EditingCurrentWeaponRecoilProfile()) {
+        return g_weaponRecoilProfile;
+    }
+    if (!g_weightedWeaponInput.recoilProfileExplicit) {
+        g_weightedWeaponInput.recoilProfile = g_weaponRecoilProfile;
+        g_weightedWeaponInput.recoilProfileExplicit = true;
+    }
+    return g_weightedWeaponInput.recoilProfile;
+}
+
+const WeaponRecoilProfile& ActiveWeaponRecoilProfile() noexcept {
+    return g_weightedWeaponInput.recoilProfileExplicit
+        ? g_weightedWeaponInput.recoilProfile
+        : g_weaponRecoilProfile;
 }
 
 void ResetEditableWeaponWeightProfile() noexcept {
@@ -2214,26 +2250,32 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
         SetRetailControlVisible(g_vrMenuResetWeaponProfile, true);
         break;
     }
-    case VrSettingsPage::WeaponRecoil:
+    case VrSettingsPage::WeaponRecoil: {
         SetRetailControlVisible(g_vrMenuWeaponRecoilTitle, true);
         first = SetRetailVrToggleVisible(
+            g_vrMenuWeaponProfileTarget,
+            EditingCurrentWeaponRecoilProfile());
+        SetRetailVrToggleVisible(
             g_vrMenuWeaponRecoil, g_weaponRecoilEnabled);
+        const WeaponRecoilProfile& profile =
+            DisplayedWeaponRecoilProfile();
         SetRetailVrPresetVisible(
             g_vrMenuWeaponRecoilStrength,
             ClosestVrPresetIndex(
-                g_weaponRecoilProfile.strength,
+                profile.strength,
                 kWeaponRecoilStrengthPresets));
         SetRetailVrPresetVisible(
             g_vrMenuWeaponRecoilRise,
             ClosestVrPresetIndex(
-                g_weaponRecoilProfile.muzzleRise,
+                profile.muzzleRise,
                 kWeaponRecoilRisePresets));
         SetRetailVrPresetVisible(
             g_vrMenuWeaponRecoilRecovery,
             ClosestVrPresetIndex(
-                g_weaponRecoilProfile.recovery,
+                profile.recovery,
                 kWeaponRecoilRecoveryPresets));
         break;
+    }
     case VrSettingsPage::Melee:
         SetRetailControlVisible(g_vrMenuMeleeTitle, true);
         first = SetRetailVrToggleVisible(
@@ -2382,6 +2424,7 @@ void ApplyVrDefaults() noexcept {
     g_lastWeaponRecoilTick = 0;
     g_weightedWeaponInput.profile = WeaponWeightProfile{};
     g_vrWeaponProfileEditsCurrent = true;
+    g_vrRecoilProfileEditsCurrent = true;
     g_weaponAimGuideEnabled = true;
     g_controllerHapticsEnabled = true;
     g_twoHandedGripEnabled = true;
@@ -2979,15 +3022,26 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         break;
     case kVrMenuToggleWeaponProfileTarget:
         if (HasCurrentWeaponWeightProfile()) {
-            g_vrWeaponProfileEditsCurrent =
-                !g_vrWeaponProfileEditsCurrent;
+            if (g_vrSettingsPage == VrSettingsPage::WeaponRecoil) {
+                g_vrRecoilProfileEditsCurrent =
+                    !g_vrRecoilProfileEditsCurrent;
+                if (g_vrRecoilProfileEditsCurrent) {
+                    (void)EditableWeaponRecoilProfile();
+                }
+            } else {
+                g_vrWeaponProfileEditsCurrent =
+                    !g_vrWeaponProfileEditsCurrent;
+            }
         } else {
             g_vrWeaponProfileEditsCurrent = false;
+            g_vrRecoilProfileEditsCurrent = false;
         }
         RefreshRetailVrSettingsControls();
         selection = SetRetailVrToggleVisible(
             g_vrMenuWeaponProfileTarget,
-            EditingCurrentWeaponWeightProfile());
+            g_vrSettingsPage == VrSettingsPage::WeaponRecoil
+                ? EditingCurrentWeaponRecoilProfile()
+                : EditingCurrentWeaponWeightProfile());
         break;
     case kVrMenuResetWeaponProfile:
         ResetEditableWeaponWeightProfile();
@@ -3077,31 +3131,31 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         break;
     }
     case kVrMenuCycleWeaponRecoilStrength: {
+        WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
         const std::size_t index = NextVrPresetIndex(
-            g_weaponRecoilProfile.strength,
+            profile.strength,
             kWeaponRecoilStrengthPresets);
-        g_weaponRecoilProfile.strength =
-            kWeaponRecoilStrengthPresets[index];
+        profile.strength = kWeaponRecoilStrengthPresets[index];
         selection = SetRetailVrPresetVisible(
             g_vrMenuWeaponRecoilStrength, index);
         break;
     }
     case kVrMenuCycleWeaponRecoilRise: {
+        WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
         const std::size_t index = NextVrPresetIndex(
-            g_weaponRecoilProfile.muzzleRise,
+            profile.muzzleRise,
             kWeaponRecoilRisePresets);
-        g_weaponRecoilProfile.muzzleRise =
-            kWeaponRecoilRisePresets[index];
+        profile.muzzleRise = kWeaponRecoilRisePresets[index];
         selection = SetRetailVrPresetVisible(
             g_vrMenuWeaponRecoilRise, index);
         break;
     }
     case kVrMenuCycleWeaponRecoilRecovery: {
+        WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
         const std::size_t index = NextVrPresetIndex(
-            g_weaponRecoilProfile.recovery,
+            profile.recovery,
             kWeaponRecoilRecoveryPresets);
-        g_weaponRecoilProfile.recovery =
-            kWeaponRecoilRecoveryPresets[index];
+        profile.recovery = kWeaponRecoilRecoveryPresets[index];
         selection = SetRetailVrPresetVisible(
             g_vrMenuWeaponRecoilRecovery, index);
         break;
@@ -4093,6 +4147,57 @@ void SetDevMenuQuad(
     }
 }
 
+void FormatCurrentWeaponName(
+    wchar_t* text, std::size_t textCount) noexcept {
+    if (text == nullptr || textCount == 0) {
+        return;
+    }
+    text[0] = L'\0';
+    const WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    if (weighted.weapon == nullptr || weighted.profileName[0] == '\0') {
+        _snwprintf_s(text, textCount, _TRUNCATE, L"NONE");
+        return;
+    }
+    if (std::strcmp(weighted.profileName, "default") == 0) {
+        _snwprintf_s(text, textCount, _TRUNCATE, L"UNKNOWN");
+        return;
+    }
+    struct FriendlyWeaponName {
+        const char* profile;
+        const wchar_t* display;
+    };
+    constexpr FriendlyWeaponName names[] = {
+        {"pistol", L"PISTOL"},
+        {"rdpistol", L"RD PISTOL"},
+        {"submachinegun", L"SUBMACHINE GUN"},
+        {"assaultrifle", L"ASSAULT RIFLE"},
+        {"shotgun", L"SHOTGUN"},
+        {"nailgun", L"PENETRATOR"},
+        {"rocketlauncher", L"ROCKET LAUNCHER"},
+        {"cannon", L"CANNON"},
+        {"plasmaweapon", L"PARTICLE WEAPON"},
+    };
+    for (const FriendlyWeaponName& name : names) {
+        if (std::strcmp(weighted.profileName, name.profile) == 0) {
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"%s", name.display);
+            return;
+        }
+    }
+    std::size_t used = 0;
+    for (; weighted.profileName[used] != '\0' &&
+           used + 1 < textCount; ++used) {
+        const unsigned char value = static_cast<unsigned char>(
+            weighted.profileName[used]);
+        text[used] = value == '_'
+            ? L' '
+            : static_cast<wchar_t>(
+                  value >= 'a' && value <= 'z'
+                      ? value - 'a' + 'A' : value);
+    }
+    text[used] = L'\0';
+}
+
 void FormatDevMenuRow(
     DevMenuTab tab, std::size_t row, wchar_t* text,
     std::size_t textCount) noexcept {
@@ -4102,7 +4207,9 @@ void FormatDevMenuRow(
     text[0] = L'\0';
     const wchar_t* const onOff[] = {L"OFF", L"ON"};
     switch (tab) {
-    case DevMenuTab::recoil:
+    case DevMenuTab::recoil: {
+        const WeaponRecoilProfile& recoil =
+            DisplayedWeaponRecoilProfile();
         switch (row) {
         case 0:
             _snwprintf_s(text, textCount, _TRUNCATE, L"RECOIL: %s",
@@ -4110,24 +4217,28 @@ void FormatDevMenuRow(
             break;
         case 1:
             _snwprintf_s(
-                text, textCount, _TRUNCATE, L"RECOIL STRENGTH: %.0f%%",
-                static_cast<double>(
-                    g_weaponRecoilProfile.strength * 100.0F));
+                text, textCount, _TRUNCATE, L"EDIT PROFILE: %s",
+                EditingCurrentWeaponRecoilProfile()
+                    ? L"CURRENT" : L"DEFAULT");
             break;
         case 2:
             _snwprintf_s(
-                text, textCount, _TRUNCATE, L"MUZZLE RISE: %.0f%%",
-                static_cast<double>(
-                    g_weaponRecoilProfile.muzzleRise * 100.0F));
+                text, textCount, _TRUNCATE, L"RECOIL STRENGTH: %.0f%%",
+                static_cast<double>(recoil.strength * 100.0F));
             break;
         case 3:
             _snwprintf_s(
+                text, textCount, _TRUNCATE, L"MUZZLE RISE: %.0f%%",
+                static_cast<double>(recoil.muzzleRise * 100.0F));
+            break;
+        case 4:
+            _snwprintf_s(
                 text, textCount, _TRUNCATE, L"RECOVERY SPEED: %.0f%%",
-                static_cast<double>(
-                    g_weaponRecoilProfile.recovery * 100.0F));
+                static_cast<double>(recoil.recovery * 100.0F));
             break;
         }
         break;
+    }
     case DevMenuTab::weight: {
         const WeaponWeightProfile& weight = EditableWeaponWeightProfile();
         switch (row) {
@@ -4138,9 +4249,9 @@ void FormatDevMenuRow(
             break;
         case 1:
             _snwprintf_s(
-                text, textCount, _TRUNCATE, L"PROFILE: %s",
+                text, textCount, _TRUNCATE, L"EDIT PROFILE: %s",
                 EditingCurrentWeaponWeightProfile()
-                    ? L"CURRENT WEAPON" : L"DEFAULT");
+                    ? L"CURRENT" : L"DEFAULT");
             break;
         case 2:
             _snwprintf_s(text, textCount, _TRUNCATE, L"WEIGHT: %.2fX",
@@ -4450,8 +4561,18 @@ void RenderFloatingDevMenu(HLOCALOBJ camera) noexcept {
     const LTVector titleAnchor =
         g_devMenu.center + g_devMenu.up *
             (kHeight * 0.5F - kTitle * 0.43F);
+    wchar_t title[80] = L"FEAR VR LIVE TUNING";
+    if (g_devMenu.selectedTab == DevMenuTab::recoil ||
+        g_devMenu.selectedTab == DevMenuTab::weight ||
+        g_devMenu.selectedTab == DevMenuTab::weapon) {
+        wchar_t weaponName[48]{};
+        FormatCurrentWeaponName(weaponName, std::size(weaponName));
+        _snwprintf_s(
+            title, std::size(title), _TRUNCATE,
+            L"EQUIPPED: %s", weaponName);
+    }
     AppendDevMenuBitmapText(
-        L"FEAR VR LIVE TUNING", titleAnchor, 0.5F, 0.0034F,
+        title, titleAnchor, 0.5F, 0.0034F,
         240, 250, 255, 255, glyphQuadCount);
 
     for (std::size_t tab = 0; tab < kDevMenuTabCount; ++tab) {
@@ -7131,6 +7252,68 @@ void SaveActiveWeaponWeightProfile() noexcept {
     WriteVrFloat(
         section, L"CatchUpStrength", weighted.profile.catchUpStrength);
 }
+
+WeaponRecoilProfile LoadWeaponRecoilProfile(
+    const char* profileName, bool& explicitProfile) noexcept {
+    explicitProfile = false;
+    if (profileName == nullptr || profileName[0] == '\0') {
+        return g_weaponRecoilProfile;
+    }
+    wchar_t section[128] = L"WeaponRecoil.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         profileName[index] != '\0' && used + 1 < std::size(section);
+         ++index) {
+        section[used++] =
+            static_cast<unsigned char>(profileName[index]);
+    }
+    section[used] = L'\0';
+
+    wchar_t value[32]{};
+    const auto hasValue = [&](const wchar_t* name) noexcept {
+        value[0] = L'\0';
+        return g_vrSettingsFilePresent &&
+               g_vrSettingsPath[0] != L'\0' &&
+               GetPrivateProfileStringW(
+                   section, name, L"", value,
+                   static_cast<DWORD>(std::size(value)),
+                   g_vrSettingsPath) != 0;
+    };
+    explicitProfile =
+        hasValue(L"Strength") || hasValue(L"MuzzleRise") ||
+        hasValue(L"Recovery");
+    return SanitizeWeaponRecoilProfile({
+        ReadVrFloat(
+            section, L"Strength", g_weaponRecoilProfile.strength),
+        ReadVrFloat(
+            section, L"MuzzleRise", g_weaponRecoilProfile.muzzleRise),
+        ReadVrFloat(
+            section, L"Recovery", g_weaponRecoilProfile.recovery)});
+}
+
+void SaveActiveWeaponRecoilProfile() noexcept {
+    const WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    if (!weighted.recoilProfileExplicit ||
+        !HasCurrentWeaponWeightProfile()) {
+        return;
+    }
+    wchar_t section[128] = L"WeaponRecoil.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         weighted.profileName[index] != '\0' &&
+         used + 1 < std::size(section); ++index) {
+        section[used++] =
+            static_cast<unsigned char>(weighted.profileName[index]);
+    }
+    section[used] = L'\0';
+    WriteVrFloat(
+        section, L"Strength", weighted.recoilProfile.strength);
+    WriteVrFloat(
+        section, L"MuzzleRise", weighted.recoilProfile.muzzleRise);
+    WriteVrFloat(
+        section, L"Recovery", weighted.recoilProfile.recovery);
+}
+
 void PrepareWeightedWeaponPoses(
     const void* weapon, FearVrPose& aimPose,
     std::uint32_t& aimValidHands, FearVrPose& gripPose,
@@ -7157,6 +7340,8 @@ void PrepareWeightedWeaponPoses(
         weighted.lastGripValidTick = 0;
         weighted.profile = LoadWeaponWeightProfile(
             weapon, weighted.profileName);
+        weighted.recoilProfile = LoadWeaponRecoilProfile(
+            weighted.profileName, weighted.recoilProfileExplicit);
     }
     if (weighted.resetGeneration != resetGeneration) {
         ResetWeaponWeightPair(
@@ -7186,7 +7371,7 @@ void PrepareWeightedWeaponPoses(
         if (rawAimValid && rawGripValid && g_weaponRecoilEnabled) {
             UpdateWeaponRecoil(
                 weighted.recoil, MonotonicNanoseconds(), true,
-                weighted.profile, g_weaponRecoilProfile,
+                weighted.profile, ActiveWeaponRecoilProfile(),
                 pendingRecoilShots > 0
                     ? static_cast<std::uint32_t>(pendingRecoilShots) : 0U,
                 weighted.recoilOffset);
@@ -7275,7 +7460,7 @@ void PrepareWeightedWeaponPoses(
         UpdateWeaponRecoil(
             weighted.recoil, MonotonicNanoseconds(),
             g_weaponRecoilEnabled, weighted.profile,
-            g_weaponRecoilProfile,
+            ActiveWeaponRecoilProfile(),
             pendingRecoilShots > 0
                 ? static_cast<std::uint32_t>(pendingRecoilShots) : 0U,
             weighted.recoilOffset);
@@ -9828,23 +10013,37 @@ void ActivateFloatingDevMenuRow(
             g_lastWeaponRecoilTick = 0;
             break;
         case 1:
-            g_weaponRecoilProfile.strength =
+            g_vrRecoilProfileEditsCurrent =
+                HasCurrentWeaponWeightProfile()
+                    ? !g_vrRecoilProfileEditsCurrent : false;
+            if (g_vrRecoilProfileEditsCurrent) {
+                (void)EditableWeaponRecoilProfile();
+            }
+            break;
+        case 2: {
+            WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+            profile.strength =
                 kWeaponRecoilStrengthPresets[NextVrPresetIndex(
-                    g_weaponRecoilProfile.strength,
+                    profile.strength,
                     kWeaponRecoilStrengthPresets)];
             break;
-        case 2:
-            g_weaponRecoilProfile.muzzleRise =
+        }
+        case 3: {
+            WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+            profile.muzzleRise =
                 kWeaponRecoilRisePresets[NextVrPresetIndex(
-                    g_weaponRecoilProfile.muzzleRise,
+                    profile.muzzleRise,
                     kWeaponRecoilRisePresets)];
             break;
-        case 3:
-            g_weaponRecoilProfile.recovery =
+        }
+        case 4: {
+            WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+            profile.recovery =
                 kWeaponRecoilRecoveryPresets[NextVrPresetIndex(
-                    g_weaponRecoilProfile.recovery,
+                    profile.recovery,
                     kWeaponRecoilRecoveryPresets)];
             break;
+        }
         }
         break;
     case DevMenuTab::weight: {

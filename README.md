@@ -297,13 +297,20 @@ something is built but not yet verified in-game, it's noted.
   returns to the category list before leaving VR settings.
 - **Floating live-tuning panel during gameplay.** Hold both grip buttons and
   press B to place the panel in front of your current view. Its Recoil, Weight,
-  Collide, Weapon, Move, Melee, and VR tabs expose the settings that are safe
-  and useful to change during play. Point at a tab or row and press trigger or
+  Collide, Weapon, IK, Move, Melee, and VR tabs expose the settings that are
+  safe and useful to change during play. Point at a tab or row and press trigger or
   A; the right stick navigates rows and switches tabs. B closes the panel.
   Changes apply immediately and save to `fearvr.ini`; controller gameplay
   commands are captured while it is open. The VR tab can change stereo world
   render scale live from 100% through 200% without changing the desktop
   resolution.
+- **Live arm IK and left-hand alignment.** The IK tab has Elbows and Left Hand
+  pages. Elbow outward/down/back pole components and straight-arm stability
+  can be tuned while the full arms are visible. The off-hand uses the OpenXR
+  grip pose consistently and adds controller-local right/up/forward plus
+  pitch/yaw/roll calibration. Fine steps are 5%, 0.5 cm and 5 degrees.
+  Values persist under `[VR]` as `IkElbow*` and
+  `IkLeftHand*`; Reset All IK restores the anatomical defaults.
 - **All normal VR preferences are editable in game** and persist immediately
   to `fearvr.ini`, including HMD translation, head bob, comfort screen,
   flashlight mount, physical leaning and ducking, all four individual melee

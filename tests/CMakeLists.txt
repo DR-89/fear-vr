@@ -27,6 +27,13 @@ add_test(
   NAME locomotion_reprojection COMMAND test_locomotion_reprojection
 )
 
+add_executable(test_arm_ik test_arm_ik.cpp)
+target_link_libraries(test_arm_ik PRIVATE fearvr-common fearvr-warnings)
+if(MSVC)
+  target_compile_options(test_arm_ik PRIVATE /UNDEBUG)
+endif()
+add_test(NAME arm_ik COMMAND test_arm_ik)
+
 add_executable(test_stereo_hud_math test_stereo_hud_math.cpp)
 target_link_libraries(
   test_stereo_hud_math PRIVATE fearvr-common fearvr-warnings

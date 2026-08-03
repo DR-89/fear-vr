@@ -554,9 +554,10 @@ moves the row selection when a ray hit is unavailable; B closes the panel.
 
 The panel has six bounded tabs:
 
-1. **Recoil:** enabled, strength, muzzle rise and recovery.
-2. **Weight:** enabled, profile target, weight, position/rotation follow and
-   catch-up.
+1. **Recoil:** enabled, Default/Current profile target, strength, muzzle rise
+   and recovery.
+2. **Weight:** enabled, Default/Current profile target, weight,
+   position/rotation follow and catch-up.
 3. **Weapon:** aim guide, arm visibility and two-handed grip.
 4. **Move:** HMD translation, head bob, physical lean/strength, turn speed and
    hand climbing.
@@ -565,13 +566,16 @@ The panel has six bounded tabs:
    live stereo render scale (100/125/150/175/200 percent).
 
 Changes take effect immediately and use the same `SaveVrSettings` path as the
-native menu, including per-weapon weight profiles. A render-scale change
+native menu, including per-weapon weight and recoil profiles. A render-scale change
 recreates the off-screen eye resources on the next frame while leaving the
 Retail backbuffer unchanged. Stereo disable, comfort
 screen, panel recenter and Reset Defaults remain pause-menu-only because they
 would hide the live panel or are too easy to trigger accidentally. Controller
 gameplay injection, gesture pulses and climbing are suppressed while the panel
 is open and remain suppressed until the opening/closing controls are released.
+The Recoil, Weight, and Weapon tab headers show the equipped model. Current
+recoil overrides are stored under `[WeaponRecoil.<model-name>]`; a weapon with
+no override continues to use the global `[VR]` recoil values.
 
 `Show arms` ist standardmäßig `Off`: Nur Ober- und Unterarme werden über ein
 lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine

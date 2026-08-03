@@ -323,17 +323,15 @@ something is built but not yet verified in-game, it's noted.
   emits rate-limited raw/filter error and velocity telemetry.
   The Weapons category is split into Handling & appearance, Simulated weight,
   and Recoil pages. Advanced contains diagnostics and the global defaults reset.
-- **Per-weapon simulated weight profiles** can be tuned from the Simulated
-  weight page.
-  Choose the currently held weapon or the global default, then adjust weight,
-  positional follow, rotational follow, and catch-up strength through safe
-  presets. Exact values remain available in `fearvr.ini` under `[VR]` or
-  `[WeaponWeight.<model-name>]`. Unknown models use the `[VR]` defaults.
-  **Weapon recoil is independently switchable** and defaults on. Its page has
-  presets for overall strength (up to 500%), muzzle rise, and recovery speed,
-  so recoil
-  remains active even when simulated weight is off. Per-weapon weight still
-  scales the kick when configured. Empty trigger pulls do not recoil.
+- **Per-weapon weight and recoil profiles** can be tuned from the native menu
+  or floating tool panel. Recoil, Weight, and Weapon tabs show the equipped
+  weapon in their header. Choose Current or Default, then adjust weight,
+  positional follow, rotational follow, catch-up, recoil strength (up to
+  500%), muzzle rise, and recovery through safe presets. Exact values remain
+  available in `fearvr.ini` under `[VR]`, `[WeaponWeight.<model-name>]`, or
+  `[WeaponRecoil.<model-name>]`. Weapons without overrides use the `[VR]`
+  defaults. Recoil remains active when simulated weight is off; per-weapon
+  weight still scales the kick when enabled. Empty trigger pulls do not recoil.
   `WeaponWeightDiagnostics=1` emits rate-limited raw/filter error and velocity
   telemetry, including the current recoil offsets.
   Recommended ranges are `0.10-4.00`, `2.0-40.0`, `2.0-40.0`, and

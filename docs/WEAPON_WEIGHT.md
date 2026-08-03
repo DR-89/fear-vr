@@ -88,6 +88,21 @@ CatchUpStrength=1.5
 
 Weapons without a matching section use the global `[VR]` settings.
 
+Recoil uses the same equipped-model identity and can also be overridden from
+the floating Recoil tab or native recoil page:
+
+```ini
+[WeaponRecoil.<model-name>]
+Strength=1.5
+MuzzleRise=1.0
+Recovery=1.0
+```
+
+The tool panel shows the equipped weapon in the Recoil, Weight, and Weapon tab
+header. Selecting `Current` edits that model's section; selecting `Default`
+edits the global `[VR]` values. Weapons without a recoil section inherit the
+global values.
+
 ## Diagnostics
 
 For troubleshooting, enable rate-limited weapon-weight telemetry under `[VR]`:

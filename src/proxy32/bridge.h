@@ -24,6 +24,8 @@ BOOL IsStereoAvailable() noexcept;
 BOOL IsStereoEnabled() noexcept;
 void SetStereoEnabled(BOOL enabled) noexcept;
 void SetFovScalePercent(std::uint32_t percent) noexcept;
+std::uint32_t GetRenderScalePercent() noexcept;
+void SetRenderScalePercent(std::uint32_t percent) noexcept;
 BOOL IsTranslationEnabled() noexcept;
 void SetTranslationEnabled(BOOL enabled) noexcept;
 BOOL IsStereoHudEnabled() noexcept;

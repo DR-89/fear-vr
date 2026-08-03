@@ -141,6 +141,14 @@ extern "C" void FearVr_SetFovScalePercent(std::uint32_t percent) {
     fearvr::SetFovScalePercent(percent);
 }
 
+extern "C" std::uint32_t FearVr_GetRenderScalePercent() {
+    return fearvr::GetRenderScalePercent();
+}
+
+extern "C" void FearVr_SetRenderScalePercent(std::uint32_t percent) {
+    fearvr::SetRenderScalePercent(percent);
+}
+
 extern "C" BOOL FearVr_IsTranslationEnabled() {
     return fearvr::IsTranslationEnabled();
 }

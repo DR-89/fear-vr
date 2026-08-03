@@ -297,7 +297,8 @@ something is built but not yet verified in-game, it's noted.
   to change during play. Point at a tab or row and press trigger or A; the right
   stick navigates rows and switches tabs. B closes the panel. Changes apply
   immediately and save to `fearvr.ini`; controller gameplay commands are
-  captured while it is open.
+  captured while it is open. The VR tab can change stereo world render scale
+  live from 100% through 200% without changing the desktop resolution.
 - **All normal VR preferences are editable in game** and persist immediately
   to `fearvr.ini`, including HMD translation, head bob, comfort screen,
   physical leaning, all four individual melee gestures, and simulated weapon
@@ -510,9 +511,9 @@ runtime renders. SteamVR itself does not need to run under VDXR.
 
 Bindings: left stick moves, left grip sprints — or, with that hand placed on
 the weapon, holds it as a second hand; left stick click uses a medkit.
-Movement is head-relative by default, so forward follows the HMD's horizontal
-facing direction even when the Retail body is pointed elsewhere. `Move
-direction: Body` restores classic body-relative movement. The locomotion
+Movement is body-relative by default, so looking around does not steer a held
+movement direction. `Move direction: Head` opts into steering forward from
+the HMD's current horizontal facing direction. The locomotion
 stick uses a circular deadzone that preserves diagonal direction and speed.
 Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click performs a melee attack in the 3D world and re-anchors the panel in 2D.

@@ -396,6 +396,8 @@ The same model distinguishes tab-strip hits from setting-row hits. Six bounded
 tabs reuse the native menu's setting state and side effects, then write through
 the existing settings/profile persistence functions. The panel captures
 controller command injection until the buttons used to close it are released.
+Its VR tab also calls the bridge's live render-scale API; the bridge marks its
+eye resources dirty and recreates them at the next safe frame boundary.
 
 When that flag is clear, the host renders the latest mono image into one eye
 swapchain and submits it as a 2.4 m by 1.8 m quad anchored 2 m in front of the

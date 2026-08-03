@@ -44,6 +44,9 @@ using IsStereoEnabledFunction = BOOL(__cdecl*)();
 using SetStereoEnabledFunction = void(__cdecl*)(BOOL);
 using SetFovScalePercentFunction =
     void(__cdecl*)(std::uint32_t);
+using GetRenderScalePercentFunction = std::uint32_t(__cdecl*)();
+using SetRenderScalePercentFunction =
+    void(__cdecl*)(std::uint32_t);
 using GetBooleanOptionFunction = BOOL(__cdecl*)();
 using SetBooleanOptionFunction = void(__cdecl*)(BOOL);
 using SetMenuActiveFunction = void(__cdecl*)(BOOL);
@@ -115,6 +118,8 @@ IsStereoAvailableFunction g_isStereoAvailable = nullptr;
 IsStereoEnabledFunction g_isStereoEnabled = nullptr;
 SetStereoEnabledFunction g_setStereoEnabled = nullptr;
 SetFovScalePercentFunction g_setFovScalePercent = nullptr;
+GetRenderScalePercentFunction g_getRenderScalePercent = nullptr;
+SetRenderScalePercentFunction g_setRenderScalePercent = nullptr;
 GetBooleanOptionFunction g_isTranslationEnabled = nullptr;
 SetBooleanOptionFunction g_setTranslationEnabled = nullptr;
 GetBooleanOptionFunction g_isStereoHudEnabled = nullptr;
@@ -307,7 +312,7 @@ enum class DevMenuTab : std::size_t {
 constexpr std::array<const wchar_t*, kDevMenuTabCount> kDevMenuTabLabels{
     L"RECOIL", L"WEIGHT", L"WEAPON", L"MOVE", L"MELEE", L"VR"};
 constexpr std::array<std::size_t, kDevMenuTabCount> kDevMenuTabRowCounts{
-    4U, 6U, 3U, 6U, 5U, 5U};
+    4U, 6U, 3U, 6U, 5U, 6U};
 
 std::size_t DevMenuRowCount(DevMenuTab tab) noexcept {
     const std::size_t index = static_cast<std::size_t>(tab);
@@ -579,9 +584,9 @@ LTRotation EffectiveFlashlightRotation() noexcept {
 // Linkshaenderbelegung: gespiegelt wird ausschliesslich der eingehende
 // Controllerzustand, nie eine einzelne Zuordnung.
 bool g_leftHandedBindings = false;
-// Forward follows the horizontal HMD direction by default. Body-relative
-// movement remains available for classic-FPS muscle memory.
-bool g_headRelativeMovement = true;
+// Keep locomotion independent from free HMD look by default. Head-relative
+// steering remains available as an explicit preference.
+bool g_headRelativeMovement = false;
 bool g_headBobEnabled = false;
 bool g_forceHeadBobDisabled = false;
 // Diagnoseschalter zum Eingrenzen des Absturzes an einer bestimmten
@@ -625,6 +630,9 @@ int g_turnSpeedPreset = 1;
 constexpr std::array<std::uint32_t, 4> kFovScalePercents{
     100U, 110U, 120U, 130U};
 int g_fovScalePreset = 0;
+constexpr std::array<std::uint32_t, 5> kRenderScalePercents{
+    100U, 125U, 150U, 175U, 200U};
+std::uint32_t g_renderScalePercent = 100U;
 wchar_t g_vrSettingsPath[MAX_PATH]{};
 bool g_vrSettingsFilePresent = false;
 // Optional simulated weapon mass. Disabled is the compatibility default.
@@ -1608,8 +1616,31 @@ void ApplyFovScalePreset() noexcept {
     }
 }
 
+std::uint32_t QueryRenderScalePercent() noexcept {
+    if (g_getRenderScalePercent == nullptr) {
+        return 100U;
+    }
+    __try {
+        return std::clamp(
+            g_getRenderScalePercent(), 100U, 200U);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 100U;
+    }
+}
+
+void ApplyRenderScalePercent() noexcept {
+    if (g_setRenderScalePercent == nullptr) {
+        return;
+    }
+    __try {
+        g_setRenderScalePercent(g_renderScalePercent);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void InitializeVrSettings() noexcept {
     LocateVrSettingsFile();
+    g_renderScalePercent = QueryRenderScalePercent();
     if (!g_vrSettingsFilePresent) {
         ApplyFovScalePreset();
         return;
@@ -1679,12 +1710,19 @@ void InitializeVrSettings() noexcept {
     g_leftHandedBindings =
         ReadVrSetting(L"LeftHanded", 0) != 0;
     g_headRelativeMovement =
-        ReadVrSetting(L"HeadRelativeMovement", 1) != 0;
+        ReadVrSetting(L"HeadRelativeMovement", 0) != 0;
     g_showPlayerArms =
         ReadVrSetting(L"ShowArms", 0) != 0;
     g_fovScalePreset = FovScalePresetForPercent(
         ReadVrSetting(L"FovScale", 100));
     ApplyFovScalePreset();
+    // An explicit launcher value is a one-run override. Otherwise the live
+    // tool-menu choice persists with the remaining VR settings.
+    if (!CommandLineContains(L"-fearvr-render-scale")) {
+        g_renderScalePercent = static_cast<std::uint32_t>(
+            std::clamp(ReadVrSetting(L"RenderScale", 100), 100, 200));
+        ApplyRenderScalePercent();
+    }
     g_turnSpeedPreset =
         std::clamp(ReadVrSetting(L"TurnSpeed", 1), 0, 2);
     g_hiddenBodyPieceMask = static_cast<std::uint32_t>(
@@ -1817,6 +1855,9 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(
         L"FovScale",
         static_cast<int>(CurrentFovScalePercent()));
+    WriteVrSetting(
+        L"RenderScale",
+        static_cast<int>(g_renderScalePercent));
     WriteVrSetting(L"TurnSpeed", g_turnSpeedPreset);
     SaveActiveWeaponWeightProfile();
     g_vrSettingsFilePresent = true;
@@ -2345,10 +2386,12 @@ void ApplyVrDefaults() noexcept {
     g_controllerHapticsEnabled = true;
     g_twoHandedGripEnabled = true;
     g_leftHandedBindings = false;
-    g_headRelativeMovement = true;
+    g_headRelativeMovement = false;
     g_turnSpeedPreset = 1;
     g_fovScalePreset = 0;
     ApplyFovScalePreset();
+    g_renderScalePercent = 100U;
+    ApplyRenderScalePercent();
     g_climbingEnabled = false;
     g_physicalLeanEnabled = true;
     g_leanScalePercent = 200;
@@ -4219,6 +4262,11 @@ void FormatDevMenuRow(
             _snwprintf_s(
                 text, textCount, _TRUNCATE, L"WEAPON DIAGNOSTICS: %s",
                 onOff[g_weaponWeightDiagnosticsEnabled ? 1 : 0]);
+            break;
+        case 5:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"RENDER SCALE: %u%%",
+                g_renderScalePercent);
             break;
         }
         break;
@@ -9932,6 +9980,12 @@ void ActivateFloatingDevMenuRow(
             g_weaponWeightDiagnosticsEnabled =
                 !g_weaponWeightDiagnosticsEnabled;
             break;
+        case 5:
+            g_renderScalePercent =
+                kRenderScalePercents[NextVrPresetIndex(
+                    g_renderScalePercent, kRenderScalePercents)];
+            ApplyRenderScalePercent();
+            break;
         }
         break;
     }
@@ -10616,6 +10670,12 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     g_setFovScalePercent =
         Resolve<SetFovScalePercentFunction>(
             bridge, "FearVr_SetFovScalePercent");
+    g_getRenderScalePercent =
+        Resolve<GetRenderScalePercentFunction>(
+            bridge, "FearVr_GetRenderScalePercent");
+    g_setRenderScalePercent =
+        Resolve<SetRenderScalePercentFunction>(
+            bridge, "FearVr_SetRenderScalePercent");
     g_isTranslationEnabled =
         Resolve<GetBooleanOptionFunction>(
             bridge, "FearVr_IsTranslationEnabled");
@@ -10672,6 +10732,8 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
         g_isStereoEnabled == nullptr ||
         g_setStereoEnabled == nullptr ||
         g_setFovScalePercent == nullptr ||
+        g_getRenderScalePercent == nullptr ||
+        g_setRenderScalePercent == nullptr ||
         g_isTranslationEnabled == nullptr ||
         g_setTranslationEnabled == nullptr ||
         g_isStereoHudEnabled == nullptr ||

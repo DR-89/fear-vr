@@ -421,22 +421,32 @@ Rennen und Lehnen sind für die Dauer des Griffs gelöst, sonst liefen beide
 dauerhaft mit, sobald man beidhaendig zielt. Zum Sprinten die Stützhand also
 abnehmen.
 
-**Wirkung auf das Zielen.** Die Linie zwischen beiden Händen übernimmt die
-Feuerachse anteilig, gewichtet nach Waffenlänge — eine Pistole bleibt allein an
-der rechten Hand, ein Gewehr liegt in beiden. Als Länge dient der gemessene
-Abstand zwischen Waffenursprung und Mündungssockel (`muzzleOffsetInWeapon`,
-derselbe Wert, aus dem auch die Mündungskorrektur entsteht); er ist der
-einzige Waffenkennwert, den wir ohne Retail-Waffendatenbank verlässlich haben.
-Die Rampe läuft von 0 bei 0,20 m auf 0,75 ab 0,35 m (`TwoHandedAimBlend`).
+**Wirkung auf das Zielen.** Beim Zugreifen wird der tatsächliche linke
+Griffpunkt im lokalen Waffenraum gespeichert. Danach löst jeder Frame die
+Waffe als starre Verbindung zwischen beiden getrackten Griffen:
 
-Gedreht wird über die kürzeste Drehung zwischen alter und neuer Vorwärtsachse.
-Damit bleibt die Neigung der rechten Hand erhalten — die Waffe kippt in der
-Hand, statt sich um die eigene Achse zu verdrehen. Zwei Sicherungen begrenzen
-das: unter 0,12 m Handabstand ist die Linie nur noch Trackingrauschen. Und der
-Lenkwinkel wird weich gedämpft (`SoftLimitedSteerAngle`): bis 55° folgt die
-Waffe eins zu eins, darüber wächst der Winkel nur noch gedämpft weiter und
-läuft asymptotisch gegen 90°, ohne sie je zu erreichen. Die Steigung am
-Übergang ist 1, der Verlauf also knickfrei.
+1. Die rechte Hand liefert die Basisausrichtung einschließlich Roll.
+2. Die kürzeste Drehung richtet den gespeicherten lokalen Stützvektor auf die
+   aktuelle Linie zwischen beiden Händen.
+3. Nach der Drehung wird die Waffenposition so korrigiert, dass der lokale
+   Stützgriff exakt auf der linken Grip-Pose liegt.
+
+Damit ist die linke Hand der räumliche Drehpunkt: Bewegt sich die rechte Hand
+bei ruhiger Stützhand, schwenkt die Waffe um links, statt das sichtbare linke
+Handmodell um einen dauerhaft rechten Waffenursprung zu ziehen. Da der lokale
+Griffpunkt im ersten Frame aus genau den aktuellen Posen gemessen wird, ist die
+erste Lösung identisch zur bestehenden Waffenpose und braucht keine
+Einblendrampe.
+
+Die Waffe wird dabei nie skaliert. Ändert der Spieler den Abstand zwischen den
+Controllern gegenüber dem gespeicherten Griffabstand, bleibt die Stützhand
+exakt; die rechte sichtbare Waffenhand darf entlang der starren Waffe von der
+physischen rechten Hand abweichen, bis der Abstand wieder passt. Zwei
+Sicherungen begrenzen unbrauchbare Posen: Unter 0,12 m Handabstand ist die Linie
+nur noch Trackingrauschen. Der Lenkwinkel wird außerdem weich gedämpft
+(`SoftLimitedSteerAngle`): bis 55° folgt die Waffe eins zu eins, darüber wächst
+der Winkel nur noch gedämpft weiter und läuft asymptotisch gegen 90°, ohne sie
+je zu erreichen. Die Steigung am Übergang ist 1, der Verlauf also knickfrei.
 
 Zwei Fehler dieser Begrenzung sind im echten Lauf aufgefallen:
 
@@ -463,12 +473,14 @@ unserem Hand-Node-Override werden Retails animierte `RightHand`- und
 `LeftHand`-Sockets gelesen. Ihr relativer Transform ist der originale,
 waffenspezifische Griffpunkt und wird anschließend mit der VR-bewegten Waffe
 mitgeführt. Dadurch sitzen Handfläche und Handrotation beispielsweise bei
-Shotgun, SMG und Gewehr wieder an dem vom Spiel vorgesehenen Vordergriff. Die
-physische Stützhand steuert weiterhin die Feuerachse und wird nur für die
-Darstellung vom animierten Griff entkoppelt.
+Shotgun, SMG und Gewehr wieder an dem vom Spiel vorgesehenen Vordergriff. Der
+starre Zwei-Anker-Solver verschiebt die Waffe so, dass genau dieser Retail-Griff
+an der physischen Stützhand liegt; die Weltkollision verschiebt beide
+Griffziele gemeinsam und erhält die Zweihandbedingung.
 
 Abschaltbar über `TwoHandGrip=0` in `fearvr.ini`.
-`tests/test_two_handed_grip.cpp` deckt Erkennung, Hysterese und Gewichtung ab.
+`tests/test_two_handed_grip.cpp` deckt Erkennung, Hysterese, Winkelbegrenzung
+und die starre Pivot-Translation ab.
 
 ### Lehnen über die Handneigung
 

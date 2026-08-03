@@ -361,6 +361,12 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   veraendern. Die linke sichtbare Hand verwendet fuer Position und Rotation
   dieselbe OpenXR-Grip-Pose; ein lokaler Sechs-Achsen-Versatz wird erst danach
   angewendet und veraendert weder Waffensteuerung noch Schussachse.
+- **Zweihand-Constraint:** Beim Greifen wird der linke Griffpunkt im lokalen
+  Waffenraum gespeichert. Die rechte Pose liefert Roll, die Verbindungslinie
+  beider Controller die Richtung; eine anschliessende Translation setzt den
+  gespeicherten Punkt exakt auf die linke Grip-Pose. Der Stützgriff ist damit
+  ein räumlicher Pivot statt eines an der rechten Waffenhand befestigten
+  Dekorationspunkts. Die Waffe bleibt starr und wird nicht skaliert.
 - **Bekannte Nachteile:** Knochen zu skalieren oder zu verschieben scheidet
   aus. Node-Control liefert nur einen `LTRigidTransform`, und ein Kollabieren
   der Armknochen erzeugt bei geskinnten Meshes einen sichtbaren Splitter vom

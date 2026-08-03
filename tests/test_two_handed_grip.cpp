@@ -79,21 +79,29 @@ int main() {
     assert(!fearvr::ShouldEngageTwoHandedGrip(unfocused));
     assert(fearvr::ShouldReleaseTwoHandedGrip(unfocused));
 
-    // Gemessene Waffenlaengen: Pistole rund 13 cm, Gewehr rund 37 cm. Die
-    // eine bleibt an der rechten Hand, das andere fuehren beide Haende voll.
-    assert(fearvr::TwoHandedAimBlend(0.13F) == 0.0F);
-    assert(fearvr::TwoHandedAimBlend(0.25F) > 0.0F);
-    assert(fearvr::TwoHandedAimBlend(0.25F) <
-           fearvr::TwoHandedAimBlend(0.30F));
+    // With rotation already solved, translation pins the stored support
+    // attachment to the tracked left hand instead of leaving the right grip
+    // as a permanent origin.
+    const fearvr::TwoHandedPivotTranslation pivot =
+        fearvr::SolveSecondaryGripPivot(
+            {0.20F, 1.20F, -0.10F},
+            {-0.10F, 1.25F, -0.50F},
+            {-0.25F, 0.05F, -0.35F});
+    assert(pivot.valid);
+    assert(std::fabs(pivot.correction.x + 0.05F) < 0.0001F);
+    assert(std::fabs(pivot.correction.y) < 0.0001F);
+    assert(std::fabs(pivot.correction.z + 0.05F) < 0.0001F);
     assert(std::fabs(
-               fearvr::TwoHandedAimBlend(0.37F) -
-               fearvr::kTwoHandMaximumBlend) < 0.0001F);
-    assert(fearvr::TwoHandedAimBlend(2.0F) <= 1.0F);
-    assert(std::fabs(
-               fearvr::TwoHandedAimBlend(2.0F) -
-               fearvr::kTwoHandMaximumBlend) < 0.0001F);
-    assert(fearvr::TwoHandedAimBlend(
-               std::numeric_limits<float>::quiet_NaN()) == 0.0F);
+        pivot.primaryPosition.x - 0.15F) < 0.0001F);
+    const fearvr::TrackingVector pinnedSupport{
+        pivot.primaryPosition.x - 0.25F,
+        pivot.primaryPosition.y + 0.05F,
+        pivot.primaryPosition.z - 0.35F};
+    assert(std::fabs(pinnedSupport.x + 0.10F) < 0.0001F);
+    assert(std::fabs(pinnedSupport.y - 1.25F) < 0.0001F);
+    assert(std::fabs(pinnedSupport.z + 0.50F) < 0.0001F);
+    assert(!fearvr::SolveSecondaryGripPivot(
+        {}, {}, {}, std::numeric_limits<float>::quiet_NaN()).valid);
 
     // Der Lenkwinkel: bis zur weichen Grenze eins zu eins, darueber gedaempft
     // weiterlaufend statt an einer Wand stehenzubleiben.

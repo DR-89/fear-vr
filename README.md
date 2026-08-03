@@ -354,6 +354,11 @@ something is built but not yet verified in-game, it's noted.
   green when clear and red while obstructed;
   collision and visualization have independent switches. Overrides persist under
   `[WeaponCollision.<model-name>]`.
+- **Rigid two-hand weapon handling.** Grabbing with the support hand stores
+  the exact Retail-animated weapon-local attachment. The dominant hand supplies roll, the
+  hand-to-hand line supplies direction, and translation keeps the support
+  grip pinned to the left controller. Moving the dominant hand therefore
+  rotates around the support hand instead of dragging its visible model.
 
 ### Operation
 

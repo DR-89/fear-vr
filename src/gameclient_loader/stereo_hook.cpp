@@ -39,6 +39,7 @@
 #include "two_handed_grip.h"
 #include "two_handed_jump_camera.h"
 #include "vr_menu_scroll.h"
+#include "weapon_collision.h"
 #include "weapon_recoil.h"
 #include "weapon_weight.h"
 #include "vr_menu_model.h"
@@ -337,7 +338,7 @@ ULONGLONG g_menuActivationHoldUntil = 0;
 bool g_menuFocusKnown = false;
 bool g_menuFocusActive = false;
 bool g_escapeWasDown = false;
-constexpr std::size_t kDevMenuTabCount = 6;
+constexpr std::size_t kDevMenuTabCount = 7;
 constexpr float kDevMenuDistanceMeters = 1.15F;
 constexpr float kDevMenuVerticalOffsetMeters = 0.08F;
 constexpr float kDevMenuWidthMeters = 0.64F;
@@ -349,15 +350,17 @@ constexpr float kDevMenuRowMeters = 0.055F;
 enum class DevMenuTab : std::size_t {
     recoil,
     weight,
+    collision,
     weapon,
     movement,
     melee,
     vr,
 };
 constexpr std::array<const wchar_t*, kDevMenuTabCount> kDevMenuTabLabels{
-    L"RECOIL", L"WEIGHT", L"WEAPON", L"MOVE", L"MELEE", L"VR"};
+    L"RECOIL", L"WEIGHT", L"COLLIDE", L"WEAPON", L"MOVE", L"MELEE",
+    L"VR"};
 constexpr std::array<std::size_t, kDevMenuTabCount> kDevMenuTabRowCounts{
-    5U, 6U, 3U, 6U, 5U, 6U};
+    5U, 6U, 7U, 3U, 6U, 5U, 6U};
 
 std::size_t DevMenuRowCount(DevMenuTab tab) noexcept {
     const std::size_t index = static_cast<std::size_t>(tab);
@@ -803,9 +806,47 @@ bool g_weaponWeightDiagnosticsEnabled = false;
 WeaponWeightProfile g_defaultWeaponWeightProfile{};
 bool g_weaponRecoilEnabled = true;
 WeaponRecoilProfile g_weaponRecoilProfile{};
+struct WeaponCollisionProfile {
+    float lengthScale{1.0F};
+    float widthMeters{0.10F};
+    float heightMeters{0.18F};
+    float forwardOffsetMeters{0.0F};
+};
+
+WeaponCollisionProfile SanitizeWeaponCollisionProfile(
+    WeaponCollisionProfile profile) noexcept {
+    const auto sane = [](float value, float fallback,
+                         float minimum, float maximum) noexcept {
+        return std::isfinite(value)
+            ? std::clamp(value, minimum, maximum) : fallback;
+    };
+    profile.lengthScale = sane(profile.lengthScale, 1.0F, 0.25F, 2.50F);
+    profile.widthMeters = sane(profile.widthMeters, 0.10F, 0.02F, 0.40F);
+    profile.heightMeters = sane(profile.heightMeters, 0.18F, 0.02F, 0.40F);
+    profile.forwardOffsetMeters = sane(
+        profile.forwardOffsetMeters, 0.0F, -0.30F, 0.30F);
+    return profile;
+}
+
+bool g_weaponCollisionEnabled = true;
+bool g_weaponCollisionDebugEnabled = true;
+WeaponCollisionProfile g_defaultWeaponCollisionProfile{};
+struct WeaponCollisionRuntimeState {
+    LTVector correction;
+    std::uint64_t lastUpdateNs{0};
+    std::uint64_t holdUntilNs{0};
+    bool haveUpdate{false};
+};
+
+void ResetWeaponCollisionRuntime(
+    WeaponCollisionRuntimeState& state) noexcept {
+    state = WeaponCollisionRuntimeState{};
+}
+
 struct WeightedWeaponInputState {
     WeaponWeightPairState filters;
     WeaponRecoilState recoil;
+    WeaponCollisionRuntimeState collision;
     WeaponRecoilOffset recoilOffset;
     FearVrPose aimPose{};
     FearVrPose gripPose{};
@@ -815,15 +856,19 @@ struct WeightedWeaponInputState {
     ULONGLONG lastAimValidTick{0};
     ULONGLONG lastGripValidTick{0};
     ULONGLONG lastDiagnosticTick{0};
+    ULONGLONG lastCollisionDiagnosticTick{0};
     const void* weapon{nullptr};
     LONG resetGeneration{-1};
     WeaponWeightProfile profile{};
     WeaponRecoilProfile recoilProfile{};
+    WeaponCollisionProfile collisionProfile{};
     char profileName[96]{};
     bool aimValid{false};
     bool gripValid{false};
     bool enabledOnLastUpdate{false};
     bool recoilProfileExplicit{false};
+    bool collisionProfileExplicit{false};
+    bool collisionObstructed{false};
 };
 thread_local WeightedWeaponInputState g_weightedWeaponInput;
 
@@ -854,6 +899,7 @@ std::size_t g_vrMenuPageRows = 8;
 VrSettingsPage g_vrSettingsPage = VrSettingsPage::None;
 bool g_vrWeaponProfileEditsCurrent = true;
 bool g_vrRecoilProfileEditsCurrent = true;
+bool g_vrCollisionProfileEditsCurrent = true;
 int g_vrOriginalItemSpacing = 0;
 bool g_vrOriginalItemSpacingKnown = false;
 
@@ -873,6 +919,15 @@ constexpr std::array<float, 6> kWeaponRecoilRisePresets{
     0.00F, 0.50F, 1.00F, 1.50F, 2.00F, 3.00F};
 constexpr std::array<float, 6> kWeaponRecoilRecoveryPresets{
     0.50F, 0.75F, 1.00F, 1.50F, 2.00F, 3.00F};
+constexpr std::array<float, 8> kWeaponCollisionLengthPresets{
+    0.50F, 0.75F, 1.00F, 1.25F, 1.50F, 1.75F, 2.00F, 2.50F};
+constexpr std::array<float, 8> kWeaponCollisionWidthPresets{
+    0.04F, 0.06F, 0.08F, 0.10F, 0.12F, 0.16F, 0.20F, 0.30F};
+constexpr std::array<float, 8> kWeaponCollisionHeightPresets{
+    0.06F, 0.08F, 0.10F, 0.14F, 0.18F, 0.22F, 0.28F, 0.36F};
+constexpr std::array<float, 9> kWeaponCollisionOffsetPresets{
+    -0.20F, -0.15F, -0.10F, -0.05F, 0.00F,
+     0.05F,  0.10F,  0.15F, 0.20F};
 
 VrMenuControl g_vrMenuEntry;
 VrMenuControl g_vrMenuTitle;
@@ -1779,6 +1834,7 @@ void WriteVrFloat(
     const wchar_t* section, const wchar_t* name, float value) noexcept;
 void SaveActiveWeaponWeightProfile() noexcept;
 void SaveActiveWeaponRecoilProfile() noexcept;
+void SaveActiveWeaponCollisionProfile() noexcept;
 
 bool QueryBooleanOption(
     GetBooleanOptionFunction getter, bool fallback) noexcept {
@@ -1864,6 +1920,15 @@ void InitializeVrSettings() noexcept {
         ReadVrFloat(L"VR", L"WeaponRecoilStrength", 1.5F),
         ReadVrFloat(L"VR", L"WeaponRecoilMuzzleRise", 1.0F),
         ReadVrFloat(L"VR", L"WeaponRecoilRecovery", 1.0F)});
+    g_weaponCollisionEnabled =
+        ReadVrSetting(L"WeaponCollisionEnabled", 1) != 0;
+    g_weaponCollisionDebugEnabled =
+        ReadVrSetting(L"WeaponCollisionDebug", 1) != 0;
+    g_defaultWeaponCollisionProfile = SanitizeWeaponCollisionProfile({
+        ReadVrFloat(L"VR", L"WeaponCollisionLengthScale", 1.0F),
+        ReadVrFloat(L"VR", L"WeaponCollisionWidth", 0.10F),
+        ReadVrFloat(L"VR", L"WeaponCollisionHeight", 0.18F),
+        ReadVrFloat(L"VR", L"WeaponCollisionForwardOffset", 0.0F)});
     g_defaultWeaponWeightProfile = SanitizeWeaponWeightProfile({
         ReadVrFloat(L"VR", L"WeaponWeight", 1.0F),
         ReadVrFloat(L"VR", L"WeaponPositionalFollow", 18.0F),
@@ -2042,6 +2107,22 @@ void SaveVrSettings() noexcept {
     WriteVrFloat(
         L"VR", L"WeaponRecoilRecovery",
         g_weaponRecoilProfile.recovery);
+    WriteVrSetting(
+        L"WeaponCollisionEnabled", g_weaponCollisionEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"WeaponCollisionDebug", g_weaponCollisionDebugEnabled ? 1 : 0);
+    WriteVrFloat(
+        L"VR", L"WeaponCollisionLengthScale",
+        g_defaultWeaponCollisionProfile.lengthScale);
+    WriteVrFloat(
+        L"VR", L"WeaponCollisionWidth",
+        g_defaultWeaponCollisionProfile.widthMeters);
+    WriteVrFloat(
+        L"VR", L"WeaponCollisionHeight",
+        g_defaultWeaponCollisionProfile.heightMeters);
+    WriteVrFloat(
+        L"VR", L"WeaponCollisionForwardOffset",
+        g_defaultWeaponCollisionProfile.forwardOffsetMeters);
     WriteVrFloat(
         L"VR", L"WeaponWeight",
         g_defaultWeaponWeightProfile.weight);
@@ -2096,6 +2177,7 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(L"TurnSpeed", g_turnSpeedPreset);
     SaveActiveWeaponWeightProfile();
     SaveActiveWeaponRecoilProfile();
+    SaveActiveWeaponCollisionProfile();
     g_vrSettingsFilePresent = true;
 }
 
@@ -2379,6 +2461,36 @@ const WeaponRecoilProfile& ActiveWeaponRecoilProfile() noexcept {
     return g_weightedWeaponInput.recoilProfileExplicit
         ? g_weightedWeaponInput.recoilProfile
         : g_weaponRecoilProfile;
+}
+
+bool EditingCurrentWeaponCollisionProfile() noexcept {
+    return g_vrCollisionProfileEditsCurrent &&
+           HasCurrentWeaponWeightProfile();
+}
+
+const WeaponCollisionProfile& DisplayedWeaponCollisionProfile() noexcept {
+    return EditingCurrentWeaponCollisionProfile() &&
+           g_weightedWeaponInput.collisionProfileExplicit
+        ? g_weightedWeaponInput.collisionProfile
+        : g_defaultWeaponCollisionProfile;
+}
+
+WeaponCollisionProfile& EditableWeaponCollisionProfile() noexcept {
+    if (!EditingCurrentWeaponCollisionProfile()) {
+        return g_defaultWeaponCollisionProfile;
+    }
+    if (!g_weightedWeaponInput.collisionProfileExplicit) {
+        g_weightedWeaponInput.collisionProfile =
+            g_defaultWeaponCollisionProfile;
+        g_weightedWeaponInput.collisionProfileExplicit = true;
+    }
+    return g_weightedWeaponInput.collisionProfile;
+}
+
+const WeaponCollisionProfile& ActiveWeaponCollisionProfile() noexcept {
+    return g_weightedWeaponInput.collisionProfileExplicit
+        ? g_weightedWeaponInput.collisionProfile
+        : g_defaultWeaponCollisionProfile;
 }
 
 void ResetEditableWeaponWeightProfile() noexcept {
@@ -2798,11 +2910,19 @@ void ApplyVrDefaults() noexcept {
     g_weaponRecoilEnabled = true;
     g_weaponRecoilProfile = {};
     ResetWeaponRecoil(g_weightedWeaponInput.recoil);
+    g_weaponCollisionEnabled = true;
+    g_weaponCollisionDebugEnabled = true;
+    g_defaultWeaponCollisionProfile = {};
+    g_weightedWeaponInput.collisionProfile = {};
+    g_weightedWeaponInput.collisionProfileExplicit = false;
+    g_weightedWeaponInput.collisionObstructed = false;
+    ResetWeaponCollisionRuntime(g_weightedWeaponInput.collision);
     InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
     g_lastWeaponRecoilTick = 0;
     g_weightedWeaponInput.profile = WeaponWeightProfile{};
     g_vrWeaponProfileEditsCurrent = true;
     g_vrRecoilProfileEditsCurrent = true;
+    g_vrCollisionProfileEditsCurrent = true;
     g_weaponAimGuideEnabled = true;
     g_controllerHapticsEnabled = true;
     g_flashlightMount = FlashlightMount::Weapon;
@@ -5660,6 +5780,8 @@ void RenderWeaponAimGuide(HLOCALOBJ camera) noexcept {
     }
 }
 
+void RenderWeaponCollisionBox(HLOCALOBJ camera) noexcept;
+
 void SetDevMenuQuad(
     LT_POLYG4& quad, const LTVector& center,
     const LTVector& right, const LTVector& up,
@@ -5798,6 +5920,50 @@ void FormatDevMenuRow(
         case 5:
             _snwprintf_s(text, textCount, _TRUNCATE, L"CATCH-UP: %.1f",
                          static_cast<double>(weight.catchUpStrength));
+            break;
+        }
+        break;
+    }
+    case DevMenuTab::collision: {
+        const WeaponCollisionProfile& collision =
+            DisplayedWeaponCollisionProfile();
+        switch (row) {
+        case 0:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"WORLD COLLISION: %s",
+                onOff[g_weaponCollisionEnabled ? 1 : 0]);
+            break;
+        case 1:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"SHOW COLLISION BOX: %s",
+                onOff[g_weaponCollisionDebugEnabled ? 1 : 0]);
+            break;
+        case 2:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"EDIT PROFILE: %s",
+                EditingCurrentWeaponCollisionProfile()
+                    ? L"CURRENT" : L"DEFAULT");
+            break;
+        case 3:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"BOX LENGTH: %.0f%%",
+                static_cast<double>(collision.lengthScale * 100.0F));
+            break;
+        case 4:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"BOX WIDTH: %.0f CM",
+                static_cast<double>(collision.widthMeters * 100.0F));
+            break;
+        case 5:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"BOX HEIGHT: %.0f CM",
+                static_cast<double>(collision.heightMeters * 100.0F));
+            break;
+        case 6:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"FORWARD OFFSET: %+.0f CM",
+                static_cast<double>(
+                    collision.forwardOffsetMeters * 100.0F));
             break;
         }
         break;
@@ -6092,6 +6258,7 @@ void RenderFloatingDevMenu(HLOCALOBJ camera) noexcept {
     wchar_t title[80] = L"FEAR VR LIVE TUNING";
     if (g_devMenu.selectedTab == DevMenuTab::recoil ||
         g_devMenu.selectedTab == DevMenuTab::weight ||
+        g_devMenu.selectedTab == DevMenuTab::collision ||
         g_devMenu.selectedTab == DevMenuTab::weapon) {
         wchar_t weaponName[48]{};
         FormatCurrentWeaponName(weaponName, std::size(weaponName));
@@ -6986,6 +7153,7 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
                 eye == FEARVR_EYE_LEFT
                     ? "render_left_aim_guide"
                     : "render_right_aim_guide";
+            RenderWeaponCollisionBox(camera);
             RenderWeaponAimGuide(camera);
             g_stereoStep =
                 eye == FEARVR_EYE_LEFT
@@ -9557,6 +9725,77 @@ void SaveActiveWeaponRecoilProfile() noexcept {
         section, L"Recovery", weighted.recoilProfile.recovery);
 }
 
+WeaponCollisionProfile LoadWeaponCollisionProfile(
+    const char* profileName, bool& explicitProfile) noexcept {
+    explicitProfile = false;
+    if (profileName == nullptr || profileName[0] == '\0' ||
+        std::strcmp(profileName, "default") == 0) {
+        return g_defaultWeaponCollisionProfile;
+    }
+    wchar_t section[128] = L"WeaponCollision.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         profileName[index] != '\0' && used + 1 < std::size(section);
+         ++index) {
+        section[used++] = static_cast<unsigned char>(profileName[index]);
+    }
+    section[used] = L'\0';
+
+    wchar_t value[32]{};
+    const auto hasValue = [&](const wchar_t* name) noexcept {
+        value[0] = L'\0';
+        return g_vrSettingsFilePresent &&
+               g_vrSettingsPath[0] != L'\0' &&
+               GetPrivateProfileStringW(
+                   section, name, L"", value,
+                   static_cast<DWORD>(std::size(value)),
+                   g_vrSettingsPath) != 0;
+    };
+    explicitProfile =
+        hasValue(L"LengthScale") || hasValue(L"Width") ||
+        hasValue(L"Height") || hasValue(L"ForwardOffset");
+    return SanitizeWeaponCollisionProfile({
+        ReadVrFloat(
+            section, L"LengthScale",
+            g_defaultWeaponCollisionProfile.lengthScale),
+        ReadVrFloat(
+            section, L"Width",
+            g_defaultWeaponCollisionProfile.widthMeters),
+        ReadVrFloat(
+            section, L"Height",
+            g_defaultWeaponCollisionProfile.heightMeters),
+        ReadVrFloat(
+            section, L"ForwardOffset",
+            g_defaultWeaponCollisionProfile.forwardOffsetMeters)});
+}
+
+void SaveActiveWeaponCollisionProfile() noexcept {
+    const WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    if (!weighted.collisionProfileExplicit ||
+        !HasCurrentWeaponWeightProfile()) {
+        return;
+    }
+    wchar_t section[128] = L"WeaponCollision.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         weighted.profileName[index] != '\0' &&
+         used + 1 < std::size(section); ++index) {
+        section[used++] =
+            static_cast<unsigned char>(weighted.profileName[index]);
+    }
+    section[used] = L'\0';
+    WriteVrFloat(
+        section, L"LengthScale",
+        weighted.collisionProfile.lengthScale);
+    WriteVrFloat(
+        section, L"Width", weighted.collisionProfile.widthMeters);
+    WriteVrFloat(
+        section, L"Height", weighted.collisionProfile.heightMeters);
+    WriteVrFloat(
+        section, L"ForwardOffset",
+        weighted.collisionProfile.forwardOffsetMeters);
+}
+
 void PrepareWeightedWeaponPoses(
     const void* weapon, FearVrPose& aimPose,
     std::uint32_t& aimValidHands, FearVrPose& gripPose,
@@ -9575,6 +9814,8 @@ void PrepareWeightedWeaponPoses(
         ResetWeaponWeightPair(
             weighted.filters, WeaponWeightResetReason::weaponChanged);
         ResetWeaponRecoil(weighted.recoil);
+        ResetWeaponCollisionRuntime(weighted.collision);
+        weighted.collisionObstructed = false;
         InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
         g_lastWeaponRecoilTick = 0;
         weighted.weapon = weapon;
@@ -9585,6 +9826,8 @@ void PrepareWeightedWeaponPoses(
             weapon, weighted.profileName);
         weighted.recoilProfile = LoadWeaponRecoilProfile(
             weighted.profileName, weighted.recoilProfileExplicit);
+        weighted.collisionProfile = LoadWeaponCollisionProfile(
+            weighted.profileName, weighted.collisionProfileExplicit);
     }
     if (weighted.resetGeneration != resetGeneration) {
         ResetWeaponWeightPair(
@@ -9593,6 +9836,8 @@ void PrepareWeightedWeaponPoses(
                 ? WeaponWeightResetReason::referenceSpaceChanged
                 : WeaponWeightResetReason::teleportedOrRecentered);
         ResetWeaponRecoil(weighted.recoil);
+        ResetWeaponCollisionRuntime(weighted.collision);
+        weighted.collisionObstructed = false;
         weighted.resetGeneration = resetGeneration;
         weighted.lastSampleId = 0;
         weighted.lastAimValidTick = 0;
@@ -11779,6 +12024,340 @@ void ApplyTwoHandedAimSupport() noexcept {
         correction * g_weaponAim.fireTransform.m_rRot;
 }
 
+struct WeaponCollisionBoxGeometry {
+    LTVector rearCenter;
+    LTVector right;
+    LTVector up;
+    LTVector forward;
+    float lengthUnits{0.0F};
+    float halfWidthUnits{0.0F};
+    float halfHeightUnits{0.0F};
+};
+
+bool ResolveWeaponCollisionBox(
+    const void* weapon, WeaponCollisionBoxGeometry& box) noexcept {
+    if (weapon == nullptr || weapon != g_weaponAim.muzzleWeapon ||
+        !g_weaponAim.valid || !g_weaponAim.gripValid ||
+        !g_weaponAim.muzzleLocalValid) {
+        return false;
+    }
+    const WeaponCollisionProfile profile =
+        SanitizeWeaponCollisionProfile(ActiveWeaponCollisionProfile());
+    const float barrelLengthMeters = CurrentBarrelLengthMeters();
+    if (!(barrelLengthMeters > 0.02F)) {
+        return false;
+    }
+
+    g_weaponAim.fireTransform.m_rRot.GetVectors(
+        box.right, box.up, box.forward);
+    if (box.right.MagSqr() < 0.0001F ||
+        box.up.MagSqr() < 0.0001F ||
+        box.forward.MagSqr() < 0.0001F) {
+        return false;
+    }
+    box.right.Normalize();
+    box.up.Normalize();
+    box.forward.Normalize();
+    box.lengthUnits =
+        barrelLengthMeters * profile.lengthScale * kGameUnitsPerMeter;
+    box.halfWidthUnits =
+        profile.widthMeters * 0.5F * kGameUnitsPerMeter;
+    box.halfHeightUnits =
+        profile.heightMeters * 0.5F * kGameUnitsPerMeter;
+    box.rearCenter = g_weaponAim.gripTransform.m_vPos +
+        box.forward *
+            (profile.forwardOffsetMeters * kGameUnitsPerMeter);
+    return std::isfinite(box.lengthUnits) && box.lengthUnits > 2.0F;
+}
+
+void BuildWeaponCollisionCorners(
+    const WeaponCollisionBoxGeometry& box, float expansionUnits,
+    LTVector (&corners)[8]) noexcept {
+    expansionUnits = (std::max)(0.0F, expansionUnits);
+    const LTVector rearCenter =
+        box.rearCenter - box.forward * expansionUnits;
+    const LTVector frontCenter = box.rearCenter + box.forward *
+        (box.lengthUnits + expansionUnits);
+    const LTVector right = box.right *
+        (box.halfWidthUnits + expansionUnits);
+    const LTVector up = box.up *
+        (box.halfHeightUnits + expansionUnits);
+    corners[0] = rearCenter - right - up;
+    corners[1] = rearCenter + right - up;
+    corners[2] = rearCenter + right + up;
+    corners[3] = rearCenter - right + up;
+    corners[4] = frontCenter - right - up;
+    corners[5] = frontCenter + right - up;
+    corners[6] = frontCenter + right + up;
+    corners[7] = frontCenter - right + up;
+}
+
+bool TraceWeaponCollisionSegment(
+    const LTVector& from, const LTVector& to,
+    IntersectInfo& hit) noexcept {
+    if ((to - from).MagSqr() < 0.0001F) {
+        return false;
+    }
+    IntersectQuery query;
+    query.m_From = from;
+    query.m_To = to;
+    // Deliberately do not set INTERSECT_OBJECTS. Retail creates many solid,
+    // invisible helper objects and coarse AABB collision volumes around the
+    // player and weapon. They produced permanent false contacts and unstable
+    // normals. World polygons retain real level boundaries and carry HPOLY.
+    query.m_Flags = IGNORE_NONSOLID | INTERSECT_HPOLY;
+    return g_client->IntersectSegment(query, &hit) &&
+           hit.m_hPoly != INVALID_HPOLY;
+}
+
+bool AccumulateWeaponCollisionContact(
+    const WeaponCollisionBoxGeometry& box,
+    const LTVector (&corners)[8], const IntersectInfo& hit,
+    LTVector& correction) noexcept {
+    LTVector normal = hit.m_Plane.m_Normal;
+    if (!std::isfinite(normal.x) || !std::isfinite(normal.y) ||
+        !std::isfinite(normal.z) || normal.MagSqr() < 0.0001F) {
+        return false;
+    }
+    normal.Normalize();
+
+    // Engine polygon normals are not guaranteed to face the player. The
+    // tracking base remains on the traversable side even if the physical
+    // controller has crossed a thin wall, so orient every contact normal
+    // toward that stable safe point rather than toward the penetrating box.
+    const LTVector safePoint = g_weaponAim.trackingBaseValid
+        ? g_weaponAim.trackingBase.m_vPos
+        : box.rearCenter - box.forward * box.lengthUnits;
+    if ((safePoint - hit.m_Point).Dot(normal) < 0.0F) {
+        normal *= -1.0F;
+    }
+
+    float closestDistance = std::numeric_limits<float>::infinity();
+    for (const LTVector& corner : corners) {
+        closestDistance = (std::min)(
+            closestDistance, (corner - hit.m_Point).Dot(normal));
+    }
+    if (!std::isfinite(closestDistance)) {
+        return false;
+    }
+    const float maximumCorrection = (std::max)({
+        box.lengthUnits,
+        box.halfWidthUnits * 2.0F,
+        box.halfHeightUnits * 2.0F}) + kWeaponCollisionMarginUnits;
+    const float required = WeaponCollisionPlaneCorrection(
+        closestDistance, kWeaponCollisionMarginUnits,
+        maximumCorrection);
+    if (!(required > 0.0F)) {
+        return false;
+    }
+    const float alreadyCorrected = correction.Dot(normal);
+    if (required > alreadyCorrected) {
+        correction += normal * (required - alreadyCorrected);
+    }
+    return true;
+}
+
+void ApplyWeaponWorldCollision(const void* weapon) noexcept {
+    WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    WeaponCollisionBoxGeometry box{};
+    if (!g_weaponCollisionEnabled || g_client == nullptr ||
+        !ResolveWeaponCollisionBox(weapon, box)) {
+        ResetWeaponCollisionRuntime(weighted.collision);
+        weighted.collisionObstructed = false;
+        return;
+    }
+
+    LTVector corners[8]{};
+    BuildWeaponCollisionCorners(box, 0.0F, corners);
+    struct ProbeOffset {
+        float right;
+        float up;
+    };
+    constexpr ProbeOffset probes[] = {
+        { 0.0F,  0.0F},
+        {-1.0F, -1.0F}, { 1.0F, -1.0F},
+        { 1.0F,  1.0F}, {-1.0F,  1.0F},
+        { 0.0F, -1.0F}, { 1.0F,  0.0F},
+        { 0.0F,  1.0F}, {-1.0F,  0.0F},
+    };
+
+    LTVector targetCorrection;
+    targetCorrection.Init();
+    IntersectInfo selectedHit;
+    float selectedCorrectionMagnitudeSqr = 0.0F;
+    bool contact = false;
+    bool queryFailed = false;
+    for (const ProbeOffset& probe : probes) {
+        const LTVector origin = box.rearCenter +
+            box.right * (probe.right * box.halfWidthUnits) +
+            box.up * (probe.up * box.halfHeightUnits);
+        IntersectInfo hit;
+        __try {
+            if (TraceWeaponCollisionSegment(
+                    origin,
+                    origin + box.forward *
+                        (box.lengthUnits + kWeaponCollisionMarginUnits),
+                    hit)) {
+                LTVector candidate;
+                candidate.Init();
+                if (AccumulateWeaponCollisionContact(
+                        box, corners, hit, candidate)) {
+                    const float magnitudeSqr = candidate.MagSqr();
+                    if (!contact ||
+                        magnitudeSqr > selectedCorrectionMagnitudeSqr) {
+                        contact = true;
+                        targetCorrection = candidate;
+                        selectedHit = hit;
+                        selectedCorrectionMagnitudeSqr = magnitudeSqr;
+                    }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            queryFailed = true;
+            break;
+        }
+    }
+    WeaponCollisionRuntimeState& state = weighted.collision;
+    if (queryFailed) {
+        ResetWeaponCollisionRuntime(weighted.collision);
+        weighted.collisionObstructed = false;
+        return;
+    }
+
+    const std::uint64_t nowNs = MonotonicNanoseconds();
+    float seconds = 0.0F;
+    if (state.haveUpdate && nowNs > state.lastUpdateNs &&
+        nowNs - state.lastUpdateNs <= kWeaponCollisionMaxGapNs) {
+        seconds = static_cast<float>(nowNs - state.lastUpdateNs) * 1.0e-9F;
+    }
+    state.lastUpdateNs = nowNs;
+    state.haveUpdate = true;
+    if (contact) {
+        if (seconds <= 0.0F) {
+            state.correction = targetCorrection;
+        } else {
+            const float tighten = std::clamp(
+                seconds / kWeaponCollisionTightenSeconds, 0.0F, 1.0F);
+            state.correction +=
+                (targetCorrection - state.correction) * tighten;
+        }
+        state.holdUntilNs = nowNs + kWeaponCollisionHoldNs;
+    } else if (nowNs >= state.holdUntilNs) {
+        if (seconds <= 0.0F ||
+            seconds >= kWeaponCollisionReleaseSeconds) {
+            state.correction.Init();
+        } else {
+            const float release = std::clamp(
+                seconds / kWeaponCollisionReleaseSeconds, 0.0F, 1.0F);
+            state.correction *= 1.0F - release;
+        }
+    }
+
+    weighted.collisionObstructed = contact ||
+        state.correction.MagSqr() > 0.0001F;
+
+    const ULONGLONG diagnosticNow = GetTickCount64();
+    if (contact && g_weaponWeightDiagnosticsEnabled &&
+        (weighted.lastCollisionDiagnosticTick == 0 ||
+         diagnosticNow - weighted.lastCollisionDiagnosticTick >= 1000)) {
+        weighted.lastCollisionDiagnosticTick = diagnosticNow;
+        char message[256]{};
+        std::snprintf(
+            message, sizeof(message),
+            "profile=%s world=%u poly=%u surface=0x%08X "
+            "correction=(%.2f,%.2f,%.2f)",
+            weighted.profileName,
+            static_cast<unsigned>(selectedHit.m_hPoly.m_nWorldIndex),
+            static_cast<unsigned>(selectedHit.m_hPoly.m_nPolyIndex),
+            static_cast<unsigned>(selectedHit.m_SurfaceFlags),
+            state.correction.x, state.correction.y,
+            state.correction.z);
+        Report("INFO", "weapon_collision_contact", message);
+    }
+    g_weaponAim.fireTransform.m_vPos += state.correction;
+    g_weaponAim.gripTransform.m_vPos += state.correction;
+    if (g_twoHandedGripActive) {
+        g_weaponAim.leftAimTransform.m_vPos += state.correction;
+        g_weaponAim.leftGripTransform.m_vPos += state.correction;
+    }
+
+    static volatile LONG activeLogged = 0;
+    if (InterlockedCompareExchange(&activeLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "weapon_world_collision_active",
+            "The equipped weapon uses nine world-polygon-only probes and "
+            "smoothly resolves the rendered hands and muzzle along one "
+            "bounded surface normal.");
+    }
+}
+
+void RenderWeaponCollisionBox(HLOCALOBJ camera) noexcept {
+    const bool menuPreview =
+        g_devMenu.open && g_devMenu.selectedTab == DevMenuTab::collision;
+    if (g_client == nullptr || camera == nullptr || g_weaponDisabled ||
+        (!g_weaponCollisionDebugEnabled && !menuPreview)) {
+        return;
+    }
+    WeaponCollisionBoxGeometry box{};
+    if (!ResolveWeaponCollisionBox(g_weightedWeaponInput.weapon, box)) {
+        return;
+    }
+
+    const LTVector frontCenter =
+        box.rearCenter + box.forward * box.lengthUnits;
+    const LTVector right = box.right * box.halfWidthUnits;
+    const LTVector up = box.up * box.halfHeightUnits;
+    const LTVector corners[] = {
+        box.rearCenter - right - up,
+        box.rearCenter + right - up,
+        box.rearCenter + right + up,
+        box.rearCenter - right + up,
+        frontCenter - right - up,
+        frontCenter + right - up,
+        frontCenter + right + up,
+        frontCenter - right + up,
+    };
+    constexpr std::uint8_t edgeIndices[][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7},
+    };
+    LT_LINEG edges[std::size(edgeIndices)]{};
+    const bool obstructed = g_weightedWeaponInput.collisionObstructed;
+    const std::uint8_t red = obstructed ? 255 : 40;
+    const std::uint8_t green = obstructed ? 45 :
+        (g_weaponCollisionEnabled ? 255 : 170);
+    const std::uint8_t blue = obstructed ? 20 :
+        (g_weaponCollisionEnabled ? 80 : 255);
+    for (std::size_t index = 0; index < std::size(edges); ++index) {
+        edges[index].verts[0].pos = corners[edgeIndices[index][0]];
+        edges[index].verts[1].pos = corners[edgeIndices[index][1]];
+        edges[index].verts[0].rgba.Init(red, green, blue, 245);
+        edges[index].verts[1].rgba.Init(red, green, blue, 245);
+    }
+
+    ILTDrawPrim* const drawPrim = g_client->GetDrawPrim();
+    if (drawPrim == nullptr) {
+        return;
+    }
+    const HOBJECT oldCamera = drawPrim->GetCamera();
+    const ELTDrawPrimTransformMode oldTransformMode =
+        drawPrim->GetTransformMode();
+    const ELTDrawPrimZMode oldZMode = drawPrim->GetZMode();
+    const ELTDrawPrimRenderMode oldRenderMode =
+        drawPrim->GetRenderMode();
+    drawPrim->SetCamera(camera);
+    drawPrim->SetTransformMode(eLTDrawPrimTransformMode_World);
+    drawPrim->SetZMode(eLTDrawPrimZMode_NoWrite);
+    drawPrim->SetRenderMode(eLTDrawPrimRenderMode_Modulate_Additive);
+    drawPrim->DrawPrim(
+        edges, static_cast<std::uint32_t>(std::size(edges)));
+    drawPrim->SetRenderMode(oldRenderMode);
+    drawPrim->SetZMode(oldZMode);
+    drawPrim->SetTransformMode(oldTransformMode);
+    drawPrim->SetCamera(oldCamera);
+}
+
 void __fastcall HookRetailStartMuzzleFlash(
     void* weaponModelData, void* ignoredEdx) {
     (void)ignoredEdx;
@@ -11863,8 +12442,10 @@ int __fastcall HookRetailWeaponManagerUpdate(
     FearVrPose weightedGripPose{};
     std::uint32_t weightedAimValidHands = 0;
     std::uint32_t weightedGripValidHands = 0;
+    void* const weaponBeforeUpdate =
+        CurrentRetailWeapon(weaponManager);
     PrepareWeightedWeaponPoses(
-        CurrentRetailWeapon(weaponManager), weightedAimPose,
+        weaponBeforeUpdate, weightedAimPose,
         weightedAimValidHands, weightedGripPose,
         weightedGripValidHands);
     g_weaponAim.valid = BuildStableTrackedHandTransform(
@@ -11939,6 +12520,7 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // Feuerachse, nicht die Rohpose des Controllers.
     UpdateTwoHandedGrip();
     ApplyTwoHandedAimSupport();
+    ApplyWeaponWorldCollision(weaponBeforeUpdate);
 
     // Install before Retail updates the weapon from the RightHand socket.
     // This path is verified to run every playing frame, unlike the optional
@@ -11950,8 +12532,6 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // it when Retail actually hides the model. Do not call SetVisible on
     // ordinary frames: it always hides the looped muzzle FX and can restart a
     // short pistol flash between renders.
-    void* const weaponBeforeUpdate =
-        CurrentRetailWeapon(weaponManager);
     if (weaponBeforeUpdate != nullptr &&
         !RetailWeaponIsDisabled(weaponBeforeUpdate) &&
         (weaponBeforeUpdate !=
@@ -14257,6 +14837,68 @@ void ActivateFloatingDevMenuRow(
                 kWeaponCatchUpPresets[NextVrPresetIndex(
                     profile.catchUpStrength, kWeaponCatchUpPresets)];
             break;
+        }
+        break;
+    }
+    case DevMenuTab::collision: {
+        switch (row) {
+        case 0:
+            g_weaponCollisionEnabled = !g_weaponCollisionEnabled;
+            ResetWeaponCollisionRuntime(g_weightedWeaponInput.collision);
+            g_weightedWeaponInput.collisionObstructed = false;
+            break;
+        case 1:
+            g_weaponCollisionDebugEnabled =
+                !g_weaponCollisionDebugEnabled;
+            break;
+        case 2:
+            g_vrCollisionProfileEditsCurrent =
+                HasCurrentWeaponWeightProfile()
+                    ? !g_vrCollisionProfileEditsCurrent : false;
+            if (g_vrCollisionProfileEditsCurrent) {
+                (void)EditableWeaponCollisionProfile();
+            }
+            break;
+        case 3: {
+            WeaponCollisionProfile& profile =
+                EditableWeaponCollisionProfile();
+            profile.lengthScale =
+                kWeaponCollisionLengthPresets[NextVrPresetIndex(
+                    profile.lengthScale,
+                    kWeaponCollisionLengthPresets)];
+            break;
+        }
+        case 4: {
+            WeaponCollisionProfile& profile =
+                EditableWeaponCollisionProfile();
+            profile.widthMeters =
+                kWeaponCollisionWidthPresets[NextVrPresetIndex(
+                    profile.widthMeters,
+                    kWeaponCollisionWidthPresets)];
+            break;
+        }
+        case 5: {
+            WeaponCollisionProfile& profile =
+                EditableWeaponCollisionProfile();
+            profile.heightMeters =
+                kWeaponCollisionHeightPresets[NextVrPresetIndex(
+                    profile.heightMeters,
+                    kWeaponCollisionHeightPresets)];
+            break;
+        }
+        case 6: {
+            WeaponCollisionProfile& profile =
+                EditableWeaponCollisionProfile();
+            profile.forwardOffsetMeters =
+                kWeaponCollisionOffsetPresets[NextVrPresetIndex(
+                    profile.forwardOffsetMeters,
+                    kWeaponCollisionOffsetPresets)];
+            break;
+        }
+        }
+        if (row >= 2) {
+            ResetWeaponCollisionRuntime(g_weightedWeaponInput.collision);
+            g_weightedWeaponInput.collisionObstructed = false;
         }
         break;
     }

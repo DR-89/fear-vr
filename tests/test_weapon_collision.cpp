@@ -30,6 +30,13 @@ int main() {
     assert(WeaponCollisionRetraction(
                80.0F, std::numeric_limits<float>::infinity(), true) == 0.0F);
 
+    assert(WeaponCollisionPlaneCorrection(12.0F) == 0.0F);
+    assert(WeaponCollisionPlaneCorrection(5.0F) == 3.0F);
+    assert(WeaponCollisionPlaneCorrection(-10.0F) == 18.0F);
+    assert(WeaponCollisionPlaneCorrection(-100.0F, 8.0F, 30.0F) == 30.0F);
+    assert(WeaponCollisionPlaneCorrection(
+               std::numeric_limits<float>::infinity()) == 0.0F);
+
     assert(!WeaponMuzzleObstructed(80.0F, 200.0F, true));
     assert(WeaponMuzzleObstructed(80.0F, 88.0F, true));
     assert(!WeaponMuzzleObstructed(80.0F, 0.0F, false));

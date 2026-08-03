@@ -6,9 +6,10 @@
 
 namespace fearvr {
 
-// Header-only weapon obstruction model. The game-facing hook supplies the
-// distance from the grip to the first world hit; this code decides how far the
-// virtual weapon should retract and smooths that correction across frames.
+// Header-only weapon obstruction helpers. The runtime resolves collision
+// planes into directional corrections; these scalar functions calculate the
+// clearance needed for one plane and retain the original longitudinal model
+// used by isolated tests and compatibility experiments.
 //
 // Collision belongs after controller/two-handed/weight pose generation and
 // before the final weapon, muzzle, laser and shot transforms are committed.
@@ -45,6 +46,32 @@ inline float ClampWeaponCollisionValue(
         return maximum;
     }
     return value;
+}
+
+// Correction required along an already-oriented contact normal. A positive
+// signed distance means the closest box corner is still on the safe side of
+// the plane; a negative value is penetration depth.
+inline float WeaponCollisionPlaneCorrection(
+    float closestSignedDistance,
+    float marginUnits = kWeaponCollisionMarginUnits,
+    float maxCorrectionUnits =
+        std::numeric_limits<float>::infinity()) noexcept {
+    if (!std::isfinite(closestSignedDistance)) {
+        return 0.0F;
+    }
+    if (!std::isfinite(marginUnits) || marginUnits < 0.0F) {
+        marginUnits = 0.0F;
+    }
+    if (std::isnan(maxCorrectionUnits) || maxCorrectionUnits <= 0.0F) {
+        return 0.0F;
+    }
+    const float required = marginUnits - closestSignedDistance;
+    if (!(required > 0.0F)) {
+        return 0.0F;
+    }
+    return std::isfinite(maxCorrectionUnits)
+        ? ClampWeaponCollisionValue(required, 0.0F, maxCorrectionUnits)
+        : required;
 }
 
 // Compute the target backward movement of the weapon.

@@ -392,7 +392,7 @@ current camera and drawn after each stereo-eye world render. Its compact 5x7
 bitmap labels, panel, highlight, pointer and right-controller ray all use
 world-space draw primitives, so they follow the same stereo and capture path.
 `src/common/dev_menu_model.h` performs the controller-ray/plane/row hit test.
-The same model distinguishes tab-strip hits from setting-row hits. Six bounded
+The same model distinguishes tab-strip hits from setting-row hits. Seven bounded
 tabs reuse the native menu's setting state and side effects, then write through
 the existing settings/profile persistence functions. The panel captures
 controller command injection until the buttons used to close it are released.
@@ -431,7 +431,7 @@ testability boundary for logic that does not need LithTech, D3D, or OpenXR:
 - controller mapping and input freshness;
 - floating dev-menu ray and row hit testing;
 - HUD coverage/coordinate math;
-- two-handed grip and weapon-weight filters;
+- two-handed grip, weapon-weight filters, and weapon-collision retraction;
 - melee gesture/action classification;
 - ladder grip motion;
 - physical lean collision/body follow; and

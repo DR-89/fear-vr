@@ -195,4 +195,43 @@ inline InputVector2 ApplyRadialInputDeadzone(
     return {x * scale, y * scale};
 }
 
+// Real thumbs rarely hold a physical stick on the exact twelve-o'clock line.
+// Preserve deliberate diagonals, but create a small, smoothly released
+// forward/back corridor so ordinary lateral thumb drift does not make the
+// player weave. Magnitude is preserved throughout the assisted region.
+inline InputVector2 ApplyForwardAxisAssist(
+    float x, float y, float lockRatio = 0.25F,
+    float releaseRatio = 0.55F) noexcept {
+    if (!std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(lockRatio) || !std::isfinite(releaseRatio) ||
+        lockRatio < 0.0F || releaseRatio <= lockRatio) {
+        return {};
+    }
+    const float absoluteY = std::fabs(y);
+    if (absoluteY < 1.0e-6F) {
+        return {x, y};
+    }
+    const float ratio = std::fabs(x) / absoluteY;
+    if (ratio >= releaseRatio) {
+        return {x, y};
+    }
+    const float magnitude = std::sqrt(x * x + y * y);
+    if (!std::isfinite(magnitude) || magnitude < 1.0e-6F) {
+        return {};
+    }
+    float lateralScale = 0.0F;
+    if (ratio > lockRatio) {
+        const float t = std::clamp(
+            (ratio - lockRatio) / (releaseRatio - lockRatio),
+            0.0F, 1.0F);
+        lateralScale = t * t * (3.0F - 2.0F * t);
+    }
+    const float assistedX = x * lateralScale;
+    const float assistedYMagnitude = std::sqrt((std::max)(
+        0.0F, magnitude * magnitude - assistedX * assistedX));
+    return {
+        assistedX,
+        std::copysign(assistedYMagnitude, y)};
+}
+
 } // namespace fearvr

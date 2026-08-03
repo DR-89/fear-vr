@@ -797,7 +797,7 @@ Write-Host 'Trigger feuern die jeweilige Pistole; mit zwei Pistolen schaltet X Z
 Write-Host 'Linker Grip rennt, linker Stick-Klick nutzt Medkit, rechter Grip benutzt.'
 Write-Host 'Rechter Stick-Klick greift in 3D im Nahkampf an.'
 Write-Host 'Die linke Hand seitlich neigen lehnt um die Ecke.'
-Write-Host 'F8 Stereo an/aus, F9 richtet nur 2D-Bildschirme neu aus, F10 Komfortbildschirm.'
+Write-Host 'F8 Stereo an/aus, F9 setzt VR-Ursprung/2D-Panel neu, F10 Komfortbildschirm.'
 Write-Host 'VR-Einstellungen stehen im ESC-Menue unter "VR SETTINGS".'
 
 if ($Wait) {

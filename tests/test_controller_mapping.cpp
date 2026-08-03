@@ -12,6 +12,21 @@ bool NearlyEqual(float left, float right) {
 } // namespace
 
 int main() {
+    assert(fearvr::IsLegacyVrPitchCommand(
+        fearvr::FEARVR_CMD_PITCH_POS));
+    assert(fearvr::IsLegacyVrPitchCommand(
+        fearvr::FEARVR_CMD_PITCH_NEG));
+    assert(fearvr::IsLegacyVrPitchCommand(
+        fearvr::FEARVR_CMD_PITCH_AXIS));
+    assert(fearvr::IsLegacyVrPitchCommand(
+        fearvr::FEARVR_CMD_PITCH_ACCEL));
+    assert(fearvr::IsLegacyVrMouseYawCommand(
+        fearvr::FEARVR_CMD_YAW_AXIS));
+    assert(!fearvr::IsLegacyVrMouseYawCommand(
+        fearvr::FEARVR_CMD_YAW_ACCEL));
+    assert(!fearvr::IsLegacyVrPitchCommand(
+        fearvr::FEARVR_CMD_YAW_POS));
+
     FearVrInputState input{};
     input.flags = FEARVR_IF_VALID | FEARVR_IF_FOCUSED;
     input.activeHands =

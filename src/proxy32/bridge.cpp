@@ -1425,7 +1425,7 @@ public:
         logger_.Write(
             "INFO", "translation_set",
             config_.translationEnabled
-                ? "Bounded HMD translation enabled from the VR menu."
+                ? "Collision-limited room-scale HMD translation enabled."
                 : "HMD translation disabled from the VR menu.");
     }
 
@@ -1499,10 +1499,11 @@ public:
 
     void RequestRecenter() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
+        IncrementRecenterGeneration();
         IncrementPanelRecenterGeneration();
         logger_.Write(
-            "INFO", "panel_recenter_requested",
-            "The in-game VR menu requested a new 2D panel anchor.");
+            "INFO", "vr_origin_recenter_requested",
+            "The in-game VR menu requested new world and panel anchors.");
     }
 
     BOOL StereoAvailable() const noexcept {
@@ -2021,18 +2022,19 @@ private:
             const bool recenterKeyDown =
                 (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
             if (recenterKeyDown && !recenterKeyWasDown_) {
+                IncrementRecenterGeneration();
                 const bool flatView =
                     menuActive_ || comfortModeEnabled_ ||
                     !config_.stereoEnabled;
                 if (flatView) {
                     IncrementPanelRecenterGeneration();
                     logger_.Write(
-                        "INFO", "panel_recenter_requested",
-                        "F9 requested a new 2D panel anchor.");
+                        "INFO", "vr_origin_recenter_requested",
+                        "F9 requested new world and panel anchors.");
                 } else {
                     logger_.Write(
-                        "INFO", "world_recenter_ignored",
-                        "F9 has no recenter function in the 3D world.");
+                        "INFO", "vr_origin_recenter_requested",
+                        "F9 requested a new world tracking origin.");
                 }
             }
             recenterKeyWasDown_ = recenterKeyDown;

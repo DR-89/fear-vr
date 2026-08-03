@@ -186,10 +186,15 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   bestehende Spielkamera komponiert. Ein 256 Einträge großer Host-Ring ordnet
   jeder Renderanforderung ihre OpenXR-Pose/FOV zu; der Compositor erhält
   zusammen mit dem importierten Bild exakt dessen Renderpose und kann korrekt
-  zeitwarpen.
+  zeitwarpen. Opt-in-Raumbewegung bleibt 1:1 bis zu einem 2-m-Sprungschutz,
+  wird einmal pro Bild gegen die Welt begrenzt und verschiebt den sichtbaren
+  Skelettwurzelknoten horizontal mit. F9 und das VR-Menü setzen Position, Yaw
+  sowie alle trackingabhängigen Hand-/Waffenfilter gemeinsam zurück.
 - **Bekannte Nachteile:** Der klassische D3D9-CPU-Transfer bleibt teuer.
-  Translation besitzt noch keine Weltkollision und bleibt deshalb
-  standardmäßig aus.
+  Retails eigentliches Spieler-HOBJECT und seine Kollisionskapsel bleiben am
+  Lokomotionsursprung: Ein Verschieben während `RenderCamera` beschädigte die
+  Sichtbarkeitslisten. Der Kamerastrahl verhindert Wanddurchtritt, ersetzt
+  aber keine vollständig mitlaufende Gameplay-Kapsel.
 - **Rückfallpfad:** Bei 250 ms ohne frische Pose wird Mono verwendet; die erste
   wieder gültige Pose wird neu zentriert. F8 stellt den originalen
   Kamera-Renderpfad wieder her.

@@ -287,21 +287,78 @@ inline RelativeEyePose TrackedPoseRelativeToRecenter(
 // LithTech-Achsen und Metern. Getrennt abrufbar, weil das physische Lehnen
 // ihn gegen die Weltgeometrie pruefen muss, bevor er auf die Augen kommt:
 // Ohne diese Pruefung schoebe ein Lehnen den Blickpunkt in die Wand hinein.
+// Artificial leaning remains deliberately short. Room-scale translation is
+// separate: it must preserve normal movement across a play area instead of
+// silently turning it into the old 25 cm lean gesture. The room-scale cap is
+// only a guard against a bad/discontinuous runtime pose; world collision is
+// applied by the game-client loader.
+inline constexpr float kPhysicalLeanMaxTranslationMeters = 0.25F;
+inline constexpr float kRoomScaleMaxTranslationMeters = 2.0F;
+inline constexpr float kMinimumEyeHeightMeters = 0.50F;
+inline constexpr float kMaximumEyeHeightMeters = 2.40F;
+inline constexpr float kMinimumHeadHeightAboveFloorMeters = 0.25F;
+inline constexpr float kMaximumHeadRiseMeters = 0.50F;
+
+inline bool IsPlausibleEyeHeightMeters(float heightMeters) noexcept {
+    return std::isfinite(heightMeters) &&
+           heightMeters >= kMinimumEyeHeightMeters &&
+           heightMeters <= kMaximumEyeHeightMeters;
+}
+
+// Zero selects automatic calibration. Explicit values are kept within a
+// broad seated-to-standing range so a corrupt INI cannot displace the camera.
+inline float SanitizeEyeHeightMeters(float heightMeters) noexcept {
+    if (!std::isfinite(heightMeters) || heightMeters <= 0.0F) {
+        return 0.0F;
+    }
+    return std::clamp(
+        heightMeters, kMinimumEyeHeightMeters, kMaximumEyeHeightMeters);
+}
+
+// Floor-relative OpenXR spaces report absolute HMD height. Convert that to a
+// delta from the calibrated neutral eye height, retaining floor clearance and
+// rejecting only implausible upward tracking jumps.
+inline float CalibratedVerticalOffsetMeters(
+    float currentHeightMeters, float eyeHeightMeters) noexcept {
+    if (!std::isfinite(currentHeightMeters) ||
+        !IsPlausibleEyeHeightMeters(eyeHeightMeters)) {
+        return 0.0F;
+    }
+    const float minimumOffset =
+        kMinimumHeadHeightAboveFloorMeters - eyeHeightMeters;
+    return std::clamp(
+        currentHeightMeters - eyeHeightMeters,
+        minimumOffset, kMaximumHeadRiseMeters);
+}
+
 inline TrackingVector HeadTranslationRelativeToRecenter(
     const FearVrPose& recenter, const FearVrPose& currentCenter,
-    float maximumTranslationMeters = 0.25F) noexcept {
+    float maximumTranslationMeters =
+        kPhysicalLeanMaxTranslationMeters,
+    bool overrideVerticalTranslation = false,
+    float verticalTranslationMeters = 0.0F) noexcept {
     if (!IsValidPose(recenter) || !IsValidPose(currentCenter) ||
         !std::isfinite(maximumTranslationMeters) ||
-        maximumTranslationMeters < 0.0F) {
+        maximumTranslationMeters < 0.0F ||
+        (overrideVerticalTranslation &&
+         !std::isfinite(verticalTranslationMeters))) {
         return {};
     }
-    const TrackingVector centerDelta = ClampMagnitude(
-        Rotate(
-            Conjugate(PoseRotation(recenter)),
-            {currentCenter.px - recenter.px,
-             currentCenter.py - recenter.py,
-             currentCenter.pz - recenter.pz}),
-        maximumTranslationMeters);
+    TrackingVector centerDelta = Rotate(
+        Conjugate(PoseRotation(recenter)),
+        {currentCenter.px - recenter.px,
+         currentCenter.py - recenter.py,
+         currentCenter.pz - recenter.pz});
+    if (overrideVerticalTranslation) {
+        const float calibratedVertical = verticalTranslationMeters;
+        centerDelta.y = 0.0F;
+        centerDelta = ClampMagnitude(
+            centerDelta, maximumTranslationMeters);
+        centerDelta.y = calibratedVertical;
+    } else {
+        centerDelta = ClampMagnitude(
+            centerDelta, maximumTranslationMeters);
+    }
     return OpenXrToLithTech(centerDelta);
 }
 
@@ -312,12 +369,17 @@ inline TrackingVector HeadTranslationRelativeToRecenter(
 inline RelativeEyePose EyePoseRelativeToRecenter(
     const FearVrPose& recenter, const FearVrPose& currentCenter,
     const FearVrPose& eye, bool translationEnabled,
-    float maximumTranslationMeters = 0.25F,
-    float translationScale = 1.0F) noexcept {
+    float maximumTranslationMeters =
+        kPhysicalLeanMaxTranslationMeters,
+    float translationScale = 1.0F,
+    bool overrideVerticalTranslation = false,
+    float verticalTranslationMeters = 0.0F) noexcept {
     if (!IsValidPose(recenter) || !IsValidPose(currentCenter) ||
         !IsValidPose(eye) || !std::isfinite(maximumTranslationMeters) ||
         maximumTranslationMeters < 0.0F ||
-        !std::isfinite(translationScale)) {
+        !std::isfinite(translationScale) ||
+        (overrideVerticalTranslation &&
+         !std::isfinite(verticalTranslationMeters))) {
         return {};
     }
     if (translationScale < 0.0F) {
@@ -334,12 +396,22 @@ inline RelativeEyePose EyePoseRelativeToRecenter(
          currentCenter.py - recenter.py,
          currentCenter.pz - recenter.pz});
     if (translationEnabled) {
-        centerDelta =
-            ClampMagnitude(centerDelta, maximumTranslationMeters);
-        centerDelta = {
-            centerDelta.x * translationScale,
-            centerDelta.y * translationScale,
-            centerDelta.z * translationScale};
+        if (overrideVerticalTranslation) {
+            centerDelta.y = 0.0F;
+            centerDelta =
+                ClampMagnitude(centerDelta, maximumTranslationMeters);
+            centerDelta = {
+                centerDelta.x * translationScale,
+                verticalTranslationMeters,
+                centerDelta.z * translationScale};
+        } else {
+            centerDelta =
+                ClampMagnitude(centerDelta, maximumTranslationMeters);
+            centerDelta = {
+                centerDelta.x * translationScale,
+                centerDelta.y * translationScale,
+                centerDelta.z * translationScale};
+        }
     } else {
         centerDelta = {};
     }

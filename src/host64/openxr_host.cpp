@@ -652,13 +652,53 @@ private:
                 "xrCreateSession");
         xrInput_->Attach(session_);
 
+        std::uint32_t referenceSpaceCount = 0;
+        CheckXr(instance_,
+                xrEnumerateReferenceSpaces(
+                    session_, 0, &referenceSpaceCount, nullptr),
+                "xrEnumerateReferenceSpaces(count)");
+        std::vector<XrReferenceSpaceType> referenceSpaces(
+            referenceSpaceCount);
+        CheckXr(instance_,
+                xrEnumerateReferenceSpaces(
+                    session_, referenceSpaceCount, &referenceSpaceCount,
+                    referenceSpaces.data()),
+                "xrEnumerateReferenceSpaces");
+        const auto supportsReferenceSpace =
+            [&referenceSpaces](XrReferenceSpaceType type) {
+                return std::find(
+                           referenceSpaces.begin(), referenceSpaces.end(),
+                           type) != referenceSpaces.end();
+            };
+        XrReferenceSpaceType selectedReferenceSpace =
+            XR_REFERENCE_SPACE_TYPE_LOCAL;
+        const char* selectedReferenceSpaceName = "LOCAL";
+        if (supportsReferenceSpace(XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR)) {
+            selectedReferenceSpace = XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR;
+            selectedReferenceSpaceName = "LOCAL_FLOOR";
+            appSpaceFloorRelative_ = true;
+        } else if (supportsReferenceSpace(XR_REFERENCE_SPACE_TYPE_STAGE)) {
+            selectedReferenceSpace = XR_REFERENCE_SPACE_TYPE_STAGE;
+            selectedReferenceSpaceName = "STAGE";
+            appSpaceFloorRelative_ = true;
+        } else {
+            appSpaceFloorRelative_ = false;
+        }
+
         XrReferenceSpaceCreateInfo spaceInfo{
             XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
-        spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+        spaceInfo.referenceSpaceType = selectedReferenceSpace;
         spaceInfo.poseInReferenceSpace.orientation.w = 1.0F;
         CheckXr(instance_,
                 xrCreateReferenceSpace(session_, &spaceInfo, &appSpace_),
-                "xrCreateReferenceSpace(LOCAL)");
+                "xrCreateReferenceSpace(app)");
+        std::ostringstream referenceSpaceMessage;
+        referenceSpaceMessage
+            << "type=" << selectedReferenceSpaceName
+            << " floorRelative="
+            << (appSpaceFloorRelative_ ? "true" : "false");
+        logger_.Write(
+            "INFO", "reference_space", referenceSpaceMessage.str());
         std::uint32_t blendModeCount = 0;
         CheckXr(instance_,
                 xrEnumerateEnvironmentBlendModes(
@@ -1069,6 +1109,9 @@ private:
                         static_cast<std::uint64_t>(
                             frameState.predictedDisplayTime);
                     request.flags = FEARVR_RF_VALID;
+                    if (appSpaceFloorRelative_) {
+                        request.flags |= FEARVR_RF_FLOOR_SPACE;
+                    }
                     for (std::uint32_t eye = 0;
                          eye < FEARVR_EYE_COUNT; ++eye) {
                         const XrPosef& pose = locatedViews_[eye].pose;
@@ -1575,6 +1618,7 @@ private:
     XrSystemId systemId_{XR_NULL_SYSTEM_ID};
     XrSession session_{XR_NULL_HANDLE};
     XrSpace appSpace_{XR_NULL_HANDLE};
+    bool appSpaceFloorRelative_{false};
     XrEnvironmentBlendMode blendMode_{XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
     DXGI_FORMAT swapchainFormat_{DXGI_FORMAT_UNKNOWN};
     ComPtr<IDXGIAdapter1> adapter_;

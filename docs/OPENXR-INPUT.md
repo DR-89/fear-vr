@@ -78,6 +78,11 @@ verworfen: Nach oben sehen darf die Geschwindigkeit nicht verringern, und ein
 geneigter Kopf darf keine Seitwärtsbewegung erzeugen. Gespeichert wird die
 Auswahl als `HeadRelativeMovement` in `fearvr.ini`.
 
+Nach der radialen Totzone haelt ein weich auslaufender Vorwaertskorridor
+kleine seitliche Daumenabweichungen auf der Vorwaertsachse. Bewusste
+Diagonalen und Seitwaertsbewegung bleiben unveraendert; diagonales Laufen wird
+nicht schneller als gerades Laufen.
+
 Die 22-Prozent-Totzone des Bewegungssticks ist radial. Sie verändert nur den
 Radius, nicht den Winkel des Stickvektors, und begrenzt volle Diagonalen auf
 Einheitslänge. Dadurch ziehen kleine diagonale Eingaben nicht mehr zu den
@@ -85,6 +90,22 @@ Hauptachsen und diagonales Laufen wird nicht schneller als gerades Laufen.
 Der Drehstick bleibt eine eindimensionale Retail-Drehachse mit eigener
 Totzone; Sprung und Ducken werten weiterhin den unveränderten vertikalen
 Stickweg ab 80 Prozent aus.
+
+### Raumskalige HMD-Translation (`HMD translation`, Standard aus)
+
+Mit `HMD translation: On` beziehungsweise `-Translation` wird die Bewegung
+des HMD relativ zum Recenter-Ursprung 1:1 auf Blickpunkt, Hände, Waffe,
+Mündung und Schussursprung übertragen. Normale Bewegung im Spielbereich wird
+nicht mehr auf den früheren 25-cm-Leanbereich gekürzt; lediglich ein 2-m-Limit
+verwirft unplausible Tracking-Sprünge. Derselbe Weltstrahl wie beim physischen
+Lehnen begrenzt den Versatz vor Wänden.
+
+Dieser Modus hat Vorrang vor `Physical lean`: `LeanScale` verstärkt
+Raumbewegung nicht. Das sichtbare Körpermodell folgt dem erlaubten
+horizontalen Versatz über seinen Skelettwurzelknoten. Retails Spielerobjekt
+und Kollisionskapsel bleiben am normalen Bewegungsursprung, weil ein Verschieben
+des HOBJECT während `RenderCamera` die Sichtbarkeitslisten des Motors
+beschädigen kann.
 
 ### Physisches Lehnen (`Physical lean`, Standard an)
 
@@ -94,9 +115,9 @@ einen Winkel, den `CPlayerCamera` als Rollen auf die Kamera legt
 Der Blickpunkt bleibt dabei exakt in der Spielerposition — um eine Ecke sehen
 kann man damit nicht, es kippt nur das Bild.
 
-Deshalb bewegt jetzt der physische Kopfversatz aus dem Headtracking den
-Blickpunkt mit. Das ist dieselbe Größe, die bisher nur mit `-Translation`
-verfügbar war, nur wird sie an der Weltgeometrie begrenzt: Ein Strahl von der
+Wenn die raumskalige HMD-Translation aus ist, bewegt der physische Kopfversatz
+aus dem Headtracking den Blickpunkt mit. Er bleibt auf 25 cm begrenzt und wird
+an der Weltgeometrie geprüft: Ein Strahl von der
 Spielerkameraposition entlang des gewünschten Versatzes misst die freie
 Strecke, und `src/common/lean_collision.h` macht daraus den Anteil, der übrig
 bleibt (12 Einheiten Sicherheitsabstand zur Fläche). Enger werden gilt sofort,
@@ -275,15 +296,19 @@ normale Schläge funktionieren dann weiterhin sofort, Kicks bleiben aus.
 
 Maus, Tastatur und vorhandenes Gamepad bleiben parallel nutzbar.
 
-### 2D-Panel-Recenter
+### VR-Origin-Recenter
 
-Die 3D-Welt besitzt bewusst keinen manuellen Headtracking-Recenter mehr. Ihre
-stabile Kamerabasis wird beim Betreten automatisch initialisiert. In Menüs,
-Ladebildern, Briefings und anderen 2D-Ansichten verankern F9, rechter
-Stick-Klick und `Recenter 2D panel` das raumfeste Panel neu an der aktuellen
-Blickrichtung. Derselbe Stickklick fordert in der 3D-Welt stattdessen Retails
-Sekundärangriff an; der aktuelle Bewegungszustand wählt normalen Schlag, Jump
-Kick oder Slide Kick.
+Die stabile Kamerabasis wird beim Betreten automatisch initialisiert. Der Host
+bevorzugt `LOCAL_FLOOR`, danach `STAGE` und nutzt `LOCAL` als kompatiblen
+Fallback. F9 und `Recenter VR origin` speichern die horizontale HMD-Position
+und den aktuellen Yaw als neuen Ursprung; Pitch, Roll und die getrennte
+Fußboden-/Augenhöhenkalibrierung bleiben physisch. Controllerkalibrierung,
+Waffengewicht, Rückstoß und Kollisionsfilter werden gleichzeitig auf diese
+Basis zurückgesetzt. In Menüs, Ladebildern, Briefings und anderen 2D-Ansichten
+wird zusätzlich das raumfeste Panel an der aktuellen Blickrichtung verankert.
+Rechter Stick-Klick rezentriert weiterhin nur ein sichtbares 2D-Panel; in der
+3D-Welt bleibt er Retails Sekundärangriff, damit keine Gameplay-Aktion verloren
+geht.
 
 ### Linkshänderbelegung
 
@@ -451,7 +476,7 @@ können weiterhin direkt in der INI gesetzt werden.
 2. **Movement & Comfort:** HMD translation, head bob, comfort screen,
    movement direction, smooth-turn speed, physical leaning and lean strength.
 3. **Controls:** handedness, controller vibration, ladder climbing and
-   Recenter 2D panel.
+   Recenter VR origin.
 4. **Weapons:** three nested pages keep the list bounded: Handling & appearance
    contains red aim guide, show arms and two-handed grip; Simulated weight
    contains its per-weapon profile controls; Recoil contains its independent
@@ -492,8 +517,11 @@ The panel has eight bounded tabs:
    plus pitch/yaw/roll correction.
    Each activation advances elbow components by 5 percent, hand translation
    by 0.5 cm, or hand rotation by 5 degrees, with safe-range wraparound.
-6. **Move:** HMD translation, head bob, physical lean/strength, turn speed and
-   hand climbing.
+6. **Move:** HMD translation, Body/Head movement direction, head bob, physical
+   lean/strength, turn speed, hand climbing, current eye-height mode and `Set
+   height from HMD`. The explicit floor-to-eye value persists as
+   `EyeHeightMeters`; activating the height row restores automatic per-session
+   calibration.
 7. **Melee:** master gesture switch and each individual strike/kick.
 8. **VR:** stereo HUD, FOV scale, handedness, haptics, weapon diagnostics and
    live stereo render scale (100/125/150/175/200 percent).

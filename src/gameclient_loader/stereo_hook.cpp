@@ -227,12 +227,16 @@ thread_local StereoRecoveryState g_stereoRecovery;
 struct HeadTrackingState {
     FearVrPose recenter{};
     FearVrPose currentCenter{};
+    float sessionEyeHeightMeters{0.0F};
+    float verticalTranslationMeters{0.0F};
     std::uint64_t lastFrameId{0};
     ULONGLONG lastFreshFrameTick{0};
     std::uint32_t recenterGeneration{0};
     LONG resetGeneration{0};
     bool centered{false};
     bool trackingLost{false};
+    bool floorSpace{false};
+    bool verticalTranslationOverride{false};
 };
 thread_local HeadTrackingState g_headTracking;
 volatile LONG g_firstHookCallLogged = 0;
@@ -301,7 +305,7 @@ constexpr std::size_t kDevMenuTabCount = 8;
 constexpr float kDevMenuDistanceMeters = 1.15F;
 constexpr float kDevMenuVerticalOffsetMeters = 0.08F;
 constexpr float kDevMenuWidthMeters = 0.64F;
-constexpr float kDevMenuHeightMeters = 0.60F;
+constexpr float kDevMenuHeightMeters = 0.66F;
 constexpr float kDevMenuHeaderMeters = 0.12F;
 constexpr float kDevMenuTitleMeters = 0.055F;
 constexpr float kDevMenuTabMeters = 0.055F;
@@ -320,7 +324,7 @@ constexpr std::array<const wchar_t*, kDevMenuTabCount> kDevMenuTabLabels{
     L"RECOIL", L"WEIGHT", L"COLLIDE", L"WEAPON", L"IK", L"MOVE",
     L"MELEE", L"VR"};
 constexpr std::array<std::size_t, kDevMenuTabCount> kDevMenuTabRowCounts{
-    5U, 6U, 7U, 3U, 7U, 6U, 5U, 6U};
+    5U, 6U, 7U, 3U, 7U, 9U, 5U, 6U};
 
 std::size_t DevMenuRowCount(DevMenuTab tab) noexcept {
     const std::size_t index = static_cast<std::size_t>(tab);
@@ -518,6 +522,9 @@ bool g_physicalLeanEnabled = true;
 // beugen, um hinter einer Deckung hervorzusehen. Der gemessene Versatz bleibt
 // vorher auf 25 cm begrenzt, die Wirkung damit auf einen halben Meter.
 int g_leanScalePercent = 200;
+// Zero keeps a per-session automatic neutral height. A positive value is an
+// explicit floor-to-eye height captured by the floating developer menu.
+float g_configuredEyeHeightMeters = 0.0F;
 LeanCollisionState g_leanCollision;
 float g_leanTranslationScale = 1.0F;
 // Der Versatz, um den der Blickpunkt gegenueber dem Spielerkoerper steht.
@@ -1810,6 +1817,8 @@ void InitializeVrSettings() noexcept {
     g_physicalLeanEnabled = ReadVrSetting(L"PhysicalLean", 1) != 0;
     g_leanScalePercent =
         std::clamp(ReadVrSetting(L"LeanScale", 200), 100, 400);
+    g_configuredEyeHeightMeters = SanitizeEyeHeightMeters(
+        ReadVrFloat(L"VR", L"EyeHeightMeters", 0.0F));
     g_leftHandedBindings =
         ReadVrSetting(L"LeftHanded", 0) != 0;
     g_headRelativeMovement =
@@ -1993,6 +2002,8 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(
         L"PhysicalLean", g_physicalLeanEnabled ? 1 : 0);
     WriteVrSetting(L"LeanScale", g_leanScalePercent);
+    WriteVrFloat(
+        L"VR", L"EyeHeightMeters", g_configuredEyeHeightMeters);
     WriteVrSetting(
         L"LeftHanded", g_leftHandedBindings ? 1 : 0);
     WriteVrSetting(
@@ -2572,13 +2583,15 @@ void ResetVrTrackingBasis() noexcept {
     InterlockedIncrement(&g_trackingResetGeneration);
 }
 
-void RequestVrPanelRecenter() noexcept {
+void RequestVrOriginRecenter() noexcept {
     if (g_requestRecenter != nullptr) {
         __try {
             g_requestRecenter();
+            return;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
+    ResetVrTrackingBasis();
 }
 
 void ResetArmIkBendMemory() noexcept {
@@ -2647,8 +2660,7 @@ void ApplyVrDefaults() noexcept {
     g_climbOnLadder = false;
     g_climbAxis = 0.0F;
     g_climbWasGripping = false;
-    ResetVrTrackingBasis();
-    RequestVrPanelRecenter();
+    RequestVrOriginRecenter();
 }
 
 bool BuildRetailVrMenuControls(void* menu) noexcept {
@@ -2952,7 +2964,7 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
     g_vrMenuResetWeaponProfile = AddRetailVrMenuControl(
         L"Reset selected weapon profile", kVrMenuResetWeaponProfile);
     g_vrMenuRecenter = AddRetailVrMenuControl(
-        L"Recenter 2D panel", kVrMenuRecenter);
+        L"Recenter VR origin", kVrMenuRecenter);
     g_vrMenuDefaults = AddRetailVrMenuControl(
         L"Reset VR defaults", kVrMenuDefaults);
     g_vrMenuBack = AddRetailVrMenuControl(
@@ -3354,7 +3366,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         break;
     }
     case kVrMenuRecenter:
-        RequestVrPanelRecenter();
+        RequestVrOriginRecenter();
         selection = g_vrMenuRecenter;
         break;
     case kVrMenuDefaults:
@@ -3845,6 +3857,21 @@ bool RotationToPitchYawRoll(
            std::isfinite(roll);
 }
 
+bool ResolveYawOnlyRotation(
+    const LTRotation& rotation,
+    LTRotation& yawOnlyRotation) noexcept {
+    float ignoredPitch = 0.0F;
+    float yaw = 0.0F;
+    float ignoredRoll = 0.0F;
+    if (!RotationToPitchYawRoll(
+            rotation, ignoredPitch, yaw, ignoredRoll)) {
+        return false;
+    }
+    yawOnlyRotation = LTRotation(0.0F, yaw, 0.0F);
+    yawOnlyRotation.Normalize();
+    return RotationIsFiniteAndUsable(yawOnlyRotation);
+}
+
 bool IsRetailCinematicCamera() noexcept {
     unsigned char* const camera = ResolveRetailPlayerCamera();
     if (camera == nullptr) {
@@ -4133,31 +4160,24 @@ void* ResolveRetailPickupDetector() noexcept {
 // Ob die Kamera fuer einen Retail-Aufruf ueberhaupt umgesetzt werden darf.
 // Waehrend Zwischensequenzen und im Komfortpanel gehoert sie der Engine —
 // dieselbe Grenze, an der auch der Taschenlampenpfad zurueckweicht.
+bool IsNativeVrWorldActive() noexcept {
+    if (!g_hookInstalled || g_disableStereoRender ||
+        g_isStereoEnabled == nullptr ||
+        g_isHostConnected == nullptr) {
+        return false;
+    }
+    __try {
+        return g_isStereoEnabled() != FALSE &&
+               g_isHostConnected() != FALSE &&
+               (g_isFlatPanelActive == nullptr ||
+                g_isFlatPanelActive() == FALSE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 bool IsInteractionOverrideAllowed() noexcept {
-    if (!g_hookInstalled || g_disableInteractionHooks) {
-        return false;
-    }
-    bool stereoEnabled = false;
-    if (g_isStereoEnabled != nullptr) {
-        __try {
-            stereoEnabled = g_isStereoEnabled() != FALSE;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return false;
-        }
-    }
-    if (!stereoEnabled) {
-        return false;
-    }
-    if (g_isFlatPanelActive != nullptr) {
-        __try {
-            if (g_isFlatPanelActive() != FALSE) {
-                return false;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return false;
-        }
-    }
-    return true;
+    return !g_disableInteractionHooks && IsNativeVrWorldActive();
 }
 
 // CheckForIntersect liest Position und Drehung der Kamera ausschliesslich in
@@ -4635,27 +4655,59 @@ void FormatDevMenuRow(
             break;
         case 1:
             _snwprintf_s(
+                text, textCount, _TRUNCATE, L"MOVE DIRECTION: %s",
+                g_headRelativeMovement ? L"HEAD" : L"BODY");
+            break;
+        case 2:
+            _snwprintf_s(
                 text, textCount, _TRUNCATE, L"HEAD BOB: %s",
                 g_forceHeadBobDisabled && !g_headBobEnabled
                     ? L"LOCKED OFF" : onOff[g_headBobEnabled ? 1 : 0]);
             break;
-        case 2:
+        case 3:
             _snwprintf_s(text, textCount, _TRUNCATE, L"PHYSICAL LEAN: %s",
                          onOff[g_physicalLeanEnabled ? 1 : 0]);
             break;
-        case 3:
+        case 4:
             _snwprintf_s(text, textCount, _TRUNCATE,
                          L"LEAN STRENGTH: %d%%", g_leanScalePercent);
             break;
-        case 4:
+        case 5:
             _snwprintf_s(
                 text, textCount, _TRUNCATE, L"TURN SPEED: %s",
                 turnSpeeds[std::clamp(g_turnSpeedPreset, 0, 2)]);
             break;
-        case 5:
+        case 6:
             _snwprintf_s(
                 text, textCount, _TRUNCATE, L"CLIMBING: %s",
                 g_climbingEnabled ? L"HANDS" : L"CLASSIC");
+            break;
+        case 7:
+            if (!g_headTracking.floorSpace) {
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HEIGHT MODE: LOCAL FALLBACK");
+            } else if (g_configuredEyeHeightMeters > 0.0F) {
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HEIGHT: SET %.0f CM (RESET)",
+                    static_cast<double>(
+                        g_configuredEyeHeightMeters * 100.0F));
+            } else if (IsPlausibleEyeHeightMeters(
+                           g_headTracking.sessionEyeHeightMeters)) {
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HEIGHT: AUTO %.0f CM",
+                    static_cast<double>(
+                        g_headTracking.sessionEyeHeightMeters * 100.0F));
+            } else {
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"HEIGHT: AUTO");
+            }
+            break;
+        case 8:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"SET HEIGHT FROM HMD");
             break;
         }
         break;
@@ -5047,9 +5099,30 @@ bool PrepareTrackedEyePoses(
         return false;
     }
     g_headTracking.currentCenter = currentCenter;
+    g_headTracking.floorSpace =
+        (request.flags & FEARVR_RF_FLOOR_SPACE) != 0;
+    g_headTracking.verticalTranslationOverride = false;
+    g_headTracking.verticalTranslationMeters = 0.0F;
+    if (g_headTracking.floorSpace) {
+        if (!IsPlausibleEyeHeightMeters(
+                g_headTracking.sessionEyeHeightMeters) &&
+            IsPlausibleEyeHeightMeters(currentCenter.py)) {
+            g_headTracking.sessionEyeHeightMeters = currentCenter.py;
+        }
+        const float activeEyeHeight =
+            g_configuredEyeHeightMeters > 0.0F
+            ? g_configuredEyeHeightMeters
+            : g_headTracking.sessionEyeHeightMeters;
+        if (IsPlausibleEyeHeightMeters(activeEyeHeight)) {
+            g_headTracking.verticalTranslationOverride = true;
+            g_headTracking.verticalTranslationMeters =
+                CalibratedVerticalOffsetMeters(
+                    currentCenter.py, activeEyeHeight);
+        }
+    }
 
     const ULONGLONG now = GetTickCount64();
-    const LONG resetGeneration = InterlockedCompareExchange(
+    LONG resetGeneration = InterlockedCompareExchange(
         &g_trackingResetGeneration, 0, 0);
     if (request.frameId == g_headTracking.lastFrameId) {
         if (g_headTracking.lastFreshFrameTick != 0 &&
@@ -5066,11 +5139,22 @@ bool PrepareTrackedEyePoses(
     } else {
         g_headTracking.lastFrameId = request.frameId;
         g_headTracking.lastFreshFrameTick = now;
+        const bool originRecenterRequested =
+            g_headTracking.centered &&
+            g_headTracking.recenterGeneration !=
+                request.recenterGeneration;
+        // A bridge origin recenter invalidates controller and weapon filters
+        // that share the old tracking basis. Advance the local reset once,
+        // before recording the new basis, so presentation is rebuilt together
+        // without causing another recenter on the following frame.
+        if (originRecenterRequested) {
+            resetGeneration =
+                InterlockedIncrement(&g_trackingResetGeneration);
+        }
         const bool recenter =
             !g_headTracking.centered ||
             g_headTracking.trackingLost ||
-            g_headTracking.recenterGeneration !=
-                request.recenterGeneration ||
+            originRecenterRequested ||
             g_headTracking.resetGeneration != resetGeneration;
         if (recenter) {
             const FearVrPose previousRecenter =
@@ -5127,16 +5211,22 @@ bool PrepareTrackedEyePoses(
         return false;
     }
 
-    // Physisches Lehnen braucht denselben Kopfversatz wie die opt-in
-    // Translation — nur wird er gleich darauf an der Weltgeometrie
-    // begrenzt, statt ungebremst durch Waende zu gehen.
+    // Both modes use the same relative HMD center, but room-scale keeps a
+    // normal play-area range while artificial lean retains its short cap.
+    const bool roomScaleTranslation =
+        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0;
     const bool translationEnabled =
-        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0 ||
-        g_physicalLeanEnabled;
+        roomScaleTranslation || g_physicalLeanEnabled;
+    const float maximumTranslationMeters = roomScaleTranslation
+        ? kRoomScaleMaxTranslationMeters
+        : kPhysicalLeanMaxTranslationMeters;
     for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
         eyePose[eye] = EyePoseRelativeToRecenter(
             g_headTracking.recenter, currentCenter,
-            request.eye[eye].pose, translationEnabled);
+            request.eye[eye].pose, translationEnabled,
+            maximumTranslationMeters, 1.0F,
+            g_headTracking.verticalTranslationOverride,
+            g_headTracking.verticalTranslationMeters);
         if (!eyePose[eye].valid) {
             return false;
         }
@@ -5181,8 +5271,9 @@ std::uint64_t MonotonicNanoseconds() noexcept {
 // betraegt wenige Zentimeter und wuerde nur einen zweiten Strahl kosten.
 float UpdateLeanTranslationScale(
     const LTVector& cameraPosition,
-    const LTVector& worldOffset) noexcept {
-    if (!g_physicalLeanEnabled || g_client == nullptr) {
+    const LTVector& worldOffset,
+    bool collisionEnabled) noexcept {
+    if (!collisionEnabled || g_client == nullptr) {
         ResetLeanCollision(g_leanCollision);
         return 1.0F;
     }
@@ -5595,16 +5686,30 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     } else {
         ResolveSlideKickViewBase(
             originalTransform.m_rRot, viewBaseRotation);
+        // Retail's camera stores persistent mouse/gamepad pitch underneath the
+        // render object. In VR that rotation would be multiplied by the HMD
+        // and cannot be removed by an HMD recenter. Gameplay therefore keeps
+        // only Retail yaw (body/smooth turn); physical pitch and roll belong
+        // exclusively to the headset.
+        LTRotation yawOnlyRotation;
+        if (ResolveYawOnlyRotation(
+                viewBaseRotation, yawOnlyRotation)) {
+            viewBaseRotation = yawOnlyRotation;
+        }
     }
     const LTRigidTransform stableCameraBase(
         visualBasePosition, viewBaseRotation);
     LTVector bodyPresentationWorldOffset(
         0.0F, 0.0F, 0.0F);
 
-    // Physisches Lehnen: Der gemeinsame Kopfversatz beider Augen wird an der
-    // Welt begrenzt. Beide Augenposen enthalten ihn als denselben Summanden,
-    // deshalb genuegt es, den gesperrten Anteil hier wieder abzuziehen.
-    g_stereoStep = "limit_physical_lean";
+    // The common center delta is world-limited. Both eye poses contain it as
+    // the same term, so the blocked part can be removed from each eye here.
+    const bool roomScaleTranslation =
+        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0;
+    const float maximumTranslationMeters = roomScaleTranslation
+        ? kRoomScaleMaxTranslationMeters
+        : kPhysicalLeanMaxTranslationMeters;
+    g_stereoStep = "limit_head_translation";
     if (cutsceneCamera) {
         // A scripted camera already owns the viewer's world-space position.
         // Keeping the common HMD center translation here moves the eyes away
@@ -5614,20 +5719,66 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         const TrackingVector rawDelta =
             HeadTranslationRelativeToRecenter(
                 g_headTracking.recenter,
-                g_headTracking.currentCenter);
+                g_headTracking.currentCenter,
+                maximumTranslationMeters,
+                g_headTracking.verticalTranslationOverride,
+                g_headTracking.verticalTranslationMeters);
         for (RelativeEyePose& tracked : trackedEye) {
             tracked.positionMeters.x -= rawDelta.x * cutsceneBlend;
             tracked.positionMeters.y -= rawDelta.y * cutsceneBlend;
             tracked.positionMeters.z -= rawDelta.z * cutsceneBlend;
         }
         g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
+    } else if (roomScaleTranslation) {
+        // Room-scale is direct physical movement: keep it 1:1 and do not
+        // apply the artificial lean-strength multiplier. The render body
+        // follows the permitted horizontal projection while the world ray
+        // prevents the camera from crossing nearby solid geometry.
+        const TrackingVector rawDelta =
+            HeadTranslationRelativeToRecenter(
+                g_headTracking.recenter,
+                g_headTracking.currentCenter,
+                kRoomScaleMaxTranslationMeters,
+                g_headTracking.verticalTranslationOverride,
+                g_headTracking.verticalTranslationMeters);
+        const LTVector rawUnits(
+            rawDelta.x * kGameUnitsPerMeter,
+            rawDelta.y * kGameUnitsPerMeter,
+            rawDelta.z * kGameUnitsPerMeter);
+        const LTVector horizontalUnits(
+            rawUnits.x, 0.0F, rawUnits.z);
+        const LTVector worldOffset =
+            viewBaseRotation.RotateVector(horizontalUnits);
+        g_leanTranslationScale = UpdateLeanTranslationScale(
+            originalTransform.m_vPos, worldOffset, true);
+        g_leanViewOffsetUnits = LTVector(
+            rawUnits.x * g_leanTranslationScale,
+            rawUnits.y,
+            rawUnits.z * g_leanTranslationScale);
+        bodyPresentationWorldOffset =
+            viewBaseRotation.RotateVector(
+                LTVector(
+                    g_leanViewOffsetUnits.x, 0.0F,
+                    g_leanViewOffsetUnits.z));
+
+        // The prepared eye poses contain the unblocked center delta. Replace
+        // only that shared term, preserving per-eye IPD and full HMD rotation.
+        for (RelativeEyePose& tracked : trackedEye) {
+            tracked.positionMeters.x -=
+                rawDelta.x * (1.0F - g_leanTranslationScale);
+            tracked.positionMeters.z -=
+                rawDelta.z * (1.0F - g_leanTranslationScale);
+        }
     } else if (g_physicalLeanEnabled) {
         // `rawDelta` steckt so in den Augenposen und ist deshalb die Groesse,
         // die unten wieder herausgerechnet wird. Gewollt ist dagegen der
         // verstaerkte Versatz fuer Blickpunkt, Haende und Waffe.
         const TrackingVector rawDelta =
             HeadTranslationRelativeToRecenter(
-                g_headTracking.recenter, g_headTracking.currentCenter);
+                g_headTracking.recenter, g_headTracking.currentCenter,
+                kPhysicalLeanMaxTranslationMeters,
+                g_headTracking.verticalTranslationOverride,
+                g_headTracking.verticalTranslationMeters);
         const float leanScale =
             static_cast<float>(std::clamp(g_leanScalePercent, 100, 400)) *
             0.01F;
@@ -5644,14 +5795,16 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             remaining.x * kGameUnitsPerMeter,
             remaining.y * kGameUnitsPerMeter,
             remaining.z * kGameUnitsPerMeter);
+        const LTVector horizontalUnits(
+            remainingUnits.x, 0.0F, remainingUnits.z);
         const LTVector worldOffset =
-            viewBaseRotation.RotateVector(remainingUnits);
+            viewBaseRotation.RotateVector(horizontalUnits);
         g_leanTranslationScale = UpdateLeanTranslationScale(
-            originalTransform.m_vPos, worldOffset);
+            originalTransform.m_vPos, worldOffset, true);
 
         g_leanViewOffsetUnits = LTVector(
             remaining.x * g_leanTranslationScale * kGameUnitsPerMeter,
-            remaining.y * g_leanTranslationScale * kGameUnitsPerMeter,
+            remaining.y * kGameUnitsPerMeter,
             remaining.z * g_leanTranslationScale * kGameUnitsPerMeter);
         bodyPresentationWorldOffset =
             viewBaseRotation.RotateVector(
@@ -5666,27 +5819,14 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             tracked.positionMeters.x -=
                 rawDelta.x - remaining.x * g_leanTranslationScale;
             tracked.positionMeters.y -=
-                rawDelta.y - remaining.y * g_leanTranslationScale;
+                rawDelta.y - remaining.y;
             tracked.positionMeters.z -=
                 rawDelta.z - remaining.z * g_leanTranslationScale;
         }
-    } else if (
-        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0) {
-        const TrackingVector rawDelta =
-            HeadTranslationRelativeToRecenter(
-                g_headTracking.recenter,
-                g_headTracking.currentCenter);
-        g_leanViewOffsetUnits = LTVector(
-            rawDelta.x * kGameUnitsPerMeter,
-            rawDelta.y * kGameUnitsPerMeter,
-            rawDelta.z * kGameUnitsPerMeter);
-        bodyPresentationWorldOffset =
-            viewBaseRotation.RotateVector(
-                LTVector(
-                    g_leanViewOffsetUnits.x, 0.0F,
-                    g_leanViewOffsetUnits.z));
     } else {
         g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
+        ResetLeanCollision(g_leanCollision);
+        g_leanTranslationScale = 1.0F;
     }
     RebaseCutsceneWeaponPresentation(stableCameraBase);
     StageBodyPresentation(
@@ -7031,7 +7171,19 @@ float __fastcall HookRetailGetBindingValue(
     const float original = g_retailGetBindingValue(
         bindManager, binding, returnDefaultOnDisabled);
     InjectSemanticCommandBits(bindManager);
-    if (binding == nullptr || DevMenuCapturesControllerInput()) {
+    if (binding == nullptr) {
+        return original;
+    }
+    // The default mouse bindings feed COMMAND_ID_PITCH/YAW directly into
+    // CPlayerCamera's persistent local rotation. Suppress only those legacy
+    // look paths while the native 3D world is actually active. Flat menus,
+    // host loss, F8 fallback and -NoStereo retain normal mouse control.
+    if ((IsLegacyVrPitchCommand(binding->command) ||
+         IsLegacyVrMouseYawCommand(binding->command)) &&
+        IsNativeVrWorldActive()) {
+        return 0.0F;
+    }
+    if (DevMenuCapturesControllerInput()) {
         return original;
     }
     // Menu is handled once on the left menu-button edge through
@@ -7315,6 +7467,17 @@ LTVector ResolveTrackedHandBasePosition(
                     (desiredPosition - cameraTransform.m_vPos) * blend;
             }
             return resolvedPosition;
+        }
+        // Keep tracked hands, weapon sockets and firing presentation on the
+        // same yaw-only gameplay basis as the stereo eyes. Otherwise an old
+        // Retail mouse pitch could disappear from the view yet remain baked
+        // into the controller/weapon transforms until another game update.
+        LTRotation yawOnlyRotation;
+        if (ResolveYawOnlyRotation(
+                cameraTransform.m_rRot, yawOnlyRotation) ||
+            ResolveYawOnlyRotation(
+                retailBaseRotation, yawOnlyRotation)) {
+            resolvedBaseRotation = yawOnlyRotation;
         }
         const bool ducking =
             g_retailMovement.available &&
@@ -9810,10 +9973,10 @@ void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
         if (!g_bodyPresentationNodeControl.installed) {
             HMODELNODE presentationNode = INVALID_MODEL_NODE;
             if ((model->GetNode(
-                     playerBody, "translation",
+                     playerBody, "null2",
                      presentationNode) == LT_OK ||
                  model->GetNode(
-                     playerBody, "null2",
+                     playerBody, "translation",
                      presentationNode) == LT_OK) &&
                 presentationNode != INVALID_MODEL_NODE &&
                 model->AddNodeControlFn(
@@ -10436,6 +10599,10 @@ void PollControllerInput() noexcept {
     if (g_leftHandedBindings) {
         MirrorInputHandedness(input);
     }
+    const InputVector2 assistedMovement = ApplyForwardAxisAssist(
+        input.moveX, input.moveY);
+    input.moveX = assistedMovement.x;
+    input.moveY = assistedMovement.y;
     // Retail interprets its axes in player-body space, while VR users can
     // freely turn their head without rotating that body. Convert only the
     // locomotion stick into the current horizontal HMD frame. If tracking is
@@ -11013,29 +11180,73 @@ void ActivateFloatingDevMenuRow(
                 !QueryBooleanOption(g_isTranslationEnabled, false));
             break;
         case 1:
+            g_headRelativeMovement = !g_headRelativeMovement;
+            Report(
+                "INFO", "vr_movement_direction_changed",
+                g_headRelativeMovement
+                    ? "Forward movement follows horizontal HMD direction."
+                    : "Forward movement follows the Retail player body.");
+            break;
+        case 2:
             if (g_headBobEnabled || !g_forceHeadBobDisabled) {
                 ApplyHeadBobEnabled(!g_headBobEnabled);
             }
             break;
-        case 2:
+        case 3:
             g_physicalLeanEnabled = !g_physicalLeanEnabled;
             ResetLeanCollision(g_leanCollision);
             g_leanTranslationScale = 1.0F;
             break;
-        case 3:
+        case 4:
             g_leanScalePercent = kLeanScalePresets[NextVrPresetIndex(
                 g_leanScalePercent, kLeanScalePresets)];
             break;
-        case 4:
+        case 5:
             g_turnSpeedPreset = (g_turnSpeedPreset + 1) % 3;
             break;
-        case 5:
+        case 6:
             g_climbingEnabled = !g_climbingEnabled;
             ResetClimbGrip(g_climbGrip);
             g_climbActive = false;
             g_climbOnLadder = false;
             g_climbAxis = 0.0F;
             g_climbWasGripping = false;
+            break;
+        case 7:
+            g_configuredEyeHeightMeters = 0.0F;
+            if (g_headTracking.floorSpace &&
+                IsPlausibleEyeHeightMeters(
+                    g_headTracking.currentCenter.py)) {
+                g_headTracking.sessionEyeHeightMeters =
+                    g_headTracking.currentCenter.py;
+            }
+            Report(
+                "INFO", "vr_height_auto",
+                "Eye height returned to automatic session calibration.");
+            break;
+        case 8:
+            if (g_headTracking.floorSpace &&
+                IsPlausibleEyeHeightMeters(
+                    g_headTracking.currentCenter.py)) {
+                g_configuredEyeHeightMeters =
+                    SanitizeEyeHeightMeters(
+                        g_headTracking.currentCenter.py);
+                g_headTracking.sessionEyeHeightMeters =
+                    g_configuredEyeHeightMeters;
+                char message[128]{};
+                std::snprintf(
+                    message, sizeof(message),
+                    "Standing eye height set from HMD: %.0f cm.",
+                    static_cast<double>(
+                        g_configuredEyeHeightMeters * 100.0F));
+                Report("INFO", "vr_height_set", message);
+            } else {
+                ResetVrTrackingBasis();
+                Report(
+                    "WARN", "vr_height_floor_unavailable",
+                    "The runtime has no floor-relative reference space; "
+                    "the current local origin was recentered instead.");
+            }
             break;
         }
         break;

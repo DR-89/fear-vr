@@ -19,7 +19,7 @@ F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 > hiding only the arms by default, and the
 > ESC menu includes a native VR settings page. The classic D3D9 path still
 > uses a flagged CPU compatibility fallback; translation remains opt-in
-> without world collision. Details: `docs/TESTING.md`.
+> with view collision and visible-body alignment. Details: `docs/TESTING.md`.
 
 ## Demo
 
@@ -215,10 +215,14 @@ something is built but not yet verified in-game, it's noted.
   automatically after loading; F8 toggles at any time.
 - **Relative headtracking.** HMD rotation rotates the game camera relative
   to the neutral horizontal direction; physical pitch and roll are always
-  preserved. The 3D world has no manual recenter; its stable camera basis is
-  initialized automatically.
-- **Optional HMD translation** up to 25 cm (`-Translation`). Without world
-  collision, deliberately opt-in.
+  preserved. F9 or `Recenter VR origin` resets horizontal position and yaw;
+  floor-relative eye height remains independently calibrated.
+- **Optional room-scale HMD translation** (`-Translation`). Normal physical
+  movement is applied 1:1, collision-limited against world geometry and
+  guarded against tracking jumps beyond 2 m. The visible body follows the
+  permitted horizontal offset; Retail's gameplay collision capsule remains at
+  the locomotion origin. The host prefers OpenXR `LOCAL_FLOOR`, falls back to
+  `STAGE` and then `LOCAL`, and never lets a wall hit scale vertical crouching.
 - **Stereo HUD.** Ammo, health and hints are overlaid into both eyes instead
   of flat over the left image. The HUD is evenly compressed toward the screen
   center (5/4) so edge elements stay within the comfortable field of view.
@@ -226,7 +230,7 @@ something is built but not yet verified in-game, it's noted.
   the mission briefing appear as a world-locked 2.4 × 1.8 m panel at 2 m
   distance. Detection is based on the retail game state
   `CInterfaceMgr::m_eGameState`, not pixel heuristics. Right stick click, F9
-  and `Recenter 2D panel` re-anchor the panel to the current gaze direction.
+  and `Recenter VR origin` re-anchor the panel to the current gaze direction.
 - **Comfort screen (F10).** World-locked rendering for camera shakes and
   cutscenes, so forced camera movement doesn't pull at the head.
 - **Quiet camera.** Weapon bob and camera recoil are disabled; head bob is off
@@ -534,8 +538,10 @@ Bindings: left stick moves, left grip sprints — or, with that hand placed on
 the weapon, holds it as a second hand; left stick click uses a medkit.
 Movement is body-relative by default, so looking around does not steer a held
 movement direction. `Move direction: Head` opts into steering forward from
-the HMD's current horizontal facing direction. The locomotion
-stick uses a circular deadzone that preserves diagonal direction and speed.
+the HMD's current horizontal facing direction. The locomotion stick uses a
+circular deadzone plus a smoothly released forward corridor: small sideways
+thumb drift stays forward, while deliberate diagonals preserve direction and
+speed.
 Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click performs a melee attack in the 3D world and re-anchors the panel in 2D.
 A switches weapons, B reloads (short press) or
@@ -558,8 +564,8 @@ switches immediately between the original Retail material and the VR arm mask.
 The M5 launch enables the confirmed stereo HUD by default and closes SteamVR's
 delayed F.E.A.R. Desktop Theater automatically. Options:
 
-- `-Translation`: limited HMD translation up to 25 cm, without world
-  collision;
+- `-Translation`: 1:1 room-scale HMD translation with world collision and a
+  2 m tracking-jump guard;
 - Head bob is off by default; `HeadBob=1` in `fearvr.ini` enables only the
   camera movement while the weapon stays steady for stable aiming;
 - `-NoHeadBob`: forces head bob off, even if the INI enables it;
@@ -568,7 +574,8 @@ delayed F.E.A.R. Desktop Theater automatically. Options:
 Keys in-game:
 
 - F8: toggle native stereo world rendering on/off;
-- F9: re-anchor menus and other 2D panels; no function in the 3D world;
+- F9: recenter the 3D tracking origin; in flat views it also re-anchors the
+  menu or 2D panel;
 - F10: toggle world-locked comfort screen for camera shakes and cutscenes;
 - F11: developer diagnostic that isolates player body pieces one by one.
 
@@ -584,7 +591,12 @@ settings.
 For faster testing without pausing, hold both grips and press B during gameplay
 to open the world-space live-tuning panel. The right-controller ray selects a
 tab or row, trigger or A confirms/changes it, right-stick left/right switches
-tabs, right-stick up/down selects rows, and B closes it.
+tabs, right-stick up/down selects rows, and B closes it. The Move tab shows the
+movement direction and active eye height. Use `MOVE DIRECTION: BODY` to look
+around without steering. Stand or sit in the intended neutral posture and
+choose `SET HEIGHT FROM HMD`; select the height row to return to automatic
+session calibration. The explicit value persists as `EyeHeightMeters` in
+`fearvr.ini`.
 
 ## Uninstall
 
@@ -629,8 +641,10 @@ it sees SteamVR running.
   reads a few kilobytes one frame late instead of a full frame. That removed
   one of three readbacks and all per-pixel CPU work. `-fearvr-no-gpu-hud`
   forces the old CPU compositor back.
-- HMD translation has no world collision and therefore remains opt-in
-  (`-Translation`).
+- Room-scale HMD translation is collision-limited and remains opt-in
+  (`-Translation`). Retail's gameplay collision capsule does not physically
+  follow room movement; the visible body does, and the view ray prevents
+  crossing nearby solid geometry.
 - The version-dependent hooks verify byte signatures, image size and timestamp
   of the **F.E.A.R. 1.08** Public Tools modules. On a mismatch the affected
   hook stays disabled and the game continues flat. `FEAR.exe` itself is only

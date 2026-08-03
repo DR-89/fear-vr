@@ -398,12 +398,13 @@ if ($Milestone -ne 'M2') {
     }
     if ($Milestone -in @('M4', 'M5')) {
         Write-Host (
-            "$milestoneLabel`: HMD-Rotation ist aktiv. F9 richtet nur Menues und " +
-            '2D-Bildschirme neu aus; F8 schaltet jederzeit zurück auf mono.'
+            "$milestoneLabel`: HMD-Rotation ist aktiv. F9 setzt den VR-Ursprung " +
+            'neu und richtet in flachen Ansichten auch das 2D-Panel aus; F8 ' +
+            'schaltet jederzeit zurück auf mono.'
         )
         Write-Host (
             $(if ($Translation) {
-                'Begrenzte HMD-Translation ist aktiv (maximal 25 cm).'
+                'Raumskalige HMD-Translation ist 1:1 und kollisionsbegrenzt aktiv.'
             } else {
                 'HMD-Translation ist deaktiviert; mit -Translation opt-in aktivieren.'
             })

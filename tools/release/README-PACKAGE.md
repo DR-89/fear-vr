@@ -130,6 +130,14 @@ panel. Its Collide tab enables per-weapon world collision and adjusts the
 equipped weapon's collision-box length, width, height, and forward offset.
 The visible wireframe is green when clear and red while obstructed. See
 `docs\WEAPON_COLLISION.md` for profile and configuration details.
+The Move tab also shows the active eye height. Stand or sit in the intended
+neutral posture and select **SET HEIGHT FROM HMD**; select the height row to
+return to automatic session calibration. Floor-relative height is kept
+separate from F9 horizontal/yaw recentering and from wall collision.
+Set **MOVE DIRECTION: BODY** to look around without changing a held movement
+direction. **HEAD** remains available as an explicit steering preference. A
+small forward-axis corridor filters lateral thumb drift without removing
+deliberate diagonal movement.
 
 A Steam copy needs the Steam client running, because F.E.A.R. officially
 starts through `steam.exe -applaunch 21090`. GOG and disc copies do not need
@@ -160,7 +168,8 @@ SteamVR itself does not have to run when using Virtual Desktop.
 | sprint forward, crouch physically or with stick, then thrust | slide kick |
 | grab on a ladder, pull down | climb up (set *Ladder climbing: HANDS*) |
 
-Keyboard: **F8** stereo on/off, **F9** re-anchor 2D panel, **F10** world-locked comfort
+Keyboard: **F8** stereo on/off, **F9** recenter the VR origin (and re-anchor a
+visible 2D panel), **F10** world-locked comfort
 screen, **F11** developer body-piece diagnostic.
 
 Mouse, keyboard and gamepad remain usable in parallel. The VR options live in
@@ -212,7 +221,9 @@ unmodified.
   frame late instead of a full frame. That removed one of three readbacks and
   all per-pixel CPU work. `-fearvr-no-gpu-hud` forces the old CPU compositor
   back for troubleshooting.
-- HMD translation has no world collision and therefore stays opt-in.
+- Room-scale HMD translation is collision-limited and remains opt-in. The
+  visible body follows horizontally, while Retail's gameplay collision capsule
+  remains at the locomotion origin.
 - The version-dependent hooks check byte signatures in the Public Tools
   modules of **F.E.A.R. 1.08**. If one does not match, that hook stays
   disabled and the game keeps running flat.

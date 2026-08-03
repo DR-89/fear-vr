@@ -99,7 +99,8 @@ enum {
 enum {
   FEARVR_RF_VALID          = 0x00000001u, /* Auftrag gültig                  */
   FEARVR_RF_TRANSLATION_ON = 0x00000002u, /* 6DoF-Translation aktiv          */
-  FEARVR_RF_FLATSCREEN     = 0x00000004u  /* Game soll Flat rendern          */
+  FEARVR_RF_FLATSCREEN     = 0x00000004u, /* Game soll Flat rendern          */
+  FEARVR_RF_FLOOR_SPACE    = 0x00000008u  /* Pose relativ zum Boden          */
 };
 
 /* Verbindungs-/Diagnoseflags in FearVrSharedHeader.bridgeFlags. */

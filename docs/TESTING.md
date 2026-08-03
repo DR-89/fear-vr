@@ -260,7 +260,9 @@ Automatisiert bestanden:
 - OpenXR→LithTech-Achsen- und Quaternionabbildung;
 - neutrale Recenter-Pose, Yaw-only-Verhalten für Pitch und Roll, IPD nach
   Recenter und ungültige Pose;
-- Translation standardmäßig aus und bei opt-in auf 25 cm begrenzt;
+- Translation standardmäßig aus; der damalige Lean-Pfad war bei opt-in auf
+  25 cm begrenzt. Der aktuelle Raumskalepfad prüft zusätzlich 0,5 m
+  unveränderte Bewegung, 2-m-Sprungschutz und Positions-Recenter;
 - insgesamt je 5/5 CTest-Tests in x86 und x64, einschließlich
   `stereo_hud_math`.
 

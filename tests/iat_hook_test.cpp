@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdint>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -23,8 +24,29 @@ int wmain(int argumentCount, wchar_t** arguments) {
         return 3;
     }
     using InstallFunction = BOOL(__cdecl*)();
+    using GetRenderScaleFunction = std::uint32_t(__cdecl*)();
+    using SetRenderScaleFunction = void(__cdecl*)(std::uint32_t);
     const auto install = reinterpret_cast<InstallFunction>(
         GetProcAddress(bridge, "FearVr_InstallIatHook"));
+    const auto getRenderScale = reinterpret_cast<GetRenderScaleFunction>(
+        GetProcAddress(bridge, "FearVr_GetRenderScalePercent"));
+    const auto setRenderScale = reinterpret_cast<SetRenderScaleFunction>(
+        GetProcAddress(bridge, "FearVr_SetRenderScalePercent"));
+    if (getRenderScale == nullptr || setRenderScale == nullptr) {
+        std::fprintf(stderr, "Live render-scale exports are unavailable.\n");
+        return 4;
+    }
+    setRenderScale(150U);
+    if (getRenderScale() != 150U) {
+        std::fprintf(stderr, "Live render scale did not update to 150%%.\n");
+        return 4;
+    }
+    setRenderScale(999U);
+    if (getRenderScale() != 200U) {
+        std::fprintf(stderr, "Live render scale was not capped at 200%%.\n");
+        return 4;
+    }
+    setRenderScale(100U);
     if (install == nullptr || !install()) {
         std::fprintf(stderr, "Direct3DCreate9 IAT hook failed.\n");
         return 4;

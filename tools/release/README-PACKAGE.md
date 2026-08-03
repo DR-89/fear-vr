@@ -133,7 +133,9 @@ runtime setting is never changed.
 `-RenderScale` accepts 100 through 200 percent and applies only to native
 stereo gameplay. Retail menus and videos keep their original backbuffer.
 Start with 125 or 150 percent: classic-D3D9 CPU readback cost grows with the
-number of pixels.
+number of pixels. The floating tool menu's VR tab can also change and persist
+100/125/150/175/200 percent live. An explicit `-RenderScale` value overrides
+that saved value for one launch.
 
 A Steam copy needs the Steam client running, because F.E.A.R. officially
 starts through `steam.exe -applaunch 21090`. GOG and disc copies do not need

@@ -147,7 +147,7 @@ begin
     False,
     '');
   InstallPage.Add('Install folder:');
-  InstallPage.Values[0] := ExpandConstant('{userprofile}\FearVR');
+  InstallPage.Values[0] := AddBackslash(GetEnv('USERPROFILE')) + 'FearVR';
 
   OptionsPage := CreateInputOptionPage(
     InstallPage.ID,
@@ -165,6 +165,7 @@ begin
   SummaryPage := CreateOutputMsgPage(
     OptionsPage.ID,
     'Ready to install',
+    'Review the selected installation settings.',
     'The installer will validate the selected folders and run the existing F.E.A.R. VR installation script.');
 
   ResultPage := CreateOutputMsgMemoPage(
@@ -236,6 +237,7 @@ var
   Params: String;
   ResultCode: Integer;
   LogPath: String;
+  LogContents: AnsiString;
 begin
   ScriptPath := ExpandConstant('{tmp}\FearVRPackage\tools\install.ps1');
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
@@ -266,8 +268,8 @@ begin
 
   Result := Exec(PowerShellPath, Params, ExpandConstant('{tmp}\FearVRPackage'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  if FileExists(LogPath) then
-    LoadStringFromFile(LogPath, OutputText)
+  if FileExists(LogPath) and LoadStringFromFile(LogPath, LogContents) then
+    OutputText := LogContents
   else
     OutputText := 'The installer returned exit code ' + IntToStr(ResultCode) + '.';
 

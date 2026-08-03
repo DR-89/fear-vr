@@ -1523,6 +1523,30 @@ public:
                 std::to_string(fovScalePercent_) + "%.");
     }
 
+    std::uint32_t RenderScalePercent() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return config_.renderScalePercent;
+    }
+
+    void SetRenderScalePercent(std::uint32_t percent) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const std::uint32_t requested =
+            NormalizeRenderScalePercent(percent);
+        if (config_.renderScalePercent == requested) {
+            return;
+        }
+        config_.renderScalePercent = requested;
+        renderScaleResourcesDirty_ = true;
+        ClearStereoFrame();
+        logger_.Write(
+            "INFO", "render_scale_set",
+            "requested_percent=" + std::to_string(requested) +
+                (requested > kRenderScaleMinimumPercent
+                     ? " mode=stereo_offscreen"
+                     : " mode=retail_backbuffer") +
+                "; eye resources will be recreated on the next frame.");
+    }
+
     BOOL TranslationEnabled() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         return config_.translationEnabled ? TRUE : FALSE;
@@ -2840,7 +2864,7 @@ private:
 
     bool EnsureResources(IDirect3DDevice9* device, UINT sourceWidth,
                           UINT sourceHeight) noexcept {
-        if (resourcesReady_ &&
+        if (!renderScaleResourcesDirty_ && resourcesReady_ &&
             sourceWidth_ == sourceWidth &&
             sourceHeight_ == sourceHeight &&
             device_ == device) {
@@ -2852,6 +2876,7 @@ private:
         }
 
         ReleaseResources();
+        renderScaleResourcesDirty_ = false;
         device_ = device;
         sourceWidth_ = sourceWidth;
         sourceHeight_ = sourceHeight;
@@ -4460,6 +4485,7 @@ private:
     TransferMode transferMode_{TransferMode::None};
     bool resourcesReady_{false};
     bool asyncTransferEnabled_{false};
+    bool renderScaleResourcesDirty_{false};
     bool deviceMetadataReady_{false};
     bool hostConnected_{false};
     bool adapterMatchLogged_{false};
@@ -5112,6 +5138,14 @@ void SetStereoEnabled(BOOL enabled) noexcept {
 
 void SetFovScalePercent(std::uint32_t percent) noexcept {
     GetBridge().SetFovScalePercent(percent);
+}
+
+std::uint32_t GetRenderScalePercent() noexcept {
+    return GetBridge().RenderScalePercent();
+}
+
+void SetRenderScalePercent(std::uint32_t percent) noexcept {
+    GetBridge().SetRenderScalePercent(percent);
 }
 
 BOOL IsTranslationEnabled() noexcept {

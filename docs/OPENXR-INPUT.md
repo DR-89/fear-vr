@@ -104,11 +104,12 @@ bleiben parallel aktiv.
 
 ### Bewegungsrichtung und Stick-Kennlinie
 
-Fortbewegung folgt standardmäßig der horizontalen HMD-Richtung. Kopfneigung
-und -rollen werden dabei verworfen: Nach oben sehen darf die Geschwindigkeit
-nicht verringern, und ein geneigter Kopf darf keine Seitwärtsbewegung
-erzeugen. `Move direction: Head / Body` im Menü **Movement & Comfort** schaltet
-auf Retails klassische körperrelative Richtung zurück; gespeichert wird die
+Fortbewegung folgt standardmäßig Retails körperrelativer Richtung, damit
+freies Umschauen eine gehaltene Bewegungsrichtung nicht verändert. `Move
+direction: Head / Body` im Menü **Movement & Comfort** kann stattdessen die
+horizontale HMD-Richtung aktivieren. Kopfneigung und -rollen werden dabei
+verworfen: Nach oben sehen darf die Geschwindigkeit nicht verringern, und ein
+geneigter Kopf darf keine Seitwärtsbewegung erzeugen. Gespeichert wird die
 Auswahl als `HeadRelativeMovement` in `fearvr.ini`.
 
 Die 22-Prozent-Totzone des Bewegungssticks ist radial. Sie verändert nur den
@@ -560,10 +561,13 @@ The panel has six bounded tabs:
 4. **Move:** HMD translation, head bob, physical lean/strength, turn speed and
    hand climbing.
 5. **Melee:** master gesture switch and each individual strike/kick.
-6. **VR:** stereo HUD, FOV scale, handedness, haptics and weapon diagnostics.
+6. **VR:** stereo HUD, FOV scale, handedness, haptics, weapon diagnostics and
+   live stereo render scale (100/125/150/175/200 percent).
 
 Changes take effect immediately and use the same `SaveVrSettings` path as the
-native menu, including per-weapon weight profiles. Stereo disable, comfort
+native menu, including per-weapon weight profiles. A render-scale change
+recreates the off-screen eye resources on the next frame while leaving the
+Retail backbuffer unchanged. Stereo disable, comfort
 screen, panel recenter and Reset Defaults remain pause-menu-only because they
 would hide the live panel or are too easy to trigger accidentally. Controller
 gameplay injection, gesture pulses and climbing are suppressed while the panel

@@ -57,7 +57,15 @@ executable patched by this texture mod.
 
 ### 1. Get the overlay
 
-Download a release ZIP, or build one:
+Each release provides two downloads:
+
+- `FearVR-Setup-<version>.exe` — graphical installer. It asks for your F.E.A.R.
+  1.08 folder and your Public Tools 1.08 installation, copies the overlay
+  beside `FEAR.exe`, prepares it and optionally creates a desktop shortcut.
+- `fearvr-<version>+<commit>-overlay.zip` — the plain overlay for manual
+  extraction (steps 2–4 below).
+
+Or build one yourself:
 
 ```powershell
 pwsh -File tools\make-release.ps1
@@ -73,6 +81,15 @@ pwsh -File tools\make-release.ps1 -PrivateBundle
 That private archive contains proprietary Public Tools runtime files. It is
 marked **not for redistribution** because their EULA does not grant public
 redistribution rights.
+
+The graphical installer is built from an unpacked package and needs Inno
+Setup 6 (see `installer/README.md`):
+
+```powershell
+pwsh -File tools\make-release.ps1 -NoArchive
+pwsh -File tools\build-graphical-installer.ps1 `
+  -PackageDir "dist\fearvr-<version>+<commit>-overlay"
+```
 
 ### 2. Extract over the game
 

@@ -29,8 +29,9 @@ F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 
 ## Installation
 
-The release is a binary overlay: extract it directly into the existing game
-folder that contains `FEAR.exe`.
+Installation is drag & drop: either run the installer, or drop the contents of
+the ZIP into your existing F.E.A.R. folder — the one containing `FEAR.exe`.
+Nothing is replaced, the mod's files simply sit next to the game's own.
 
 **What you need**
 
@@ -38,8 +39,9 @@ folder that contains `FEAR.exe`.
   Edition is confirmed in-game; GOG and retail-disc copies of 1.08 install and
   launch, but are untested — see [Game editions](#game-editions). Versions
   below 1.08 are rejected, because the Public Tools modules do not match them.
-- A public archive needs the official **Public Tools 1.08** installed locally.
-  A personal `-PrivateBundle` already contains the required runtime modules.
+- The public download needs the official **Public Tools 1.08** installed
+  locally. A personal `-PrivateBundle` already contains the required runtime
+  modules.
 - A headset with **SteamVR** or **Virtual Desktop (VDXR)** as the active
   OpenXR runtime. Native SteamVR hardware is covered by explicit Valve Index
   and HTC Vive Wand controller profiles; Lighthouse headsets without bundled
@@ -55,17 +57,18 @@ Steam/non-Steam option, then click **Install**. That's it — install it and be
 happy. F.E.A.R. VR recognizes both the original Steam executable and the
 executable patched by this texture mod.
 
-### 1. Get the overlay
+### 1. Download
 
-Each release provides two downloads:
+Each release offers two ways to install — pick one:
 
-- `FearVR-Setup-<version>.exe` — graphical installer. It asks for your F.E.A.R.
-  1.08 folder and your Public Tools 1.08 installation, copies the overlay
-  beside `FEAR.exe`, prepares it and optionally creates a desktop shortcut.
-- `fearvr-<version>+<commit>-overlay.zip` — the plain overlay for manual
-  extraction (steps 2–4 below).
+- **Installer (recommended):** `FearVR-Setup-<version>.exe`. It asks for your
+  F.E.A.R. 1.08 folder and your Public Tools 1.08 installation, puts the mod
+  files in place, prepares them and optionally creates a desktop shortcut.
+  Steps 2 and 3 are then already done for you.
+- **Drag & drop:** `fearvr-<version>+<commit>-overlay.zip`. Unzip it and drop
+  its contents into your F.E.A.R. folder yourself — continue with step 2.
 
-Or build one yourself:
+Or build the files yourself:
 
 ```powershell
 pwsh -File tools\make-release.ps1
@@ -91,9 +94,9 @@ pwsh -File tools\build-graphical-installer.ps1 `
   -PackageDir "dist\fearvr-<version>+<commit>-overlay"
 ```
 
-### 2. Extract over the game
+### 2. Drop the files into the game folder
 
-Extract the ZIP directly into the folder containing `FEAR.exe`. It adds:
+Copy everything from the ZIP into the folder containing `FEAR.exe`. It adds:
 
 ```text
 dinput8.dll
@@ -109,14 +112,14 @@ HID performance bug before input initialization, then forwards to Windows'
 real DirectInput implementation. `d3d9.dll` is the early renderer bridge that
 enables the non-blocking transfer worker before the game creates its graphics
 device. If another graphics wrapper already uses that filename, preserve it
-before extraction; the development installer chains such a preserved wrapper
-as `d3d9.fearvr-upstream.dll`. Updating is the same operation: extract the
-newer ZIP over the same folder. Saves, configuration and logs stay below
-`FEARVR\`.
+first; the development installer chains such a preserved wrapper
+as `d3d9.fearvr-upstream.dll`. Updating works the same way: drop the newer
+files into the same folder and overwrite. Saves, configuration and logs stay
+below `FEARVR\`.
 
-### 3. Public Tools for the public archive
+### 3. Public Tools for the public download
 
-On first launch, the public archive copies five proprietary runtime modules
+On first launch, the public download copies five proprietary runtime modules
 from the owner's local Public Tools installation. The official
 `fear_publictools_108.exe` is included with the Steam Ultimate Shooter Edition
 under `extras\`.
@@ -173,10 +176,10 @@ on disk. What differs between editions is how the game starts:
 | GOG (1.08) | `FEAR.exe` directly, same arguments | Should work, untested |
 | Retail disc, patched to 1.08 | `FEAR.exe` directly, same arguments | Should work, untested |
 
-The overlay picks the launch mode itself: a copy under `steamapps\common`
+The mod picks the launch mode itself: a copy under `steamapps\common`
 goes through Steam, anything else is started directly.
 
-An unknown `FEAR.exe` build is no longer an error. The overlay records its
+An unknown `FEAR.exe` build is no longer an error. The mod records its
 SHA-256 with a warning and continues; on a byte mismatch the HID patch remains
 off rather than touching unknown code. If you run a GOG or disc copy, that hash
 plus the `fear_hid_fix` result from the log is what is needed to confirm it.
@@ -192,7 +195,7 @@ require reinstalling the VR mod; unknown executable changes are still rejected.
 |---|---|
 | `Wrong FEAR.exe version` | Not patched to 1.08, or `-RetailRoot` points at a different installation. |
 | `This FEAR.exe build has not been tested` | A 1.08 build other than Steam's (GOG, disc). Installation continues; please report whether it works. |
-| `Public Tools 1.08 not found` | The public archive could not find them—install the copy under `extras\`, pass `-PublicToolsGame`, or use a local `-PrivateBundle`. |
+| `Public Tools 1.08 not found` | The public download could not find them—install the copy under `extras\`, pass `-PublicToolsGame`, or use a local `-PrivateBundle`. |
 | `Package file is missing or was modified` | The package was altered after it was built; unpack it again. |
 | Steam creates no `FEAR.exe` after three launch attempts | The launcher now falls back to the verified executable directly while Steam remains running, then still verifies that the matching VR bridge loaded. |
 | `vrmonitor.exe` reports missing `d3dx10_43.dll` | SteamVR's legacy status window is missing the DirectX End-User Runtimes (June 2010). A private bundle supplies the local x64 redistributable through the child-process path without modifying SteamVR. |

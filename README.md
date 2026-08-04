@@ -40,8 +40,10 @@ Nothing is replaced, the mod's files simply sit next to the game's own.
   launch, but are untested — see [Game editions](#game-editions). Versions
   below 1.08 are rejected, because the Public Tools modules do not match them.
 - The public download needs the official **Public Tools 1.08** installed
-  locally. A personal `-PrivateBundle` already contains the required runtime
-  modules.
+  locally — bundled with the Steam Ultimate Shooter Edition under `extras\`, or
+  available as
+  [F.E.A.R. SDK v1.08 on AusGamers](https://www.ausgamers.com/files/download/25133/fear-sdk-v108).
+  A personal `-PrivateBundle` already contains the required runtime modules.
 - A headset with **SteamVR** or **Virtual Desktop (VDXR)** as the active
   OpenXR runtime. Native SteamVR hardware is covered by explicit Valve Index
   and HTC Vive Wand controller profiles; Lighthouse headsets without bundled
@@ -122,7 +124,8 @@ below `FEARVR\`.
 On first launch, the public download copies five proprietary runtime modules
 from the owner's local Public Tools installation. The official
 `fear_publictools_108.exe` is included with the Steam Ultimate Shooter Edition
-under `extras\`.
+under `extras\`. GOG and retail-disc owners can get the same installer as
+[F.E.A.R. SDK v1.08 from AusGamers](https://www.ausgamers.com/files/download/25133/fear-sdk-v108).
 
 The old installer expects registry value `Patch=8`, while Steam normally uses
 10. Set it to 8 for installation and restore 10 afterwards:

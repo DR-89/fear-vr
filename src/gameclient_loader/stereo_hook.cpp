@@ -368,6 +368,10 @@ FearVrInputState g_currentInput{};
 struct WeaponAimState {
     LTRigidTransform fireTransform;
     LTRigidTransform gripTransform;
+    // Unfiltered right-hand grip used only for the physical line between
+    // both controllers. Weapon weight may lag the visible weapon behind this
+    // pose, but must not turn that lag into false two-handed steering.
+    LTRigidTransform supportRightGripTransform;
     LTRigidTransform leftAimTransform;
     LTRigidTransform leftGripTransform;
     LTRigidTransform leftWeaponTransform;
@@ -387,6 +391,7 @@ struct WeaponAimState {
     void* retailWeapon{nullptr};
     bool valid{false};
     bool gripValid{false};
+    bool supportRightGripValid{false};
     bool leftAimValid{false};
     bool leftGripValid{false};
     bool muzzleValid{false};
@@ -465,6 +470,7 @@ struct TrackedPoseCache {
 };
 thread_local TrackedPoseCache g_aimPoseCache[FEARVR_HAND_COUNT];
 thread_local TrackedPoseCache g_gripPoseCache[FEARVR_HAND_COUNT];
+thread_local TrackedPoseCache g_supportRightGripPoseCache;
 ULONGLONG g_lastWeaponManagerUpdateTick = 0;
 // Laeuft das Weapon-Manager-Update, ist ein normaler Spielframe aktiv.
 // Zwischensequenzen, Ladebildschirme und Menues halten es an.
@@ -5709,6 +5715,7 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     g_aimPoseCache[FEARVR_HAND_LEFT] = TrackedPoseCache{};
     g_gripPoseCache[FEARVR_HAND_RIGHT] = TrackedPoseCache{};
     g_gripPoseCache[FEARVR_HAND_LEFT] = TrackedPoseCache{};
+    g_supportRightGripPoseCache = TrackedPoseCache{};
     g_twoHandedGripActive = false;
     g_twoHandedGrip = TwoHandedGripState{};
     g_weaponDisabled = false;
@@ -9924,9 +9931,17 @@ float CurrentBarrelLengthMeters() noexcept {
 
 // Richtung von der Waffenhand zur Stuetzhand, normalisiert.
 bool CurrentSupportDirection(LTVector& direction) noexcept {
+    if (!g_weaponAim.supportRightGripValid ||
+        !g_weaponAim.leftGripValid) {
+        return false;
+    }
+    // Both ends of the steering line must come from the same, unfiltered
+    // controller sample space. Using the weighted right-hand position here
+    // mixes a delayed weapon pose with the live support hand; the resulting
+    // artificial diagonal moves the support hand away from the weapon grip.
     direction =
         g_weaponAim.leftGripTransform.m_vPos -
-        g_weaponAim.gripTransform.m_vPos;
+        g_weaponAim.supportRightGripTransform.m_vPos;
     const float minimumSeparation =
         kTwoHandMinSteerSeparationMeters * kGameUnitsPerMeter;
     if (!(direction.MagSqr() >
@@ -10175,6 +10190,13 @@ int __fastcall HookRetailWeaponManagerUpdate(
         weightedGripPose,
         g_gripPoseCache[FEARVR_HAND_RIGHT],
         g_weaponAim.gripTransform);
+    g_weaponAim.supportRightGripValid = BuildStableTrackedHandTransform(
+        trackedBaseRotation, trackedBasePosition,
+        g_currentInput.gripPoseValidHands,
+        FEARVR_HAND_MASK_RIGHT,
+        g_currentInput.handGripPose[FEARVR_HAND_RIGHT],
+        g_supportRightGripPoseCache,
+        g_weaponAim.supportRightGripTransform);
     g_weaponAim.leftAimValid = BuildStableTrackedHandTransform(
         trackedBaseRotation, trackedBasePosition,
         g_currentInput.aimPoseValidHands,
@@ -11571,6 +11593,7 @@ void RemoveWeaponAimHooks() noexcept {
     g_retailAccuracyManager = nullptr;
     g_weaponAim.valid = false;
     g_weaponAim.gripValid = false;
+    g_weaponAim.supportRightGripValid = false;
     g_weaponAim.leftAimValid = false;
     g_weaponAim.leftGripValid = false;
     g_weaponAim.muzzleValid = false;
@@ -11584,6 +11607,7 @@ void RemoveWeaponAimHooks() noexcept {
     g_weaponAim.leftMuzzleLocalValid = false;
     g_weaponAim.retailWeapon = nullptr;
     g_weaponAim.trackingBaseValid = false;
+    g_supportRightGripPoseCache = TrackedPoseCache{};
     g_weightedWeaponInput = {};
     ResetWeaponWeightPair(
         g_weightedWeaponInput.filters,

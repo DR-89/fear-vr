@@ -13,23 +13,31 @@
 
 #include <iltclient.h>
 #include <iltcommon.h>
+#include <idatabasemgr.h>
 #include <ltobjectcreate.h>
 #include <iclientshell.h>
 #include <iltdrawprim.h>
 #include <iltmodel.h>
+#include <iltphysics.h>
+#include <iltphysicssim.h>
 #include <iltrenderer.h>
 #include <MinHook.h>
 
+#include "camera_collision.h"
 #include "controller_mapping.h"
 #include "head_tracking_math.h"
 #include "input_state.h"
 #include "lean_collision.h"
 #include "melee_actions.h"
+#include "physical_duck.h"
 #include "protocol.h"
 #include "stereo_math.h"
 #include "vertical_camera_height.h"
+#include "wrist_hud_visibility.h"
 #include "climb_grip.h"
 #include "two_handed_grip.h"
+#include "two_handed_jump_camera.h"
+#include "vr_menu_scroll.h"
 
 namespace fearvr {
 namespace {
@@ -56,7 +64,8 @@ using SubmitHapticRequestFunction =
     BOOL(__cdecl*)(const FearVrHapticRequest*);
 using BeginEyeFunction = void(__cdecl*)(std::uint32_t);
 using CaptureEyeFunction = void(__cdecl*)(std::uint32_t);
-using EndStereoFrameFunction = void(__cdecl*)(std::uint64_t);
+using EndStereoFrameFunction = void(__cdecl*)(
+    std::uint64_t, const FearVrGameCameraSample*);
 using ReportHookStatusFunction =
     void(__cdecl*)(const char*, const char*, const char*);
 using RenderPlayerCameraFunction =
@@ -81,6 +90,8 @@ using RetailGetFireVectorsFunction =
         const void*, LTVector&, LTVector&, LTVector&, LTVector&);
 using RetailSetTrackedTargetFunction =
     void(__thiscall*)(void*, int, const LTVector&);
+using RetailCalcNoClipFunction =
+    void(__thiscall*)(void*, LTVector&, LTRotation&);
 using RetailAccuracyManagerFunction = void*(__cdecl*)();
 using RetailMenuInitFunction = bool(__thiscall*)(void*, void*);
 using RetailMenuOnCommandFunction =
@@ -98,6 +109,16 @@ using RetailListSetSelectionFunction =
     std::uint32_t(__thiscall*)(void*, std::uint32_t);
 using RetailControlShowFunction = void(__thiscall*)(void*, bool);
 using RetailMenuNavigateFunction = bool(__thiscall*)(void*);
+using RetailGetAmmoCountFunction =
+    std::uint32_t(__thiscall*)(const void*, HRECORD);
+using RetailGetWeaponDataFunction =
+    HRECORD(__thiscall*)(const void*, HRECORD, bool);
+using RetailGetPlayerGrenadeFunction =
+    HRECORD(__thiscall*)(const void*, std::uint8_t);
+using RetailGetGearRecordFunction =
+    HRECORD(__thiscall*)(const void*, const char*);
+using RetailGetGearCountFunction =
+    std::uint8_t(__thiscall*)(const void*, HRECORD);
 
 ILTClient* g_client = nullptr;
 ILTRenderer* g_renderer = nullptr;
@@ -135,6 +156,9 @@ RetailSetWeaponTransformFunction g_retailSetWeaponTransform = nullptr;
 RetailSetWeaponVisibleFunction g_retailSetWeaponVisible = nullptr;
 RetailGetFireVectorsFunction g_retailGetFireVectors = nullptr;
 RetailSetTrackedTargetFunction g_retailSetTrackedTarget = nullptr;
+ObjectFilterFn g_retailVectorObjectFilter = nullptr;
+RetailCalcNoClipFunction g_retailCalcNoClip = nullptr;
+void* g_retailCalcNoClipTarget = nullptr;
 RetailAccuracyManagerFunction g_retailAccuracyManager = nullptr;
 RetailMenuInitFunction g_retailMenuInit = nullptr;
 RetailMenuOnCommandFunction g_retailMenuOnCommand = nullptr;
@@ -230,10 +254,14 @@ volatile LONG g_bulletGuideAlignmentActiveLogged = 0;
 volatile LONG g_weaponHandTrackingFailureLogged = 0;
 volatile LONG g_weaponAimGuideActiveLogged = 0;
 volatile LONG g_twoHandedGripActiveLogged = 0;
+volatile LONG g_dualPistolsActiveLogged = 0;
 volatile LONG g_handPoseGapBridgedLogged = 0;
 volatile LONG g_weaponSocketSyncActiveLogged = 0;
 volatile LONG g_weaponCameraBaseSyncActiveLogged = 0;
 volatile LONG g_directionalCameraHeightBypassLogged = 0;
+volatile LONG g_twoHandedCameraHeightStabilizedLogged = 0;
+volatile LONG g_twoHandedViewRotationStabilizedLogged = 0;
+volatile LONG g_twoHandedCameraPositionStabilizedLogged = 0;
 volatile LONG g_armGeometryInspectedLogged = 0;
 volatile LONG g_armGeometryEmptyAttempts = 0;
 volatile LONG g_armGeometryNeverAvailableLogged = 0;
@@ -251,8 +279,9 @@ constexpr std::uint32_t kLegacyPlayerBodyArmPieceMask = 0x2U;
 std::uint32_t g_hiddenBodyPieceMask = 0;
 std::uint32_t g_bodyPieceProbeStep = 0;
 bool g_bodyPieceProbeKeyWasDown = false;
-// Variante A: Arme sind standardmaessig ausgeblendet. Der VR-Menueschalter
-// setzt bei Bedarf wieder das unveraenderte Retail-Material ein.
+// Standardmaessig stanzt das lokal erzeugte Alpha-Test-Material nur Ober- und
+// Unterarme aus dem gemeinsamen PlayerBody-Atlas. Haende, Torso und Beine
+// bleiben sichtbar; der Kopf wird ueber Materialslot 1 separat verborgen.
 bool g_showPlayerArms = false;
 std::uint64_t g_hapticRequestId = 0;
 std::uint64_t g_lastInputSampleId = 0;
@@ -261,6 +290,22 @@ std::uint32_t g_lastInputButtons = 0;
 std::uint32_t g_lastActiveHands = 0;
 ULONGLONG g_lastFireHapticTick = 0;
 volatile LONG g_fireHapticActiveLogged = 0;
+constexpr std::size_t kVrMuzzleFlashRight = 0;
+constexpr std::size_t kVrMuzzleFlashLeft = 1;
+constexpr std::size_t kVrMuzzleFlashCount = 2;
+struct VrMuzzleFlashState {
+    HLOCALOBJ flare{nullptr};
+    HLOCALOBJ light{nullptr};
+    ULONGLONG pulseStartedTick{0};
+    ULONGLONG visibleUntilTick{0};
+    ULONGLONG lastTriggerTick{0};
+    std::uint32_t pulseSerial{0};
+};
+VrMuzzleFlashState g_vrMuzzleFlash[kVrMuzzleFlashCount];
+volatile LONG g_vrMuzzleFlashCreatedLogged = 0;
+volatile LONG g_vrMuzzleFlashActiveLogged = 0;
+volatile LONG g_vrMuzzleFlashRenderedLogged = 0;
+void RenderVrMuzzleFlash(HLOCALOBJ camera) noexcept;
 std::uint32_t g_lastMenuButtons = 0;
 bool g_lastMenuTriggerDown = false;
 bool g_menuAxisDown[4]{};
@@ -324,7 +369,9 @@ struct WeaponAimState {
     LTRigidTransform gripTransform;
     LTRigidTransform leftAimTransform;
     LTRigidTransform leftGripTransform;
+    LTRigidTransform leftWeaponTransform;
     LTRigidTransform muzzleTransform;
+    LTRigidTransform leftMuzzleTransform;
     LTRigidTransform trackingBase;
     LTVector muzzleForwardInWeapon;
     // Mündung als starrer Versatz im Waffenraum. Damit lässt sich der
@@ -332,7 +379,10 @@ struct WeaponAimState {
     // statt aus der Welt-Sockettransformation der Engine.
     LTVector muzzleOffsetInWeapon;
     LTRotation muzzleRotationInWeapon;
+    LTVector leftMuzzleOffsetInWeapon;
+    LTRotation leftMuzzleRotationInWeapon;
     const void* muzzleWeapon{nullptr};
+    HOBJECT leftWeaponModel{nullptr};
     void* retailWeapon{nullptr};
     bool valid{false};
     bool gripValid{false};
@@ -342,15 +392,35 @@ struct WeaponAimState {
     bool muzzleDirectionValid{false};
     bool muzzleLocalValid{false};
     bool muzzleDiagnosticLogged{false};
+    bool leftWeaponTransformValid{false};
+    bool leftMuzzleValid{false};
+    bool leftMuzzleLocalValid{false};
     bool trackingBaseValid{false};
 };
 thread_local WeaponAimState g_weaponAim;
+
+bool DualPistolsVrActive() noexcept {
+    return g_weaponAim.leftWeaponModel != nullptr;
+}
+
 HLOCALOBJ g_playerCameraObject = nullptr;
 VerticalCameraHeightState g_verticalCameraHeight;
-float g_visualCameraHeight = 0.0F;
+TwoHandedJumpCameraState g_twoHandedJumpCamera;
+struct TwoHandedCameraPositionState {
+    LTVector localCameraOffset;
+    bool valid{false};
+};
+TwoHandedCameraPositionState g_twoHandedCameraPosition;
+LTVector g_visualCameraPosition;
 ULONGLONG g_visualCameraHeightSampleTick = 0;
 bool g_visualCameraHeightValid = false;
-constexpr ULONGLONG kVisualCameraHeightFreshMilliseconds = 100;
+// Der Weapon-Manager liefert die gemeinsame Y-Basis von Augen, Händen und
+// Waffen normalerweise in jedem Spielbild. Bei einem kurzen Render-Hitch darf
+// die Darstellung nicht für genau ein Bild auf die Kameraobjekt-Höhe
+// zurückspringen und danach wieder zurück: Das ist besonders am nahen Körper
+// sichtbar. Echte Zustandswechsel invalidieren den Wert ausdrücklich; diese
+// Frist überbrückt daher nur temporäre Timing-Lücken im laufenden Spiel.
+constexpr ULONGLONG kVisualCameraHeightFreshMilliseconds = 500;
 thread_local bool g_cutsceneCameraStateKnown = false;
 thread_local bool g_cutsceneCameraState = false;
 thread_local ULONGLONG g_cutsceneCameraActivationTick = 0;
@@ -360,19 +430,32 @@ struct CutsceneBodyPresentationState {
     bool valid{false};
 };
 thread_local CutsceneBodyPresentationState g_cutsceneBodyPresentation;
-HLOCALOBJ g_leftFlashlightModel = nullptr;
-HLOCALOBJ g_leftFlashlightLight = nullptr;
-const void* g_leftFlashlightWeapon = nullptr;
+enum class FlashlightMount : int {
+    LeftHand = 0,
+    Head,
+    Weapon,
+    Count,
+};
+constexpr int kFlashlightMountCount =
+    static_cast<int>(FlashlightMount::Count);
+FlashlightMount g_flashlightMount = FlashlightMount::Weapon;
+HLOCALOBJ g_flashlightModel = nullptr;
+HLOCALOBJ g_flashlightLight = nullptr;
+const void* g_flashlightModelWeapon = nullptr;
 // Retail hat die Waffe abgeschaltet: kein Modell, kein Zielstrahl.
 bool g_weaponDisabled = false;
-LTRigidTransform g_flashlightCameraRecovery;
-bool g_flashlightCameraOverridePending = false;
+LTRigidTransform g_preRenderCameraRecovery;
+float g_preRenderCameraRecoveryFovX = 0.0F;
+float g_preRenderCameraRecoveryFovY = 0.0F;
+bool g_preRenderCameraOverridePending = false;
 // Genau das Objekt, dessen Transform wir entfuehrt haben. Eine
 // Zwischensequenz kann die Spielkamera austauschen; dann darf der gemerkte
 // Transform nicht in ein fremdes oder totes Objekt zurueckgeschrieben werden.
-HLOCALOBJ g_flashlightOverrideObject = nullptr;
+HLOCALOBJ g_preRenderCameraOverrideObject = nullptr;
+volatile LONG g_renderTargetCameraStabilizedLogged = 0;
 bool g_flashlightEnabled = true;
 bool g_flashlightButtonWasDown = false;
+bool g_dualPistolSlowMoActive = false;
 struct TrackedPoseCache {
     FearVrPose pose{};
     ULONGLONG lastValidTick{0};
@@ -381,23 +464,52 @@ struct TrackedPoseCache {
 };
 thread_local TrackedPoseCache g_aimPoseCache[FEARVR_HAND_COUNT];
 thread_local TrackedPoseCache g_gripPoseCache[FEARVR_HAND_COUNT];
-struct HandOrientationCalibration {
-    LTRotation offset;
-    LONG resetGeneration{-1};
-    bool valid{false};
-};
-HandOrientationCalibration g_rightHandOrientation;
-HandOrientationCalibration g_leftHandOrientation;
 ULONGLONG g_lastWeaponManagerUpdateTick = 0;
 // Laeuft das Weapon-Manager-Update, ist ein normaler Spielframe aktiv.
 // Zwischensequenzen, Ladebildschirme und Menues halten es an.
 constexpr ULONGLONG kPlayingFrameFreshMilliseconds = 500;
+// Retails Third-Person-Koerper steht fast mittig unter der Augenkamera. Im
+// breiten VR-Sichtfeld ragen Brust und Kragen dadurch schon bei waagerechtem
+// Blick ins Bild. Nur das gerenderte Skelett wird etwas hinter und unter den
+// HMD-Anker gesetzt; Kollisionskoerper, Haende und Waffen bleiben unveraendert.
+constexpr float kPlayerBodyRearwardOffsetUnits = 18.0F;
+constexpr float kPlayerBodyDownwardOffsetUnits = 8.0F;
 // Retail-Spielzustand (`CInterfaceMgr::m_eGameState`). Er ist die einzige
 // verlaessliche Quelle dafuer, ob gerade ein Vollbild-UI laeuft.
 const void* const* g_retailInterfaceMgrPointer = nullptr;
 bool g_retailGameStateResolveAttempted = false;
 bool g_disableRetailGameState = false;
 int g_lastReportedRetailGameState = -2;
+const void* const* g_retailPlayerStatsPointer = nullptr;
+const void* const* g_retailWeaponDatabasePointer = nullptr;
+IDatabaseMgr* const* g_retailDatabasePointer = nullptr;
+RetailGetAmmoCountFunction g_retailGetAmmoCount = nullptr;
+RetailGetWeaponDataFunction g_retailGetWeaponData = nullptr;
+RetailGetPlayerGrenadeFunction g_retailGetPlayerGrenade = nullptr;
+RetailGetGearRecordFunction g_retailGetGearRecord = nullptr;
+RetailGetGearCountFunction g_retailGetGearCount = nullptr;
+bool g_retailWristHudResolveAttempted = false;
+ULONGLONG g_wristHudVisibleUntil = 0;
+ULONGLONG g_wristHudClockRefreshAt = 0;
+ULONGLONG g_dualPistolWristCandidateSince = 0;
+ULONGLONG g_dualPistolWristDiagnosticAt = 0;
+char g_wristHudClockText[6] = "00:00";
+bool g_dualPistolWristHudVisible = false;
+volatile LONG g_wristHudActiveLogged = 0;
+struct RetailHudVariableOverride {
+    const char* name;
+    float originalValue{1.0F};
+    bool originalKnown{false};
+};
+RetailHudVariableOverride g_retailHudVariables[] = {
+    {"XUIUseOldHUD"},
+    {"HUDHealthRender"},
+    {"HUDArmorRender"},
+    {"HUDAmmoRender"},
+    {"HUDGrenadeRender"},
+    {"HUDGearRender"},
+};
+bool g_retailHudOverrideApplied = false;
 LONG g_commandInjectionSuspendedLogged = 0;
 bool g_autoStereoActivationAttempted = false;
 bool g_crosshairOverrideApplied = false;
@@ -409,6 +521,7 @@ float g_recoilOriginalValue = -1.0F;
 bool g_cameraCollisionRaycastApplied = false;
 bool g_cameraCollisionOriginalKnown = false;
 float g_cameraCollisionOriginalUseObject = 1.0F;
+volatile LONG g_cameraCharacterFilterActiveLogged = 0;
 bool g_weaponAimGuideEnabled = true;
 bool g_controllerHapticsEnabled = true;
 // Mithalten der Waffe mit der linken Hand. `active` wird im
@@ -424,6 +537,8 @@ bool g_twoHandedGripActive = false;
 // Blickpunkt, an Waenden begrenzt. Retails eigenes Lehnen kippt nur die
 // Kamera, der Blickpunkt bleibt dabei in der Spielerposition stehen.
 bool g_physicalLeanEnabled = true;
+bool g_physicalDuckEnabled = true;
+bool g_physicalDuckActive = false;
 // Verstaerkung des physischen Lehnens, in Prozent. Ein Kopfversatz von zehn
 // Zentimetern wirkt bei 200 wie zwanzig — man muss sich also nur halb so weit
 // beugen, um hinter einer Deckung hervorzusehen. Der gemessene Versatz bleibt
@@ -454,18 +569,25 @@ struct TwoHandedGripState {
     // Dreht die Handlinie auf die Waffenachse, wie sie beim Zugreifen stand.
     LTRotation offset;
     // Griffpunkt und Handhaltung im Waffenraum. Damit klebt die sichtbare
-    // linke Hand an der Waffe, statt frei daneben zu schweben — der
-    // Controller darf sich bewegen, die Hand bleibt am Vordergriff.
+    // linke Hand am original animierten Vordergriff der jeweiligen Waffe,
+    // statt an der zufaelligen Controllerposition beim Zugreifen.
     LTVector grabOffsetInWeapon;
     LTRotation grabRotationInWeapon;
+    // Fuer genau eine unveraenderte Animationsauswertung werden die beiden
+    // Retail-Hand-Sockets vor unserem Node-Override abgenommen. Ihr relativer
+    // Transform liefert den waffenspezifischen Originalgriff.
+    LTRigidTransform animatedRightSocket;
+    LTRigidTransform animatedLeftSocket;
     float blendRamp{0.0F};
     bool offsetValid{false};
     bool placementValid{false};
+    bool animatedRightSocketValid{false};
+    bool animatedLeftSocketValid{false};
 };
 TwoHandedGripState g_twoHandedGrip;
 
 // Sichtbare Lage der linken Hand. Waehrend des Zweihandgriffs klebt sie am
-// gemerkten Griffpunkt der Waffe, statt frei daneben zu schweben.
+// waffenspezifischen Originalgriff aus Retails eigener Animation.
 //
 // Gesteuert wird die Waffe weiterhin von der *echten* Controllerpose. Wuerde
 // auch die Steuerung diese Lage benutzen, folgte die Hand der Waffe, die der
@@ -476,6 +598,14 @@ bool LeftHandOnWeapon() noexcept {
 
 LTVector EffectiveLeftHandPosition() noexcept {
     if (!LeftHandOnWeapon()) {
+        if (DualPistolsVrActive() &&
+            g_weaponAim.leftWeaponTransformValid) {
+            // Retail attaches the left weapon object directly to the
+            // LeftHand socket without an intermediate grip offset. Driving
+            // that socket from the final VR weapon transform therefore keeps
+            // the fingers on the actual pistol handle.
+            return g_weaponAim.leftWeaponTransform.m_vPos;
+        }
         return g_weaponAim.leftGripTransform.m_vPos;
     }
     return g_weaponAim.gripTransform.m_vPos +
@@ -484,11 +614,36 @@ LTVector EffectiveLeftHandPosition() noexcept {
 }
 
 LTRotation EffectiveLeftHandRotation() noexcept {
-    if (!LeftHandOnWeapon()) {
-        return g_weaponAim.leftAimTransform.m_rRot;
+    if (LeftHandOnWeapon()) {
+        // Der waffenspezifische Originalgriff wurde direkt aus Retails
+        // Animation abgenommen und ist bereits korrekt. Eine zusätzliche
+        // Handkalibrierung würde die Finger aus dem Vordergriff drehen.
+        return g_weaponAim.fireTransform.m_rRot *
+               g_twoHandedGrip.grabRotationInWeapon;
     }
-    return g_weaponAim.fireTransform.m_rRot *
-           g_twoHandedGrip.grabRotationInWeapon;
+    if (DualPistolsVrActive()) {
+        // CWeaponModelData::UpdateWeaponPosition attaches the weapon object
+        // directly to this player-body socket. Reuse the final muzzle-aligned
+        // object rotation so hand and handle share exactly the same frame.
+        if (g_weaponAim.leftWeaponTransformValid) {
+            return g_weaponAim.leftWeaponTransform.m_rRot;
+        }
+        return g_weaponAim.leftGripTransform.m_rRot;
+    }
+    // Die freie LeftHand-Skelettachse liegt gegenüber der standardisierten
+    // OpenXR-Griffpose weit nach hinten. Die gewünschte Kalibrierung ist 45
+    // Grad weniger als die zuletzt getesteten 135 Grad, also lokal 90 Grad
+    // über die X-/Querachse nach vorn. Das ist aus Sicht entlang +X eine
+    // weitere Drehung im Uhrzeigersinn. Aim-Pose und Schussrichtung bleiben
+    // davon ausdrücklich unberührt.
+    constexpr float kPi = 3.14159265358979323846F;
+    constexpr float kLeftHandForwardCorrection =
+        kPi * 0.5F;
+    const LTRotation forwardCorrection(
+        LTVector(1.0F, 0.0F, 0.0F),
+        kLeftHandForwardCorrection);
+    return g_weaponAim.leftGripTransform.m_rRot *
+           forwardCorrection;
 }
 
 // Die Taschenlampe folgt sonst der Hand. Klebt die Hand an der Waffe, zeigt
@@ -544,7 +699,7 @@ float g_headBobOriginalAmplitudes[12]{};
 int g_turnSpeedPreset = 1;
 constexpr std::array<std::uint32_t, 4> kFovScalePercents{
     100U, 110U, 120U, 130U};
-int g_fovScalePreset = 0;
+int g_fovScalePreset = 3;
 wchar_t g_vrSettingsPath[MAX_PATH]{};
 bool g_vrSettingsFilePresent = false;
 
@@ -565,6 +720,13 @@ void* g_vrNormalControls[
 std::size_t g_vrNormalControlCount = 0;
 bool g_vrMenuControlsBuilt = false;
 bool g_vrSettingsPageActive = false;
+constexpr std::size_t kRetailVrMenuVisibleControlCount = 16;
+std::size_t g_vrMenuFirstVisibleRow = 0;
+// CMenuSystem::OnFocus shrinks the list to the stock controls visible in the
+// current game state. Learn the real capacity from m_nLastShown instead of
+// assuming the default layout height. Eight is only the safe first-frame
+// fallback for the single-player pause menu.
+std::size_t g_vrMenuPageRows = 8;
 int g_vrOriginalItemSpacing = 0;
 bool g_vrOriginalItemSpacingKnown = false;
 VrMenuControl g_vrMenuEntry;
@@ -576,6 +738,7 @@ VrMenuToggle g_vrMenuHeadBob;
 VrMenuToggle g_vrMenuComfort;
 VrMenuToggle g_vrMenuAimGuide;
 VrMenuToggle g_vrMenuHaptics;
+VrMenuControl g_vrMenuFlashlightMount[kFlashlightMountCount];
 // `enabled` zeigt die Rechtshaenderbelegung, `disabled` die gespiegelte.
 VrMenuToggle g_vrMenuHandedness;
 // `enabled` zeigt das Klettern mit den Haenden, `disabled` die
@@ -583,6 +746,7 @@ VrMenuToggle g_vrMenuHandedness;
 VrMenuToggle g_vrMenuClimbing;
 // `enabled` = physisches Lehnen, `disabled` = nur Retails Kameraneigung.
 VrMenuToggle g_vrMenuPhysicalLean;
+VrMenuToggle g_vrMenuPhysicalDuck;
 // Master-Schalter; die vier Einzelaktionen bleiben bewusst in fearvr.ini,
 // damit die native, flache Menue-Seite nicht vier weitere Zeilen bekommt.
 VrMenuToggle g_vrMenuMelee;
@@ -634,7 +798,9 @@ constexpr std::size_t kRetailMenuListOffset = 0x6E8;
 // Retail CBaseMenu::Init writes FontSize / 4 here before marking the list
 // dirty. This is CLTGUIListCtrl::m_nItemSpacing in the verified 1.08 build.
 constexpr std::size_t kRetailListItemSpacingOffset = 0x54;
+constexpr std::size_t kRetailListCurrentIndexOffset = 0x58;
 constexpr std::size_t kRetailListFirstShownOffset = 0x5C;
+constexpr std::size_t kRetailListLastShownOffset = 0x60;
 constexpr std::size_t kRetailListNeedsRecalculationOffset = 0x648;
 // CLTGUICtrl::IsEnabled() ist `m_bEnabled && IsVisible()`. Verstecken genügt
 // deshalb, damit CLTGUIListCtrl::NextSelection einen Eintrag überspringt; ein
@@ -647,6 +813,9 @@ constexpr std::uintptr_t kRetailWeaponManagerUpdateRva = 0x00078140U;
 constexpr std::uintptr_t kRetailSetWeaponTransformRva = 0x00066F90U;
 constexpr std::uintptr_t kRetailSetWeaponVisibleRva = 0x00069320U;
 constexpr std::uintptr_t kRetailGetFireVectorsRva = 0x0006B4A0U;
+// ClientWeapon_VectorObjFilterFn first rejects the local player, then replaces
+// the broad character proxy with Retails per-skeleton-node intersection.
+constexpr std::uintptr_t kRetailVectorObjectFilterRva = 0x00068120U;
 constexpr std::uintptr_t kRetailSetTrackedTargetRva = 0x0021EAA0U;
 // CAccuracyMgr::Instance jump thunk. The first member is m_fCurrentPerturb.
 constexpr std::uintptr_t kRetailAccuracyManagerRva = 0x00009007U;
@@ -660,6 +829,10 @@ constexpr std::size_t kRetailPlayerBodyObjectOffset = 0x10;
 constexpr std::uintptr_t kRetailCheckForIntersectRva = 0x001CC150U;
 constexpr std::uintptr_t kRetailObjectDetectorUpdateRva = 0x001205A0U;
 constexpr std::uintptr_t kRetailPlayerMgrPointerRva = 0x002E2C3CU;
+// CPlayerCamera::CalcNoClipPos_WithoutObject. Native VR selects this Retail
+// path through CameraCollisionUseObject=0; the hook below retains its six
+// anti-clipping rays while excluding character and hitbox objects.
+constexpr std::uintptr_t kRetailCalcNoClipRva = 0x00137340U;
 constexpr std::size_t kRetailPlayerMgrCameraOffset = 0x28;
 // CPlayerMgr::AllowPlayerMovement is a verified Retail function at
 // GameOrig+0x146F90. It copies the old byte from +0x88 to +0x89 and stores
@@ -695,11 +868,14 @@ constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
 // HOBJECT at +0x1c and m_hMuzzleSocket at +0x50.
 constexpr std::size_t kRetailRightWeaponModelObjectOffset = 0x1C;
 constexpr std::size_t kRetailRightWeaponMuzzleSocketOffset = 0x50;
-// `CClientWeapon::m_LeftHandWeapon.m_hObject`. Jede Waffe legt dieses zweite,
-// fuer die linke Hand modellierte Objekt an, auch wenn sie einhaendig ist.
-// Belegt aus `SetVisible`, das es aus `[esi+0xD4]` liest — die Bytes stehen
-// im geprueften Mustervergleich dieser Funktion.
+// `CClientWeapon::m_LeftHandWeapon.m_hObject`. Bei Dual Pistols ist dies das
+// LDPistol-Modell; normale Einhandwaffen haben kein linkes HHModel.
+// SetVisible liest das Objekt im geprueften Code aus `[esi+0xD4]`.
 constexpr std::size_t kRetailLeftWeaponModelObjectOffset = 0xD4;
+// `CClientWeapon::m_bFireLeftHand`. Retails FIRE-Modellkey setzt dieses Byte
+// auf LEFT oder RIGHT; GetFireVectors liest es vor der Modellwahl.
+constexpr std::size_t kRetailWeaponFireLeftHandOffset = 0x1E3;
+constexpr std::size_t kRetailGetFireVectorsFireHandProbeOffset = 0x3D8;
 // `CClientWeapon::m_bDisabled`. Retail schaltet die Waffe darueber ab, sobald
 // sie nicht in der Hand liegt — an der Leiter (`LadderMgr` ruft beim Aufstieg
 // `CClientWeaponMgr::DisableWeapons`), in Zwischensequenzen und am Geschuetz.
@@ -755,6 +931,23 @@ constexpr int kRetailTrackerGroupAimAt = 1;
 // GameOrig+0x2E1BAC, `m_eGameState` als dword bei +0x08.
 constexpr std::uintptr_t kRetailInterfaceMgrPointerRva = 0x002E1BACU;
 constexpr std::size_t kRetailInterfaceMgrGameStateOffset = 0x08;
+// CPlayerStats/WeaponDB/IDatabaseMgr-Zugriffe fuer das Wrist-HUD. Alle
+// Adressen und Layouts sind gegen Retail 1.08 (GameOrig.dll) geprueft:
+// CPlayerStats besitzt einen vptr bei +0, seine Statusfelder beginnen bei +4.
+constexpr std::uintptr_t kRetailPlayerStatsPointerRva = 0x002E31B8U;
+constexpr std::uintptr_t kRetailWeaponDatabasePointerRva = 0x002E66CCU;
+constexpr std::uintptr_t kRetailDatabasePointerRva = 0x002E66A8U;
+constexpr std::uintptr_t kRetailGetAmmoCountRva = 0x0000A60AU;
+constexpr std::uintptr_t kRetailGetWeaponDataRva = 0x0020FFB0U;
+constexpr std::uintptr_t kRetailGetPlayerGrenadeRva = 0x0020FA80U;
+constexpr std::uintptr_t kRetailGetGearRecordRva = 0x0020F650U;
+constexpr std::uintptr_t kRetailGetGearCountRva = 0x0001252BU;
+constexpr std::size_t kRetailPlayerStatsHealthOffset = 0x04;
+constexpr std::size_t kRetailPlayerStatsArmorOffset = 0x08;
+constexpr std::size_t kRetailPlayerStatsMaxHealthOffset = 0x0C;
+constexpr std::size_t kRetailPlayerStatsMaxArmorOffset = 0x10;
+constexpr std::size_t kRetailPlayerStatsAirPercentOffset = 0x14;
+constexpr std::size_t kRetailPlayerStatsCurrentAmmoOffset = 0x2C;
 // Ladestelle des Zeigers in CInterfaceResMgr::DrawScreen. Belegt, dass die
 // RVA in dieser Binary wirklich der Interface-Manager ist, und liefert die
 // relozierte Adresse.
@@ -769,6 +962,8 @@ constexpr std::uintptr_t kRetailGameStateSwitchRva = 0x000F1F20U;
 // GS_SPLASHSCREEN=4, GS_MENU=5, GS_SCREEN=6, GS_PAUSED=7, GS_DEMOSCREEN=8,
 // GS_MOVIE=9. Nur GS_PLAYING rendert die Welt; alles andere ist Flachbild.
 constexpr int kRetailGameStatePlaying = 1;
+constexpr int kRetailGameStateExitingLevel = 2;
+constexpr int kRetailGameStateLoadingLevel = 3;
 constexpr int kRetailGameStateCount = 10;
 constexpr unsigned char kRetailPlayerCameraForwarder[] = {
     0x8B, 0x54, 0x24, 0x04, // mov edx,[esp+4]
@@ -805,9 +1000,11 @@ enum VrMenuCommand : std::uint32_t {
     kVrMenuToggleComfort,
     kVrMenuToggleAimGuide,
     kVrMenuToggleHaptics,
+    kVrMenuCycleFlashlightMount,
     kVrMenuToggleHandedness,
     kVrMenuToggleClimbing,
     kVrMenuTogglePhysicalLean,
+    kVrMenuTogglePhysicalDuck,
     kVrMenuToggleMelee,
     kVrMenuToggleArms,
     kVrMenuCycleFovScale,
@@ -1423,6 +1620,12 @@ void InitializeVrSettings() noexcept {
         ReadVrSetting(L"AimGuide", 1) != 0;
     g_controllerHapticsEnabled =
         ReadVrSetting(L"Haptics", 1) != 0;
+    g_flashlightMount = static_cast<FlashlightMount>(
+        std::clamp(
+            ReadVrSetting(
+                L"FlashlightMount",
+                static_cast<int>(FlashlightMount::Weapon)),
+            0, kFlashlightMountCount - 1));
     g_twoHandedGripEnabled =
         ReadVrSetting(L"TwoHandGrip", 1) != 0;
     g_meleeThrustEnabled =
@@ -1440,6 +1643,8 @@ void InitializeVrSettings() noexcept {
     // bestaetigt ist.
     g_climbingEnabled = ReadVrSetting(L"Climbing", 0) != 0;
     g_physicalLeanEnabled = ReadVrSetting(L"PhysicalLean", 1) != 0;
+    g_physicalDuckEnabled = ReadVrSetting(L"PhysicalDuck", 1) != 0;
+    g_physicalDuckActive = false;
     g_leanScalePercent =
         std::clamp(ReadVrSetting(L"LeanScale", 200), 100, 400);
     g_leftHandedBindings =
@@ -1447,7 +1652,7 @@ void InitializeVrSettings() noexcept {
     g_showPlayerArms =
         ReadVrSetting(L"ShowArms", 0) != 0;
     g_fovScalePreset = FovScalePresetForPercent(
-        ReadVrSetting(L"FovScale", 100));
+        ReadVrSetting(L"FovScale", 130));
     ApplyFovScalePreset();
     g_turnSpeedPreset =
         std::clamp(ReadVrSetting(L"TurnSpeed", 1), 0, 2);
@@ -1517,6 +1722,9 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(
         L"Haptics", g_controllerHapticsEnabled ? 1 : 0);
     WriteVrSetting(
+        L"FlashlightMount",
+        static_cast<int>(g_flashlightMount));
+    WriteVrSetting(
         L"TwoHandGrip", g_twoHandedGripEnabled ? 1 : 0);
     WriteVrSetting(
         L"MeleeGestures", g_meleeThrustEnabled ? 1 : 0);
@@ -1533,6 +1741,8 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(L"Climbing", g_climbingEnabled ? 1 : 0);
     WriteVrSetting(
         L"PhysicalLean", g_physicalLeanEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"PhysicalDuck", g_physicalDuckEnabled ? 1 : 0);
     WriteVrSetting(L"LeanScale", g_leanScalePercent);
     WriteVrSetting(
         L"LeftHanded", g_leftHandedBindings ? 1 : 0);
@@ -1596,10 +1806,9 @@ void MarkRetailVrMenuForLayout() noexcept {
 // sichtbaren Umschalter versteckte Geschwister-Controls, weshalb
 // `m_nFirstShown` falsch gesetzt wird und die Liste springt.
 //
-// Die verkürzte VR-Seite passt vollständig in den nativen Rahmen. Der
-// Listenanfang wird deshalb bei 0 festgehalten, solange sie aktiv ist. Der
-// Schreibzugriff erfolgt nur bei Bedarf, damit nicht jedes Frame eine
-// Neuberechnung erzwungen wird.
+// Beim Verlassen der VR-Seite muss der Listenanfang wieder auf Retails erste
+// physische Zeile zeigen. Der Schreibzugriff erfolgt nur bei Bedarf, damit
+// nicht jedes Frame eine Neuberechnung erzwungen wird.
 void ResetRetailVrMenuScroll() noexcept {
     void* const list = RetailVrMenuList(g_vrMenuOwner);
     if (list == nullptr) {
@@ -1681,6 +1890,7 @@ void HideRetailVrSettingsControls() noexcept {
         g_vrMenuHandedness,
         g_vrMenuClimbing,
         g_vrMenuPhysicalLean,
+        g_vrMenuPhysicalDuck,
         g_vrMenuMelee,
         g_vrMenuArms,
     };
@@ -1690,6 +1900,9 @@ void HideRetailVrSettingsControls() noexcept {
     }
     for (const VrMenuControl& turnSpeed : g_vrMenuTurnSpeed) {
         SetRetailControlVisible(turnSpeed, false);
+    }
+    for (const VrMenuControl& mount : g_vrMenuFlashlightMount) {
+        SetRetailControlVisible(mount, false);
     }
     for (const VrMenuControl& fovScale : g_vrMenuFovScale) {
         SetRetailControlVisible(fovScale, false);
@@ -1707,8 +1920,9 @@ VrMenuControl SetRetailVrToggleVisible(
 }
 
 VrMenuControl RefreshRetailVrSettingsControls() noexcept {
-    // Keep one short, non-scrolling page. Less frequently changed options
-    // remain persisted in fearvr.ini but do not crowd the native 320px frame.
+    // Only one control for each setting is visible. The logical page has more
+    // rows than the dynamically sized Retail system-menu frame, so
+    // MaintainRetailVrMenuScroll keeps the selected row inside its viewport.
     HideRetailVrSettingsControls();
     const VrMenuControl first = SetRetailVrToggleVisible(
         g_vrMenuStereo,
@@ -1730,11 +1944,21 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
         g_vrMenuAimGuide, g_weaponAimGuideEnabled);
     SetRetailVrToggleVisible(
         g_vrMenuHaptics, g_controllerHapticsEnabled);
+    const int flashlightMount = std::clamp(
+        static_cast<int>(g_flashlightMount),
+        0, kFlashlightMountCount - 1);
+    for (int index = 0; index < kFlashlightMountCount; ++index) {
+        SetRetailControlVisible(
+            g_vrMenuFlashlightMount[index],
+            index == flashlightMount);
+    }
     SetRetailVrToggleVisible(
         g_vrMenuHandedness, !g_leftHandedBindings);
     SetRetailVrToggleVisible(g_vrMenuClimbing, g_climbingEnabled);
     SetRetailVrToggleVisible(
         g_vrMenuPhysicalLean, g_physicalLeanEnabled);
+    SetRetailVrToggleVisible(
+        g_vrMenuPhysicalDuck, g_physicalDuckEnabled);
     SetRetailVrToggleVisible(g_vrMenuMelee, g_meleeThrustEnabled);
     SetRetailVrToggleVisible(g_vrMenuArms, g_showPlayerArms);
     SetRetailControlVisible(g_vrMenuRecenter, true);
@@ -1742,6 +1966,113 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
     SetRetailControlVisible(g_vrMenuBack, true);
     MarkRetailVrMenuForLayout();
     return first;
+}
+
+std::array<VrMenuControl, kRetailVrMenuVisibleControlCount>
+RetailVrMenuVisibleControls() noexcept {
+    const auto toggleControl = [](
+        const VrMenuToggle& toggle, bool enabled) noexcept {
+        return enabled ? toggle.enabled : toggle.disabled;
+    };
+    const int turnSpeed = std::clamp(g_turnSpeedPreset, 0, 2);
+    const int fovScale = std::clamp(g_fovScalePreset, 0, 3);
+    const int flashlightMount = std::clamp(
+        static_cast<int>(g_flashlightMount),
+        0, kFlashlightMountCount - 1);
+
+    return {{
+        toggleControl(
+            g_vrMenuStereo,
+            QueryBooleanOption(g_isStereoEnabled, true)),
+        toggleControl(
+            g_vrMenuStereoHud,
+            QueryBooleanOption(g_isStereoHudEnabled, true)),
+        toggleControl(g_vrMenuAimGuide, g_weaponAimGuideEnabled),
+        toggleControl(g_vrMenuHaptics, g_controllerHapticsEnabled),
+        g_vrMenuFlashlightMount[flashlightMount],
+        toggleControl(g_vrMenuHandedness, !g_leftHandedBindings),
+        toggleControl(g_vrMenuClimbing, g_climbingEnabled),
+        toggleControl(g_vrMenuPhysicalLean, g_physicalLeanEnabled),
+        toggleControl(g_vrMenuPhysicalDuck, g_physicalDuckEnabled),
+        toggleControl(g_vrMenuMelee, g_meleeThrustEnabled),
+        toggleControl(g_vrMenuArms, g_showPlayerArms),
+        g_vrMenuFovScale[fovScale],
+        g_vrMenuTurnSpeed[turnSpeed],
+        g_vrMenuRecenter,
+        g_vrMenuDefaults,
+        g_vrMenuBack,
+    }};
+}
+
+void MaintainRetailVrMenuScroll() noexcept {
+    if (!g_vrSettingsPageActive) {
+        return;
+    }
+    void* const list = RetailVrMenuList(g_vrMenuOwner);
+    if (list == nullptr) {
+        return;
+    }
+
+    __try {
+        const auto controls = RetailVrMenuVisibleControls();
+        const std::uint32_t selection =
+            *reinterpret_cast<const std::uint32_t*>(
+                static_cast<const unsigned char*>(list) +
+                kRetailListCurrentIndexOffset);
+        std::size_t selectedRow = controls.size();
+        for (std::size_t row = 0; row < controls.size(); ++row) {
+            if (controls[row].object != nullptr &&
+                controls[row].index == selection) {
+                selectedRow = row;
+                break;
+            }
+        }
+        if (selectedRow == controls.size()) {
+            return;
+        }
+
+        std::array<std::uint32_t, kRetailVrMenuVisibleControlCount>
+            controlIndices{};
+        for (std::size_t row = 0; row < controls.size(); ++row) {
+            controlIndices[row] = controls[row].index;
+        }
+        if (!VrMenuControlOrderIsStrictlyIncreasing(
+                controlIndices.data(), controlIndices.size())) {
+            Report(
+                "ERROR", "vr_settings_menu_order_invalid",
+                "The logical VR rows do not match Retail's physical control "
+                "order; scrolling was left unchanged.");
+            return;
+        }
+        const std::uint32_t lastShown =
+            *reinterpret_cast<const std::uint32_t*>(
+                static_cast<const unsigned char*>(list) +
+                kRetailListLastShownOffset);
+        const std::size_t observedPageRows =
+            VrMenuVisibleRowCapacity(
+                controlIndices.data(), controlIndices.size(),
+                g_vrMenuFirstVisibleRow, lastShown);
+        if (observedPageRows != 0) {
+            g_vrMenuPageRows = VrMenuSafePageRows(observedPageRows);
+        }
+
+        g_vrMenuFirstVisibleRow = VrMenuScrollStart(
+            g_vrMenuFirstVisibleRow,
+            selectedRow,
+            controls.size(),
+            g_vrMenuPageRows);
+        const std::uint32_t desiredFirstShown =
+            controls[g_vrMenuFirstVisibleRow].index;
+        auto* const firstShown = reinterpret_cast<std::uint32_t*>(
+            static_cast<unsigned char*>(list) +
+            kRetailListFirstShownOffset);
+        if (*firstShown != desiredFirstShown) {
+            *firstShown = desiredFirstShown;
+            *(static_cast<unsigned char*>(list) +
+              kRetailListNeedsRecalculationOffset) = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 void SelectRetailVrMenuControl(
@@ -1753,9 +2084,6 @@ void SelectRetailVrMenuControl(
     __try {
         g_retailListSetSelection(
             RetailVrMenuList(g_vrMenuOwner), control.index);
-        if (g_vrSettingsPageActive) {
-            ResetRetailVrMenuScroll();
-        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
@@ -1778,6 +2106,8 @@ void EnterRetailVrSettingsPage() noexcept {
          index < g_vrNormalControlCount; ++index) {
         SetRetailControlVisible(g_vrNormalControls[index], false);
     }
+    g_vrMenuFirstVisibleRow = 0;
+    g_vrMenuPageRows = 8;
     g_vrSettingsPageActive = true;
     SetRetailVrMenuCompactSpacing(true);
     const VrMenuControl first =
@@ -1792,6 +2122,9 @@ void LeaveRetailVrSettingsPage() noexcept {
     if (!g_vrSettingsPageActive) {
         return;
     }
+    ResetRetailVrMenuScroll();
+    g_vrMenuFirstVisibleRow = 0;
+    g_vrMenuPageRows = 8;
     g_vrSettingsPageActive = false;
     RestoreRetailSystemMenuControls();
     SaveVrSettings();
@@ -1808,6 +2141,7 @@ void LeaveRetailVrSettingsPage() noexcept {
 }
 
 void ResetVrTrackingBasis() noexcept {
+    g_physicalDuckActive = false;
     InterlockedIncrement(&g_trackingResetGeneration);
 }
 
@@ -1828,12 +2162,16 @@ void ApplyVrDefaults() noexcept {
     ApplyHeadBobEnabled(false);
     g_weaponAimGuideEnabled = true;
     g_controllerHapticsEnabled = true;
+    g_flashlightMount = FlashlightMount::Weapon;
     g_twoHandedGripEnabled = true;
     g_leftHandedBindings = false;
     g_turnSpeedPreset = 1;
-    g_fovScalePreset = 0;
+    g_fovScalePreset = 3;
     ApplyFovScalePreset();
     g_climbingEnabled = false;
+    g_physicalLeanEnabled = true;
+    g_physicalDuckEnabled = true;
+    g_physicalDuckActive = false;
     g_meleeThrustEnabled = true;
     g_meleeWeaponStrikeEnabled = true;
     g_meleeOffHandStrikeEnabled = true;
@@ -1930,6 +2268,21 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
         L"Controller vibration: ON", kVrMenuToggleHaptics);
     g_vrMenuHaptics.disabled = AddRetailVrMenuControl(
         L"Controller vibration: OFF", kVrMenuToggleHaptics);
+    g_vrMenuFlashlightMount[
+        static_cast<int>(FlashlightMount::LeftHand)] =
+        AddRetailVrMenuControl(
+            L"Flashlight mount: LEFT HAND",
+            kVrMenuCycleFlashlightMount);
+    g_vrMenuFlashlightMount[
+        static_cast<int>(FlashlightMount::Head)] =
+        AddRetailVrMenuControl(
+            L"Flashlight mount: HEAD",
+            kVrMenuCycleFlashlightMount);
+    g_vrMenuFlashlightMount[
+        static_cast<int>(FlashlightMount::Weapon)] =
+        AddRetailVrMenuControl(
+            L"Flashlight mount: WEAPON",
+            kVrMenuCycleFlashlightMount);
     g_vrMenuHandedness.enabled = AddRetailVrMenuControl(
         L"Controls: RIGHT-HANDED", kVrMenuToggleHandedness);
     g_vrMenuHandedness.disabled = AddRetailVrMenuControl(
@@ -1942,6 +2295,10 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
         L"Physical lean: ON", kVrMenuTogglePhysicalLean);
     g_vrMenuPhysicalLean.disabled = AddRetailVrMenuControl(
         L"Physical lean: OFF", kVrMenuTogglePhysicalLean);
+    g_vrMenuPhysicalDuck.enabled = AddRetailVrMenuControl(
+        L"Physical duck: ON", kVrMenuTogglePhysicalDuck);
+    g_vrMenuPhysicalDuck.disabled = AddRetailVrMenuControl(
+        L"Physical duck: OFF", kVrMenuTogglePhysicalDuck);
     g_vrMenuMelee.enabled = AddRetailVrMenuControl(
         L"Melee: GESTURES", kVrMenuToggleMelee);
     g_vrMenuMelee.disabled = AddRetailVrMenuControl(
@@ -2066,6 +2423,34 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         selection = SetRetailVrToggleVisible(
             g_vrMenuHaptics, g_controllerHapticsEnabled);
         break;
+    case kVrMenuCycleFlashlightMount: {
+        const int next =
+            (static_cast<int>(g_flashlightMount) + 1) %
+            kFlashlightMountCount;
+        g_flashlightMount = static_cast<FlashlightMount>(next);
+        for (int index = 0;
+             index < kFlashlightMountCount; ++index) {
+            SetRetailControlVisible(
+                g_vrMenuFlashlightMount[index],
+                index == next);
+        }
+        selection = g_vrMenuFlashlightMount[next];
+        const char* description = "left hand";
+        if (g_flashlightMount == FlashlightMount::Head) {
+            description = "head";
+        } else if (
+            g_flashlightMount == FlashlightMount::Weapon) {
+            description = "weapon";
+        }
+        char message[112]{};
+        std::snprintf(
+            message, sizeof(message),
+            "The VR flashlight is now mounted on the %s.",
+            description);
+        Report(
+            "INFO", "vr_flashlight_mount_changed", message);
+        break;
+    }
     case kVrMenuToggleHandedness:
         g_leftHandedBindings = !g_leftHandedBindings;
         // Der gespiegelte Zustand betrifft auch die Handkalibrierung und die
@@ -2154,6 +2539,17 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
                 ? "Leaning moves the viewpoint, limited by the world."
                 : "Leaning only tilts the camera, as in the original game.");
         break;
+    case kVrMenuTogglePhysicalDuck:
+        g_physicalDuckEnabled = !g_physicalDuckEnabled;
+        g_physicalDuckActive = false;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuPhysicalDuck, g_physicalDuckEnabled);
+        Report(
+            "INFO", "vr_physical_duck_changed",
+            g_physicalDuckEnabled
+                ? "Lowering the headset engages Retail crouch."
+                : "Only the classic stick crouch engages Retail crouch.");
+        break;
     case kVrMenuCycleTurnSpeed:
         g_turnSpeedPreset = (g_turnSpeedPreset + 1) % 3;
         for (int index = 0; index < 3; ++index) {
@@ -2190,6 +2586,10 @@ void __fastcall HookRetailMenuOnFocus(
     void* menu, void* ignoredEdx, bool focus) {
     (void)ignoredEdx;
     if (menu == g_vrMenuOwner && g_vrMenuControlsBuilt) {
+        if (g_vrSettingsPageActive) {
+            ResetRetailVrMenuScroll();
+        }
+        g_vrMenuFirstVisibleRow = 0;
         g_vrSettingsPageActive = false;
         RestoreRetailSystemMenuControls();
         // Fokusgewinn ist eine sichere Aussage: Das Pausenmenü ist offen.
@@ -2540,6 +2940,127 @@ void UpdateVrCameraCollisionPath() noexcept {
     }
 }
 
+bool VrCameraCollisionObjectFilter(
+    HOBJECT object, void* ignoredUserData) {
+    (void)ignoredUserData;
+    if (object == nullptr || g_client == nullptr) {
+        return true;
+    }
+
+    __try {
+        ILTCommon* const common = g_client->Common();
+        std::uint32_t userFlags = 0;
+        if (common != nullptr &&
+            common->GetObjectFlags(
+                object, OFT_User, userFlags) == LT_OK &&
+            IsCharacterCollisionObject(userFlags)) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Unknown objects retain Retail's conservative collision behavior.
+    }
+    return true;
+}
+
+bool TraceVrCameraDirection(
+    LTVector& position, const LTVector& direction,
+    float clipDistance, bool positive) noexcept {
+    IntersectQuery query;
+    query.m_From = position;
+    query.m_To =
+        position +
+        direction * (positive ? clipDistance : -clipDistance);
+    query.m_Flags =
+        INTERSECT_OBJECTS | IGNORE_NONSOLID | INTERSECT_HPOLY;
+    query.m_FilterFn = &VrCameraCollisionObjectFilter;
+
+    IntersectInfo hit;
+    __try {
+        if (!g_client->IntersectSegment(query, &hit)) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    const float hitDistance = (hit.m_Point - position).Mag();
+    if (!std::isfinite(hitDistance) ||
+        hitDistance >= clipDistance) {
+        return true;
+    }
+    const float correction = clipDistance - hitDistance;
+    position +=
+        direction * (positive ? -correction : correction);
+    return true;
+}
+
+// Retails ray-only camera path has no object filter. Consequently the six
+// short anti-clipping rays can hit a character's large invisible box while
+// the headset is close to a corpse and alternately push the camera to either
+// side. Keep the right/left, ceiling/floor and forward/backward layout, but
+// let only world and prop geometry influence the VR camera.
+void __fastcall HookRetailCalcNoClip(
+    void* playerCamera, void* ignoredEdx,
+    LTVector& position, LTRotation& rotation) {
+    (void)ignoredEdx;
+    bool nativeVrWorld = false;
+    __try {
+        nativeVrWorld =
+            g_isStereoEnabled != nullptr &&
+            g_isFlatPanelActive != nullptr &&
+            g_isStereoEnabled() != FALSE &&
+            g_isFlatPanelActive() == FALSE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        nativeVrWorld = false;
+    }
+    if (!nativeVrWorld || g_client == nullptr) {
+        g_retailCalcNoClip(
+            playerCamera, position, rotation);
+        return;
+    }
+
+    float clipDistance = 30.0F;
+    __try {
+        const HCONSOLEVAR variable =
+            g_client->GetConsoleVariable("CameraClipDist");
+        if (variable != nullptr) {
+            const float configured =
+                g_client->GetConsoleVariableFloat(variable);
+            if (std::isfinite(configured) && configured > 0.0F) {
+                clipDistance = configured;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+
+    const LTVector right = rotation.Right();
+    const LTVector up = rotation.Up();
+    const LTVector forward = rotation.Forward();
+    if (!TraceVrCameraDirection(
+            position, right, clipDistance, true)) {
+        TraceVrCameraDirection(
+            position, right, clipDistance, false);
+    }
+    if (!TraceVrCameraDirection(
+            position, up, clipDistance, true)) {
+        TraceVrCameraDirection(
+            position, up, clipDistance, false);
+    }
+    if (!TraceVrCameraDirection(
+            position, forward, clipDistance, true)) {
+        TraceVrCameraDirection(
+            position, forward, clipDistance, false);
+    }
+
+    if (InterlockedCompareExchange(
+            &g_cameraCharacterFilterActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "vr_camera_character_collision_filtered",
+            "VR camera anti-clipping ignores character and corpse hitboxes "
+            "while retaining world and prop collision.");
+    }
+}
+
 // Liefert die Mündung in Weltkoordinaten.
 //
 // Bevorzugt wird die Rekonstruktion aus derselben Transformation, mit der auch
@@ -2569,17 +3090,45 @@ bool ResolveMuzzleWorldTransform(LTRigidTransform& muzzle) noexcept {
     return false;
 }
 
-bool TraceWeaponAim(
-    LTVector& rayStart, LTVector& rayEnd) noexcept {
-    if (g_client == nullptr || !g_weaponAim.valid) {
+bool ResolveLeftMuzzleWorldTransform(
+    LTRigidTransform& muzzle) noexcept {
+    if (g_weaponAim.leftMuzzleLocalValid &&
+        g_weaponAim.leftWeaponTransformValid) {
+        muzzle.m_rRot =
+            g_weaponAim.leftWeaponTransform.m_rRot *
+            g_weaponAim.leftMuzzleRotationInWeapon;
+        muzzle.m_vPos =
+            g_weaponAim.leftWeaponTransform.m_vPos +
+            g_weaponAim.leftWeaponTransform.m_rRot.RotateVector(
+                g_weaponAim.leftMuzzleOffsetInWeapon);
+        return true;
+    }
+    if (g_weaponAim.leftMuzzleValid) {
+        muzzle = g_weaponAim.leftMuzzleTransform;
+        return true;
+    }
+    if (g_weaponAim.leftAimValid) {
+        muzzle = g_weaponAim.leftAimTransform;
         return false;
     }
+    return false;
+}
 
+struct RetailVectorFilterParams {
+    void* weapon;
+    LTVector firePosition;
+    LTVector endPosition;
+};
+static_assert(
+    sizeof(RetailVectorFilterParams) == 28,
+    "Retail CW_VOFF_Params layout changed.");
+
+bool TraceAimPose(
+    const LTRigidTransform& muzzle,
+    LTVector& rayStart, LTVector& rayEnd) noexcept {
     LTVector right;
     LTVector up;
     LTVector forward;
-    LTRigidTransform muzzle;
-    ResolveMuzzleWorldTransform(muzzle);
     muzzle.m_rRot.GetVectors(right, up, forward);
     rayStart = muzzle.m_vPos;
     rayEnd = rayStart + forward * 10000.0F;
@@ -2589,7 +3138,17 @@ bool TraceWeaponAim(
     // the controller aim origin happens to be inside its collision volume.
     query.m_From = rayStart + forward * 8.0F;
     query.m_To = rayEnd;
-    query.m_Flags = INTERSECT_OBJECTS | IGNORE_NONSOLID;
+    query.m_Flags =
+        INTERSECT_OBJECTS | IGNORE_NONSOLID | INTERSECT_HPOLY;
+    RetailVectorFilterParams filterParams{
+        nullptr, rayStart, rayEnd};
+    if (g_retailVectorObjectFilter != nullptr) {
+        // This is the same callback Retail uses for hitscan weapons. It
+        // rejects the broad CharacterHitBox unless the ray also crosses one
+        // of the animated/ragdoll skeleton-node spheres.
+        query.m_FilterFn = g_retailVectorObjectFilter;
+        query.m_pUserData = &filterParams;
+    }
     IntersectInfo hit;
     __try {
         if (g_client->IntersectSegment(query, &hit)) {
@@ -2599,6 +3158,28 @@ bool TraceWeaponAim(
         return false;
     }
     return true;
+}
+
+bool TraceWeaponAim(
+    LTVector& rayStart, LTVector& rayEnd) noexcept {
+    if (g_client == nullptr || !g_weaponAim.valid) {
+        return false;
+    }
+
+    LTRigidTransform muzzle;
+    ResolveMuzzleWorldTransform(muzzle);
+    return TraceAimPose(muzzle, rayStart, rayEnd);
+}
+
+bool TraceLeftWeaponAim(
+    LTVector& rayStart, LTVector& rayEnd) noexcept {
+    if (g_client == nullptr || g_weaponAim.leftWeaponModel == nullptr ||
+        !g_weaponAim.leftWeaponTransformValid) {
+        return false;
+    }
+    LTRigidTransform muzzle;
+    ResolveLeftMuzzleWorldTransform(muzzle);
+    return TraceAimPose(muzzle, rayStart, rayEnd);
 }
 
 // Ursprung und Richtung, mit denen Retail nach Schaltern und Items suchen
@@ -3082,6 +3663,865 @@ void __fastcall HookRetailObjectDetectorUpdate(
     }
 }
 
+int ReadRetailGameState() noexcept;
+bool ResolveHeadFlashlightPose(LTRigidTransform& pose) noexcept;
+
+struct WristHudData {
+    std::uint32_t health{0};
+    std::uint32_t armor{0};
+    std::uint32_t maxHealth{0};
+    std::uint32_t maxArmor{0};
+    std::uint32_t ammo{0};
+    std::uint32_t throwables[3]{};
+    std::uint32_t medkits{0};
+    float airPercent{1.0F};
+};
+
+bool ResolveRetailWristHudTargets() noexcept {
+    if (g_retailWristHudResolveAttempted) {
+        return g_retailPlayerStatsPointer != nullptr &&
+               g_retailWeaponDatabasePointer != nullptr &&
+               g_retailDatabasePointer != nullptr &&
+               g_retailGetAmmoCount != nullptr &&
+               g_retailGetWeaponData != nullptr &&
+               g_retailGetPlayerGrenade != nullptr &&
+               g_retailGetGearRecord != nullptr &&
+               g_retailGetGearCount != nullptr;
+    }
+    g_retailWristHudResolveAttempted = true;
+
+    HMODULE const module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(module);
+    __try {
+        const auto* const dos =
+            reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew <= 0) {
+            return false;
+        }
+        const auto* const nt =
+            reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->FileHeader.TimeDateStamp !=
+                kRetailGameClientTimeDateStamp ||
+            nt->OptionalHeader.SizeOfImage !=
+                kRetailGameClientSizeOfImage) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    auto* const ammoCount = base + kRetailGetAmmoCountRva;
+    auto* const weaponData = base + kRetailGetWeaponDataRva;
+    auto* const playerGrenade = base + kRetailGetPlayerGrenadeRva;
+    auto* const gearRecord = base + kRetailGetGearRecordRva;
+    auto* const gearCount = base + kRetailGetGearCountRva;
+    constexpr unsigned char kAmmoCountThunk[] = {
+        0xE9};
+    constexpr unsigned char kWeaponDataPrefix[] = {
+        0x56, 0x8B, 0x74, 0x24, 0x08, 0x85, 0xF6, 0x75,
+        0x06, 0x33, 0xC0, 0x5E, 0xC2, 0x08, 0x00};
+    constexpr unsigned char kPlayerGrenadePrefix[] = {
+        0x8B, 0xC1, 0x8B, 0x0D};
+    constexpr unsigned char kPlayerGrenadeBody[] = {
+        0x8B, 0x40, 0x48, 0x8B, 0x11};
+    constexpr unsigned char kGearRecordPrefix[] = {
+        0x53, 0x8B, 0x59, 0x34, 0x57, 0x8B, 0x7C, 0x24,
+        0x0C};
+    constexpr unsigned char kGearCountThunk[] = {
+        0xE9};
+    if (!MatchesCode(
+            ammoCount, kAmmoCountThunk, sizeof(kAmmoCountThunk)) ||
+        !MatchesCode(
+            weaponData, kWeaponDataPrefix,
+            sizeof(kWeaponDataPrefix)) ||
+        !MatchesCode(
+            playerGrenade, kPlayerGrenadePrefix,
+            sizeof(kPlayerGrenadePrefix)) ||
+        !MatchesCode(
+            playerGrenade + 8, kPlayerGrenadeBody,
+            sizeof(kPlayerGrenadeBody)) ||
+        !MatchesCode(
+            gearRecord, kGearRecordPrefix,
+            sizeof(kGearRecordPrefix)) ||
+        !MatchesCode(
+            gearCount, kGearCountThunk,
+            sizeof(kGearCountThunk))) {
+        Report(
+            "ERROR", "wrist_hud_layout_mismatch",
+            "Retail status or throwable accessors did not match; the "
+            "wrist HUD stays disabled.");
+        return false;
+    }
+
+    g_retailPlayerStatsPointer =
+        reinterpret_cast<const void* const*>(
+            base + kRetailPlayerStatsPointerRva);
+    g_retailWeaponDatabasePointer =
+        reinterpret_cast<const void* const*>(
+            base + kRetailWeaponDatabasePointerRva);
+    g_retailDatabasePointer =
+        reinterpret_cast<IDatabaseMgr* const*>(
+            base + kRetailDatabasePointerRva);
+    g_retailGetAmmoCount =
+        reinterpret_cast<RetailGetAmmoCountFunction>(ammoCount);
+    g_retailGetWeaponData =
+        reinterpret_cast<RetailGetWeaponDataFunction>(weaponData);
+    g_retailGetPlayerGrenade =
+        reinterpret_cast<RetailGetPlayerGrenadeFunction>(playerGrenade);
+    g_retailGetGearRecord =
+        reinterpret_cast<RetailGetGearRecordFunction>(gearRecord);
+    g_retailGetGearCount =
+        reinterpret_cast<RetailGetGearCountFunction>(gearCount);
+    Report(
+        "INFO", "wrist_hud_retail_data_ready",
+        "Verified Retail health, armor, ammo and all three throwable "
+        "inventory slots are available to the wrist HUD.");
+    return true;
+}
+
+bool ReadRetailWristHudData(WristHudData& data) noexcept {
+    if (!ResolveRetailWristHudTargets()) {
+        return false;
+    }
+
+    __try {
+        const auto* const stats =
+            reinterpret_cast<const unsigned char*>(
+                *g_retailPlayerStatsPointer);
+        const void* const weaponDatabase =
+            *g_retailWeaponDatabasePointer;
+        IDatabaseMgr* const database = *g_retailDatabasePointer;
+        if (stats == nullptr || weaponDatabase == nullptr ||
+            database == nullptr) {
+            return false;
+        }
+
+        std::memcpy(
+            &data.health,
+            stats + kRetailPlayerStatsHealthOffset,
+            sizeof(data.health));
+        std::memcpy(
+            &data.armor,
+            stats + kRetailPlayerStatsArmorOffset,
+            sizeof(data.armor));
+        std::memcpy(
+            &data.maxHealth,
+            stats + kRetailPlayerStatsMaxHealthOffset,
+            sizeof(data.maxHealth));
+        std::memcpy(
+            &data.maxArmor,
+            stats + kRetailPlayerStatsMaxArmorOffset,
+            sizeof(data.maxArmor));
+        std::memcpy(
+            &data.airPercent,
+            stats + kRetailPlayerStatsAirPercentOffset,
+            sizeof(data.airPercent));
+        HRECORD currentAmmo = nullptr;
+        std::memcpy(
+            &currentAmmo,
+            stats + kRetailPlayerStatsCurrentAmmoOffset,
+            sizeof(currentAmmo));
+        data.ammo =
+            g_retailGetAmmoCount(stats, currentAmmo);
+
+        for (std::uint8_t slot = 0; slot < 3; ++slot) {
+            HRECORD const grenade =
+                g_retailGetPlayerGrenade(weaponDatabase, slot);
+            HRECORD const weapon =
+                g_retailGetWeaponData(
+                    weaponDatabase, grenade, false);
+            HATTRIBUTE const ammoAttribute =
+                database->GetAttribute(weapon, "AmmoName");
+            HRECORD const ammo = database->GetRecordLink(
+                ammoAttribute, 0, nullptr);
+            data.throwables[slot] =
+                g_retailGetAmmoCount(stats, ammo);
+        }
+        HRECORD const medkit =
+            g_retailGetGearRecord(weaponDatabase, "MedKit");
+        data.medkits =
+            g_retailGetGearCount(stats, medkit);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    if (data.maxHealth == 0 || data.maxHealth > 1000000U ||
+        data.maxArmor > 1000000U ||
+        !std::isfinite(data.airPercent)) {
+        return false;
+    }
+    data.airPercent = std::clamp(data.airPercent, 0.0F, 1.0F);
+    return true;
+}
+
+LTVector WristHudPoint(
+    const LTVector& center, const LTVector& right,
+    const LTVector& up, float x, float y) noexcept {
+    return center + right * x + up * y;
+}
+
+constexpr std::size_t kWristHudQuadBatchSize = 128;
+LT_POLYG4 g_wristHudQuadBatch[kWristHudQuadBatchSize];
+std::size_t g_wristHudQuadBatchCount = 0;
+
+void FlushWristHudRects(ILTDrawPrim* drawPrim) noexcept {
+    if (drawPrim == nullptr || g_wristHudQuadBatchCount == 0) {
+        return;
+    }
+    drawPrim->DrawPrim(
+        g_wristHudQuadBatch,
+        static_cast<std::uint32_t>(g_wristHudQuadBatchCount));
+    g_wristHudQuadBatchCount = 0;
+}
+
+void DrawWristHudRect(
+    ILTDrawPrim* drawPrim, const LTVector& center,
+    const LTVector& right, const LTVector& up,
+    float left, float bottom, float rightEdge, float top,
+    std::uint8_t red, std::uint8_t green, std::uint8_t blue,
+    std::uint8_t alpha) noexcept {
+    if (g_wristHudQuadBatchCount == kWristHudQuadBatchSize) {
+        FlushWristHudRects(drawPrim);
+    }
+    LT_POLYG4& quad =
+        g_wristHudQuadBatch[g_wristHudQuadBatchCount++];
+    quad.verts[0].pos =
+        WristHudPoint(center, right, up, left, top);
+    quad.verts[1].pos =
+        WristHudPoint(center, right, up, rightEdge, top);
+    quad.verts[2].pos =
+        WristHudPoint(center, right, up, rightEdge, bottom);
+    quad.verts[3].pos =
+        WristHudPoint(center, right, up, left, bottom);
+    for (LT_VERTG& vertex : quad.verts) {
+        vertex.rgba.Init(red, green, blue, alpha);
+    }
+}
+
+void DrawWristHudLine(
+    ILTDrawPrim* drawPrim, const LTVector& center,
+    const LTVector& right, const LTVector& up,
+    float x0, float y0, float x1, float y1, float thickness,
+    std::uint8_t red, std::uint8_t green, std::uint8_t blue,
+    std::uint8_t alpha = 255) noexcept {
+    const float dx = x1 - x0;
+    const float dy = y1 - y0;
+    const float length = std::sqrt(dx * dx + dy * dy);
+    if (length <= 0.0001F || thickness <= 0.0F) {
+        return;
+    }
+    if (g_wristHudQuadBatchCount == kWristHudQuadBatchSize) {
+        FlushWristHudRects(drawPrim);
+    }
+
+    const float halfWidth = thickness * 0.5F;
+    const float perpendicularX = -dy * halfWidth / length;
+    const float perpendicularY = dx * halfWidth / length;
+    LT_POLYG4& quad =
+        g_wristHudQuadBatch[g_wristHudQuadBatchCount++];
+    quad.verts[0].pos = WristHudPoint(
+        center, right, up,
+        x0 + perpendicularX, y0 + perpendicularY);
+    quad.verts[1].pos = WristHudPoint(
+        center, right, up,
+        x1 + perpendicularX, y1 + perpendicularY);
+    quad.verts[2].pos = WristHudPoint(
+        center, right, up,
+        x1 - perpendicularX, y1 - perpendicularY);
+    quad.verts[3].pos = WristHudPoint(
+        center, right, up,
+        x0 - perpendicularX, y0 - perpendicularY);
+    for (LT_VERTG& vertex : quad.verts) {
+        vertex.rgba.Init(red, green, blue, alpha);
+    }
+}
+
+void DrawWristHudFrame(
+    ILTDrawPrim* drawPrim, const LTVector& center,
+    const LTVector& right, const LTVector& up,
+    float left, float bottom, float rightEdge, float top,
+    float thickness, std::uint8_t red, std::uint8_t green,
+    std::uint8_t blue, std::uint8_t alpha = 255) noexcept {
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        left, top - thickness, rightEdge, top,
+        red, green, blue, alpha);
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        left, bottom, rightEdge, bottom + thickness,
+        red, green, blue, alpha);
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        left, bottom + thickness, left + thickness, top - thickness,
+        red, green, blue, alpha);
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        rightEdge - thickness, bottom + thickness, rightEdge, top - thickness,
+        red, green, blue, alpha);
+}
+
+enum WristHudStrokeSegment : std::uint16_t {
+    kStrokeTop = 1U << 0,
+    kStrokeUpperLeft = 1U << 1,
+    kStrokeUpperRight = 1U << 2,
+    kStrokeMiddleLeft = 1U << 3,
+    kStrokeMiddleRight = 1U << 4,
+    kStrokeLowerLeft = 1U << 5,
+    kStrokeLowerRight = 1U << 6,
+    kStrokeBottom = 1U << 7,
+    kStrokeUpperLeftDiagonal = 1U << 8,
+    kStrokeUpperRightDiagonal = 1U << 9,
+    kStrokeLowerLeftDiagonal = 1U << 10,
+    kStrokeLowerRightDiagonal = 1U << 11,
+    kStrokeUpperCenter = 1U << 12,
+    kStrokeLowerCenter = 1U << 13,
+    kStrokeUpperDot = 1U << 14,
+    kStrokeLowerDot = 1U << 15,
+};
+
+std::uint16_t WristHudStrokeGlyph(char character) noexcept {
+    switch (character) {
+    case '0':
+        return kStrokeTop | kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeLowerLeft | kStrokeLowerRight | kStrokeBottom;
+    case '1':
+        return kStrokeUpperRight | kStrokeLowerRight;
+    case '2':
+        return kStrokeTop | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerLeft | kStrokeBottom;
+    case '3':
+        return kStrokeTop | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerRight | kStrokeBottom;
+    case '4':
+        return kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerRight;
+    case '5':
+        return kStrokeTop | kStrokeUpperLeft |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerRight | kStrokeBottom;
+    case '6':
+        return kStrokeTop | kStrokeUpperLeft |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerLeft | kStrokeLowerRight | kStrokeBottom;
+    case '7':
+        return kStrokeTop | kStrokeUpperRight | kStrokeLowerRight;
+    case '8':
+        return kStrokeTop | kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerLeft | kStrokeLowerRight | kStrokeBottom;
+    case '9':
+        return kStrokeTop | kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerRight | kStrokeBottom;
+    case 'A':
+        return kStrokeTop | kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerLeft | kStrokeLowerRight;
+    case 'C':
+        return kStrokeTop | kStrokeUpperLeft |
+               kStrokeLowerLeft | kStrokeBottom;
+    case 'G':
+        return kStrokeTop | kStrokeUpperLeft | kStrokeMiddleRight |
+               kStrokeLowerLeft | kStrokeLowerRight | kStrokeBottom;
+    case 'H':
+        return kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerLeft | kStrokeLowerRight;
+    case 'I':
+        return kStrokeTop | kStrokeBottom |
+               kStrokeUpperCenter | kStrokeLowerCenter;
+    case 'K':
+        return kStrokeUpperLeft | kStrokeLowerLeft |
+               kStrokeUpperRightDiagonal | kStrokeLowerRightDiagonal;
+    case 'M':
+        return kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeLowerLeft | kStrokeLowerRight |
+               kStrokeUpperLeftDiagonal | kStrokeUpperRightDiagonal;
+    case 'P':
+        return kStrokeTop | kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerLeft;
+    case 'R':
+        return kStrokeTop | kStrokeUpperLeft | kStrokeUpperRight |
+               kStrokeMiddleLeft | kStrokeMiddleRight |
+               kStrokeLowerLeft | kStrokeLowerRightDiagonal;
+    case ':':
+        return kStrokeUpperDot | kStrokeLowerDot;
+    default: return 0;
+    }
+}
+
+void DrawWristHudStrokeGlyph(
+    ILTDrawPrim* drawPrim, const LTVector& center,
+    const LTVector& right, const LTVector& up,
+    float left, float top, float height, char character,
+    std::uint8_t red, std::uint8_t green, std::uint8_t blue,
+    std::uint8_t alpha) noexcept {
+    constexpr float kSegments[][4] = {
+        {0.12F, 1.00F, 0.88F, 1.00F},
+        {0.00F, 0.90F, 0.00F, 0.56F},
+        {1.00F, 0.90F, 1.00F, 0.56F},
+        {0.10F, 0.50F, 0.47F, 0.50F},
+        {0.53F, 0.50F, 0.90F, 0.50F},
+        {0.00F, 0.44F, 0.00F, 0.10F},
+        {1.00F, 0.44F, 1.00F, 0.10F},
+        {0.12F, 0.00F, 0.88F, 0.00F},
+        {0.10F, 0.90F, 0.47F, 0.55F},
+        {0.90F, 0.90F, 0.53F, 0.55F},
+        {0.47F, 0.45F, 0.10F, 0.10F},
+        {0.53F, 0.45F, 0.90F, 0.10F},
+        {0.50F, 0.90F, 0.50F, 0.56F},
+        {0.50F, 0.44F, 0.50F, 0.10F},
+        {0.43F, 0.68F, 0.57F, 0.68F},
+        {0.43F, 0.32F, 0.57F, 0.32F},
+    };
+    const std::uint16_t glyph = WristHudStrokeGlyph(character);
+    const float width = height * 0.56F;
+    const float bottom = top - height;
+    const float thickness = (std::max)(height * 0.065F, 0.045F);
+    for (std::size_t index = 0;
+         index < _countof(kSegments); ++index) {
+        if ((glyph & (1U << index)) == 0) {
+            continue;
+        }
+        const float* const segment = kSegments[index];
+        DrawWristHudLine(
+            drawPrim, center, right, up,
+            left + segment[0] * width,
+            bottom + segment[1] * height,
+            left + segment[2] * width,
+            bottom + segment[3] * height,
+            thickness, red, green, blue, alpha);
+    }
+}
+
+void DrawWristHudText(
+    ILTDrawPrim* drawPrim, const LTVector& center,
+    const LTVector& right, const LTVector& up,
+    float left, float top, float height, const char* text,
+    std::uint8_t red, std::uint8_t green, std::uint8_t blue,
+    std::uint8_t alpha = 255) noexcept {
+    if (text == nullptr) {
+        return;
+    }
+    float cursor = left;
+    for (const char* character = text;
+         *character != '\0'; ++character) {
+        DrawWristHudStrokeGlyph(
+            drawPrim, center, right, up,
+            cursor, top, height, *character,
+            red, green, blue, alpha);
+        cursor += height * 0.74F;
+    }
+}
+
+void DrawWristHudNumber(
+    ILTDrawPrim* drawPrim, const LTVector& center,
+    const LTVector& right, const LTVector& up,
+    float left, float top, float height, std::uint32_t value,
+    std::uint8_t red, std::uint8_t green, std::uint8_t blue) noexcept {
+    char number[8]{};
+    _snprintf_s(
+        number, sizeof(number), _TRUNCATE, "%u",
+        std::min(value, 9999U));
+    DrawWristHudText(
+        drawPrim, center, right, up, left, top, height, number,
+        red, green, blue);
+}
+
+void DrawWristHudBar(
+    ILTDrawPrim* drawPrim, const LTVector& center,
+    const LTVector& right, const LTVector& up,
+    float left, float bottom, float width, float height,
+    float amount, std::uint8_t red, std::uint8_t green,
+    std::uint8_t blue) noexcept {
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        left, bottom, left + width, bottom + height,
+        10, 25, 32, 220);
+    DrawWristHudFrame(
+        drawPrim, center, right, up,
+        left, bottom, left + width, bottom + height,
+        0.07F, 42, 105, 120, 245);
+    const float clamped = std::clamp(amount, 0.0F, 1.0F);
+    if (clamped > 0.0F) {
+        DrawWristHudRect(
+            drawPrim, center, right, up,
+            left + 0.12F, bottom + 0.12F,
+            left + 0.12F + (width - 0.24F) * clamped,
+            bottom + height - 0.12F,
+            red, green, blue, 245);
+    }
+    for (int tick = 1; tick < 4; ++tick) {
+        const float x = left + width * static_cast<float>(tick) * 0.25F;
+        DrawWristHudRect(
+            drawPrim, center, right, up,
+            x - 0.025F, bottom + 0.08F,
+            x + 0.025F, bottom + height - 0.08F,
+            3, 16, 22, 235);
+    }
+}
+
+bool ResolveWristHudPlacement(
+    LTVector& center, LTVector& right, LTVector& up) noexcept {
+    if (!g_weaponAim.leftGripValid ||
+        !g_weaponAim.leftAimValid ||
+        !g_weaponAim.trackingBaseValid ||
+        g_twoHandedGripActive ||
+        g_cutsceneCameraState ||
+        GetTickCount64() - g_lastWeaponManagerUpdateTick >
+            kPlayingFrameFreshMilliseconds ||
+        ReadRetailGameState() != kRetailGameStatePlaying) {
+        g_wristHudVisibleUntil = 0;
+        g_dualPistolWristCandidateSince = 0;
+        g_dualPistolWristHudVisible = false;
+        return false;
+    }
+
+    LTRigidTransform head;
+    if (!ResolveHeadFlashlightPose(head)) {
+        return false;
+    }
+    // Anatomische Lage und Zielrichtung sind bei Dual Pistols nicht
+    // dasselbe: Die sichtbare Waffenmodellrotation enthaelt den
+    // modellspezifischen Flash-Socket-Versatz. Fuer den Uhrblick kommt die
+    // Handflaeche aus der Grip-Pose, fuer die Ziel-Unterdrueckung dagegen die
+    // echte OpenXR-Aim-Pose. Das verhindert, dass eine korrekt ausgerichtete
+    // Support-Pistole wegen ihrer Modellachse als abgewinkeltes Handgelenk
+    // gilt.
+    const LTVector handForward =
+        g_weaponAim.leftGripTransform.m_rRot.Forward();
+    const LTVector supportAimForward =
+        g_weaponAim.leftAimTransform.m_rRot.Forward();
+    LTVector wrist =
+        EffectiveLeftHandPosition() - handForward * 4.0F;
+    LTVector palmNormal =
+        g_weaponAim.leftGripTransform.m_rRot.Up();
+    LTVector wristToHead = head.m_vPos - wrist;
+    const float distance = wristToHead.Mag();
+    if (distance < 12.0F || distance > 100.0F) {
+        return false;
+    }
+    const float wristBelowEyes = wristToHead.y;
+    wristToHead.Normalize();
+    const float wristSurfaceFacing =
+        std::fabs(palmNormal.Dot(wristToHead));
+    const LTVector headForward = head.m_rRot.Forward();
+    const float weaponHeadAlignment =
+        headForward.Dot(supportAimForward);
+    // Runtime-Gripraeume koennen die Oberseite des Controllers
+    // unterschiedlich orientieren. Das Fenster schwebt deshalb immer auf der
+    // dem Gesicht zugewandten Handgelenkseite, nie im Controller/Arm.
+    if (palmNormal.Dot(wristToHead) < 0.0F) {
+        palmNormal = -palmNormal;
+    }
+    // Das Panel sitzt einige Zentimeter vor der Handflaeche. Zusammen mit
+    // dem spaeter deaktivierten Z-Test bleibt die virtuelle Hand unter dem
+    // Display und kann Zahlen oder Linien nicht mehr verdecken.
+    center = wrist + palmNormal * 5.0F;
+
+    LTVector gazeDirection = center - head.m_vPos;
+    gazeDirection.Normalize();
+    const float wristGazeAlignment =
+        headForward.Dot(gazeDirection);
+    const bool dualPistols = DualPistolsVrActive();
+    const bool lookingAtWrist =
+        fearvr::IsLookingAtWrist(
+            wristGazeAlignment, g_dualPistolWristHudVisible);
+    const ULONGLONG now = GetTickCount64();
+    const float supportTrigger = dualPistols
+        ? g_currentInput.trigger[FEARVR_HAND_LEFT]
+        : 0.0F;
+    // Ohne zweite Pistole ist nur die anatomische Uhrpose relevant. Die
+    // linke Aim-Achse existiert auch fuer die freie Hand, hat dort aber keine
+    // semantische Bedeutung und hatte echte Uhrblicke zuletzt faelschlich
+    // blockiert. Mit Support-Pistole bleibt ihre Schussrichtung dagegen der
+    // entscheidende Schutz vor HUD-Einblendungen beim Zielen und Hueftschuss.
+    const bool readingPose = dualPistols
+        ? fearvr::IsDualPistolWristReadingPose(
+              weaponHeadAlignment, wristSurfaceFacing,
+              supportTrigger, g_dualPistolWristHudVisible)
+        : fearvr::IsWristBackTilted(
+              wristSurfaceFacing, g_dualPistolWristHudVisible);
+    const bool candidate = lookingAtWrist && readingPose;
+
+    // Diese kompakte Telemetrie macht Controller-/Runtime-Unterschiede nach
+    // einem Headset-Test messbar. Sie gilt nun fuer jede Ausruestung, weil
+    // auch die freie Support-Hand die bewusste Rueckneigung erfordert.
+    if (wristGazeAlignment >= 0.85F &&
+        now >= g_dualPistolWristDiagnosticAt) {
+        char message[224]{};
+        std::snprintf(
+            message, sizeof(message),
+            "dual=%d distance=%.1f below_eyes=%.1f gaze=%.2f "
+            "weapon_gaze=%.2f surface=%.2f trigger=%.2f "
+            "reading=%d visible=%d",
+            dualPistols ? 1 : 0,
+            static_cast<double>(distance),
+            static_cast<double>(wristBelowEyes),
+            static_cast<double>(wristGazeAlignment),
+            static_cast<double>(weaponHeadAlignment),
+            static_cast<double>(wristSurfaceFacing),
+            static_cast<double>(supportTrigger),
+            readingPose ? 1 : 0,
+            g_dualPistolWristHudVisible ? 1 : 0);
+        Report("INFO", "wrist_reading_pose", message);
+        g_dualPistolWristDiagnosticAt = now + 750;
+    }
+
+    if (g_dualPistolWristHudVisible) {
+        if (!candidate) {
+            g_dualPistolWristHudVisible = false;
+            g_dualPistolWristCandidateSince = 0;
+            g_wristHudVisibleUntil = 0;
+            return false;
+        }
+    } else if (!fearvr::UpdateDualPistolWristDwell(
+                   candidate, now,
+                   g_dualPistolWristCandidateSince)) {
+        g_wristHudVisibleUntil = 0;
+        return false;
+    } else {
+        g_dualPistolWristHudVisible = true;
+    }
+    // Keine neutrale Nachlaufzeit: Sobald die Hand wieder normal steht, die
+    // Pistole in Schussrichtung zeigt oder der Blick weggeht, ist die Sicht
+    // unmittelbar frei.
+    g_wristHudVisibleUntil = now;
+    if (!g_dualPistolWristHudVisible) {
+        return false;
+    }
+
+    right = head.m_rRot.Right();
+    up = head.m_rRot.Up();
+    return true;
+}
+
+void RenderWristHud(HLOCALOBJ camera) noexcept {
+    if (g_client == nullptr || camera == nullptr) {
+        return;
+    }
+
+    LTVector center;
+    LTVector right;
+    LTVector up;
+    if (!ResolveWristHudPlacement(center, right, up)) {
+        return;
+    }
+    WristHudData data;
+    if (!ReadRetailWristHudData(data)) {
+        return;
+    }
+
+    ILTDrawPrim* const drawPrim = g_client->GetDrawPrim();
+    if (drawPrim == nullptr) {
+        return;
+    }
+    const HOBJECT oldCamera = drawPrim->GetCamera();
+    const ELTDrawPrimTransformMode oldTransformMode =
+        drawPrim->GetTransformMode();
+    const ELTDrawPrimZMode oldZMode = drawPrim->GetZMode();
+    const ELTDrawPrimRenderMode oldRenderMode =
+        drawPrim->GetRenderMode();
+
+    drawPrim->SetCamera(camera);
+    drawPrim->SetTransformMode(eLTDrawPrimTransformMode_World);
+    // Ein Wrist-Display ist Information, keine reale Flaeche. Ohne Z-Lesen
+    // bleibt es vor der Hand lesbar; Weltposition und Stereo-Parallaxe bleiben
+    // trotzdem erhalten.
+    drawPrim->SetZMode(eLTDrawPrimZMode_None);
+    drawPrim->SetRenderMode(
+        eLTDrawPrimRenderMode_Modulate_Translucent);
+    drawPrim->SetTexture(nullptr);
+    g_wristHudQuadBatchCount = 0;
+
+    // 15,2 x 9,2 Game-Units entsprechen ungefaehr 15,2 x 9,2 cm. Der Aufbau
+    // folgt einem technischen Instrument: duenne Segmentzeichen, klare
+    // Zellgrenzen und gerasterte Balken statt einer Block-/Pixelschrift.
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        -7.6F, -4.6F, 7.6F, 4.6F,
+        2, 10, 16, 232);
+    DrawWristHudFrame(
+        drawPrim, center, right, up,
+        -7.55F, -4.55F, 7.55F, 4.55F,
+        0.11F, 46, 218, 238, 250);
+    // Separates Uhrmodul: Der kompakte Aufsatz haelt die Statuszellen frei
+    // und passt als klar abgegrenztes Instrument zum technischen Layout.
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        -2.35F, 4.55F, 2.35F, 5.78F,
+        2, 10, 16, 232);
+    DrawWristHudFrame(
+        drawPrim, center, right, up,
+        -2.35F, 4.55F, 2.35F, 5.78F,
+        0.10F, 46, 218, 238, 250);
+    const ULONGLONG clockNow = GetTickCount64();
+    if (clockNow >= g_wristHudClockRefreshAt) {
+        SYSTEMTIME localTime{};
+        GetLocalTime(&localTime);
+        _snprintf_s(
+            g_wristHudClockText, sizeof(g_wristHudClockText),
+            _TRUNCATE, "%02u:%02u",
+            static_cast<unsigned>(localTime.wHour),
+            static_cast<unsigned>(localTime.wMinute));
+        g_wristHudClockRefreshAt = clockNow + 500;
+    }
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        -1.43F, 5.55F, 0.78F, g_wristHudClockText,
+        88, 230, 242, 255);
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        -7.35F, 4.20F, -4.9F, 4.34F,
+        76, 235, 245, 250);
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        4.9F, 4.20F, 7.35F, 4.34F,
+        76, 235, 245, 250);
+
+    // Hauptsektionen: Vitals, Munition, vier Inventarzellen und Atemluft.
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        -7.35F, 1.25F, 7.35F, 1.34F,
+        31, 126, 143, 235);
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        -7.35F, -0.92F, 7.35F, -0.83F,
+        31, 126, 143, 235);
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        -7.35F, -3.48F, 7.35F, -3.39F,
+        31, 126, 143, 235);
+    DrawWristHudRect(
+        drawPrim, center, right, up,
+        -0.045F, 1.34F, 0.045F, 4.15F,
+        31, 126, 143, 235);
+    for (int divider = 1; divider < 4; ++divider) {
+        const float x = -7.35F + 3.675F * static_cast<float>(divider);
+        DrawWristHudRect(
+            drawPrim, center, right, up,
+            x - 0.045F, -3.39F, x + 0.045F, -0.92F,
+            31, 126, 143, 235);
+    }
+
+    const float healthRatio =
+        static_cast<float>(data.health) /
+        static_cast<float>(data.maxHealth);
+    const float armorRatio =
+        data.maxArmor == 0
+            ? 0.0F
+            : static_cast<float>(data.armor) /
+                  static_cast<float>(data.maxArmor);
+    const std::uint8_t healthRed =
+        healthRatio < 0.3F ? 245 : 70;
+    const std::uint8_t healthGreen =
+        healthRatio < 0.3F ? 65 : 235;
+
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        -6.95F, 3.92F, 0.72F, "HP",
+        healthRed, healthGreen, 100);
+    DrawWristHudNumber(
+        drawPrim, center, right, up,
+        -4.75F, 4.02F, 1.12F, data.health,
+        healthRed, healthGreen, 100);
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        0.65F, 3.92F, 0.72F, "AR",
+        75, 170, 255);
+    DrawWristHudNumber(
+        drawPrim, center, right, up,
+        2.85F, 4.02F, 1.12F, data.armor,
+        75, 170, 255);
+    DrawWristHudBar(
+        drawPrim, center, right, up,
+        -6.95F, 1.73F, 6.20F, 0.42F, healthRatio,
+        healthRed, healthGreen, 90);
+    DrawWristHudBar(
+        drawPrim, center, right, up,
+        0.65F, 1.73F, 6.30F, 0.42F, armorRatio,
+        65, 155, 255);
+
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        -6.95F, 0.79F, 0.72F, "AM",
+        255, 192, 72);
+    DrawWristHudNumber(
+        drawPrim, center, right, up,
+        -4.35F, 0.93F, 1.34F, data.ammo,
+        255, 220, 105);
+
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        -6.95F, -1.37F, 0.54F, "GR",
+        245, 132, 70);
+    DrawWristHudNumber(
+        drawPrim, center, right, up,
+        -5.45F, -2.04F, 0.92F, data.throwables[0],
+        255, 180, 95);
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        -3.28F, -1.37F, 0.54F, "MI",
+        205, 105, 245);
+    DrawWristHudNumber(
+        drawPrim, center, right, up,
+        -1.78F, -2.04F, 0.92F, data.throwables[1],
+        225, 145, 255);
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        0.40F, -1.37F, 0.54F, "RC",
+        245, 88, 105);
+    DrawWristHudNumber(
+        drawPrim, center, right, up,
+        1.90F, -2.04F, 0.92F, data.throwables[2],
+        255, 145, 150);
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        4.07F, -1.37F, 0.54F, "MK",
+        90, 235, 150);
+    DrawWristHudNumber(
+        drawPrim, center, right, up,
+        5.57F, -2.04F, 0.92F, data.medkits,
+        125, 255, 175);
+
+    DrawWristHudText(
+        drawPrim, center, right, up,
+        -6.95F, -3.77F, 0.48F, "AIR",
+        70, 205, 235, 235);
+    DrawWristHudBar(
+        drawPrim, center, right, up,
+        -4.65F, -4.18F, 11.60F, 0.36F, data.airPercent,
+        45, 205, 245);
+
+    FlushWristHudRects(drawPrim);
+    drawPrim->SetRenderMode(oldRenderMode);
+    drawPrim->SetZMode(oldZMode);
+    drawPrim->SetTransformMode(oldTransformMode);
+    drawPrim->SetCamera(oldCamera);
+
+    if (InterlockedCompareExchange(
+            &g_wristHudActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "wrist_hud_active",
+            "The technical VR status HUD appears in front of the support "
+            "wrist only while the player looks at it and is not holding "
+            "the weapon with both hands. With Dual Pistols, the support "
+            "weapon must be deliberately turned away from the firing "
+            "direction and held briefly; aiming or firing hides it "
+            "immediately.");
+    }
+}
+
 void RenderWeaponAimGuide(HLOCALOBJ camera) noexcept {
     if (g_client == nullptr || camera == nullptr ||
         !g_weaponAim.valid || !g_weaponAimGuideEnabled ||
@@ -3121,6 +4561,17 @@ void RenderWeaponAimGuide(HLOCALOBJ camera) noexcept {
     laser.verts[1].rgba.Init(255, 0, 0, 190);
     drawPrim->DrawPrim(&laser);
 
+    LTVector leftRayStart;
+    LTVector leftRayEnd;
+    if (TraceLeftWeaponAim(leftRayStart, leftRayEnd)) {
+        LT_LINEG leftLaser;
+        leftLaser.verts[0].pos = leftRayStart;
+        leftLaser.verts[1].pos = leftRayEnd;
+        leftLaser.verts[0].rgba.Init(255, 45, 12, 235);
+        leftLaser.verts[1].rgba.Init(255, 8, 0, 190);
+        drawPrim->DrawPrim(&leftLaser);
+    }
+
     drawPrim->SetRenderMode(oldRenderMode);
     drawPrim->SetZMode(oldZMode);
     drawPrim->SetTransformMode(oldTransformMode);
@@ -3130,8 +4581,8 @@ void RenderWeaponAimGuide(HLOCALOBJ camera) noexcept {
             &g_weaponAimGuideActiveLogged, 1, 0) == 0) {
         Report(
             "INFO", "weapon_aim_guide_active",
-            "The red collision ray follows the right OpenXR weapon "
-            "aim pose; the stereo crosshair is disabled.");
+            "Red collision rays follow the independently aimed OpenXR "
+            "weapons; the stereo crosshair is disabled.");
     }
 }
 
@@ -3698,7 +5149,7 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         if (now >= g_visualCameraHeightSampleTick &&
             now - g_visualCameraHeightSampleTick <=
                 kVisualCameraHeightFreshMilliseconds) {
-            visualBasePosition.y = g_visualCameraHeight;
+            visualBasePosition = g_visualCameraPosition;
         }
     }
     if (cutsceneCamera && !cinematicCamera) {
@@ -3744,6 +5195,28 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         // and roll remain exclusively under HMD control.
         viewBaseRotation = ResolveCutsceneCameraBaseRotation(
             originalTransform.m_rRot, cutsceneBlend);
+    } else if (
+        g_twoHandedGripActive &&
+        g_weaponAim.trackingBaseValid &&
+        playingFrameFresh) {
+        // CPlayerCamera's rendered object includes transient HeadBobMgr and
+        // recoil rotations. CClientWeaponMgr receives the clean permanent
+        // camera rotation instead, which is also the basis used to transform
+        // both tracked controllers. Rendering the eyes from a different,
+        // sinusoidally tilted basis makes an otherwise fixed two-handed weapon
+        // appear to rise and fall while strafing or firing. Keep the shared
+        // gameplay yaw/pitch basis here; the full physical HMD rotation is
+        // multiplied in below for each eye.
+        viewBaseRotation = g_weaponAim.trackingBase.m_rRot;
+        viewBaseRotation.Normalize();
+        if (InterlockedCompareExchange(
+                &g_twoHandedViewRotationStabilizedLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "two_handed_view_rotation_stabilized",
+                "Two-handed eyes, controllers and weapon share the clean "
+                "Retail gameplay rotation; strafe bob and recoil no longer "
+                "tilt the VR view around the weapon.");
+        }
     } else {
         ResolveSlideKickViewBase(
             originalTransform.m_rRot, viewBaseRotation);
@@ -3840,6 +5313,20 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     } else {
         g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
     }
+    if (!cutsceneCamera) {
+        // Im normalen Spiel folgt der sichtbare Körper dem Yaw des Spielers,
+        // nicht HMD-Pitch oder -Roll. So bleibt er beim Hoch-/Runterschauen
+        // ruhig unter dem Kopf und Brust/Kragen verlassen den Komfortkegel.
+        LTVector planarForward = viewBaseRotation.Forward();
+        planarForward.y = 0.0F;
+        if (planarForward.MagSqr() > 0.0001F) {
+            planarForward.Normalize();
+            bodyPresentationWorldOffset -=
+                planarForward * kPlayerBodyRearwardOffsetUnits;
+        }
+        bodyPresentationWorldOffset.y -=
+            kPlayerBodyDownwardOffsetUnits;
+    }
     RebaseCutsceneWeaponPresentation(stableCameraBase);
     StageBodyPresentation(
         originalTransform, stableCameraBase,
@@ -3898,9 +5385,19 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         if (eyeResult[eye] == LT_OK) {
             g_stereoStep =
                 eye == FEARVR_EYE_LEFT
+                    ? "render_left_muzzle_flash"
+                    : "render_right_muzzle_flash";
+            RenderVrMuzzleFlash(camera);
+            g_stereoStep =
+                eye == FEARVR_EYE_LEFT
                     ? "render_left_aim_guide"
                     : "render_right_aim_guide";
             RenderWeaponAimGuide(camera);
+            g_stereoStep =
+                eye == FEARVR_EYE_LEFT
+                    ? "render_left_wrist_hud"
+                    : "render_right_wrist_hud";
+            RenderWristHud(camera);
             g_stereoStep =
                 eye == FEARVR_EYE_LEFT
                     ? "capture_left_eye"
@@ -3917,7 +5414,24 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     g_client->SetCameraFOV(camera, originalFovX, originalFovY);
     g_stereoRecovery.valid = false;
     g_stereoStep = "end_stereo_frame";
-    g_endStereoFrame(request.frameId);
+    FearVrGameCameraSample gameCamera{};
+    gameCamera.frameId = request.frameId;
+    gameCamera.pose.px =
+        visualBasePosition.x / kGameUnitsPerMeter;
+    gameCamera.pose.py =
+        visualBasePosition.y / kGameUnitsPerMeter;
+    gameCamera.pose.pz =
+        visualBasePosition.z / kGameUnitsPerMeter;
+    gameCamera.pose.qx =
+        viewBaseRotation.m_Quat[LTRotation::QX];
+    gameCamera.pose.qy =
+        viewBaseRotation.m_Quat[LTRotation::QY];
+    gameCamera.pose.qz =
+        viewBaseRotation.m_Quat[LTRotation::QZ];
+    gameCamera.pose.qw =
+        viewBaseRotation.m_Quat[LTRotation::QW];
+    gameCamera.flags = FEARVR_GCF_VALID;
+    g_endStereoFrame(request.frameId, &gameCamera);
 
     if (renderedEyes != FEARVR_EYE_COUNT ||
         eyeResult[FEARVR_EYE_LEFT] != LT_OK ||
@@ -4003,20 +5517,31 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     const bool hadState =
         g_playerCameraObject != nullptr ||
         g_playerBodyObject != nullptr ||
-        g_leftFlashlightModel != nullptr ||
-        g_leftFlashlightLight != nullptr ||
-        g_rightHandControl.installed || g_leftHandControl.installed;
+        g_flashlightModel != nullptr ||
+        g_flashlightLight != nullptr ||
+        g_vrMuzzleFlash[kVrMuzzleFlashRight].flare != nullptr ||
+        g_vrMuzzleFlash[kVrMuzzleFlashRight].light != nullptr ||
+        g_vrMuzzleFlash[kVrMuzzleFlashLeft].flare != nullptr ||
+        g_vrMuzzleFlash[kVrMuzzleFlashLeft].light != nullptr ||
+        g_rightHandControl.installed || g_leftHandControl.installed ||
+        g_bodyPresentationNodeControl.installed;
 
-    g_flashlightCameraOverridePending = false;
-    g_flashlightOverrideObject = nullptr;
-    g_leftFlashlightModel = nullptr;
-    g_leftFlashlightLight = nullptr;
-    g_leftFlashlightWeapon = nullptr;
+    g_preRenderCameraOverridePending = false;
+    g_preRenderCameraOverrideObject = nullptr;
+    g_flashlightModel = nullptr;
+    g_flashlightLight = nullptr;
+    g_flashlightModelWeapon = nullptr;
+    for (VrMuzzleFlashState& flash : g_vrMuzzleFlash) {
+        flash = VrMuzzleFlashState{};
+    }
     g_playerCameraObject = nullptr;
     ResetVerticalCameraHeight(g_verticalCameraHeight);
-    g_visualCameraHeight = 0.0F;
+    ResetTwoHandedJumpCamera(g_twoHandedJumpCamera);
+    g_twoHandedCameraPosition = TwoHandedCameraPositionState{};
+    g_visualCameraPosition = LTVector(0.0F, 0.0F, 0.0F);
     g_visualCameraHeightSampleTick = 0;
     g_visualCameraHeightValid = false;
+    g_physicalDuckActive = false;
     g_retailUnsupportedSince = 0;
     g_retailSupportedSince = 0;
     g_retailPersistentUnsupported = false;
@@ -4027,12 +5552,17 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     g_playerBodyObject = nullptr;
     g_rightHandControl = HandNodeControlState{};
     g_leftHandControl = HandNodeControlState{};
-    g_weaponAim.muzzleWeapon = nullptr;
-    g_weaponAim.retailWeapon = nullptr;
-    g_weaponAim.muzzleValid = false;
-    g_weaponAim.muzzleDirectionValid = false;
-    g_weaponAim.muzzleLocalValid = false;
-    g_weaponAim.trackingBaseValid = false;
+    g_bodyPresentationNodeControl = BodyPresentationNodeControlState{};
+    g_bodyPresentationWorldOffset = LTVector(0.0F, 0.0F, 0.0F);
+    g_bodyPresentationOffsetActive = false;
+    g_weaponAim = WeaponAimState{};
+    g_aimPoseCache[FEARVR_HAND_RIGHT] = TrackedPoseCache{};
+    g_aimPoseCache[FEARVR_HAND_LEFT] = TrackedPoseCache{};
+    g_gripPoseCache[FEARVR_HAND_RIGHT] = TrackedPoseCache{};
+    g_gripPoseCache[FEARVR_HAND_LEFT] = TrackedPoseCache{};
+    g_twoHandedGripActive = false;
+    g_twoHandedGrip = TwoHandedGripState{};
+    g_weaponDisabled = false;
 
     if (hadState) {
         Report(
@@ -4042,143 +5572,595 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     }
 }
 
-void RestoreFlashlightCameraOverride() noexcept {
-    if (!g_flashlightCameraOverridePending) {
+void RestorePreRenderCameraOverride() noexcept {
+    if (!g_preRenderCameraOverridePending) {
         return;
     }
     // Zuerst den Zustand loeschen, damit ein Fehlschlag den Override nicht
     // dauerhaft offen laesst.
-    HLOCALOBJ const target = g_flashlightOverrideObject;
-    g_flashlightCameraOverridePending = false;
-    g_flashlightOverrideObject = nullptr;
+    HLOCALOBJ const target = g_preRenderCameraOverrideObject;
+    g_preRenderCameraOverridePending = false;
+    g_preRenderCameraOverrideObject = nullptr;
     if (target == nullptr || g_client == nullptr) {
         return;
     }
     // Nur das entfuehrte Objekt zuruecksetzen. Zeigt g_playerCameraObject
     // inzwischen woanders hin, hat eine Zwischensequenz die Kamera getauscht.
     __try {
-        g_client->SetObjectTransform(target, g_flashlightCameraRecovery);
+        g_client->SetObjectTransform(target, g_preRenderCameraRecovery);
+        g_client->SetCameraFOV(
+            target, g_preRenderCameraRecoveryFovX,
+            g_preRenderCameraRecoveryFovY);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
-void RemoveLeftFlashlightModel() noexcept;
+void StagePreRenderCameraOverride() noexcept {
+    if (g_preRenderCameraOverridePending || g_client == nullptr ||
+        g_playerCameraObject == nullptr ||
+        g_getRenderRequest == nullptr ||
+        g_isStereoEnabled == nullptr ||
+        g_isFlatPanelActive == nullptr ||
+        !g_headTracking.centered || g_headTracking.trackingLost ||
+        g_cutsceneCameraState ||
+        g_lastWeaponManagerUpdateTick == 0) {
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_headTracking.lastFreshFrameTick > 250 ||
+        now - g_lastWeaponManagerUpdateTick >
+            kPlayingFrameFreshMilliseconds) {
+        return;
+    }
 
-void UpdateLeftFlashlightModel(const void* activeWeapon) noexcept {
-    if (g_disableFlashlight || g_client == nullptr ||
-        !g_weaponAim.leftGripValid || !g_weaponAim.leftAimValid) {
+    __try {
+        if (g_isStereoEnabled() == FALSE ||
+            g_isFlatPanelActive() != FALSE) {
+            return;
+        }
+
+        FearVrRenderRequest request{};
+        if (!g_getRenderRequest(&request) ||
+            (request.flags & FEARVR_RF_VALID) == 0 ||
+            (request.flags & FEARVR_RF_FLATSCREEN) != 0) {
+            return;
+        }
+        LTRigidTransform retailCamera;
+        if (g_client->GetObjectTransform(
+                g_playerCameraObject, &retailCamera) != LT_OK) {
+            return;
+        }
+        float retailFovX = 0.0F;
+        float retailFovY = 0.0F;
+        g_client->GetCameraFOV(
+            g_playerCameraObject, &retailFovX, &retailFovY);
+        if (!std::isfinite(retailFovX) ||
+            !std::isfinite(retailFovY)) {
+            return;
+        }
+
+        const RelativeEyePose center =
+            TrackedPoseRelativeToRecenter(
+                g_headTracking.recenter,
+                g_headTracking.currentCenter);
+        if (!center.valid) {
+            return;
+        }
+        const bool translationEnabled =
+            (request.flags & FEARVR_RF_TRANSLATION_ON) != 0 ||
+            g_physicalLeanEnabled;
+        LTRigidTransform renderTargetCamera = retailCamera;
+        if (g_visualCameraHeightValid &&
+            now >= g_visualCameraHeightSampleTick &&
+            now - g_visualCameraHeightSampleTick <=
+                kVisualCameraHeightFreshMilliseconds) {
+            renderTargetCamera.m_vPos = g_visualCameraPosition;
+        }
+        if (translationEnabled) {
+            renderTargetCamera.m_vPos.y +=
+                center.positionMeters.y * kGameUnitsPerMeter;
+        }
+
+        // The game updates planar mirror/refraction textures immediately
+        // before its main camera call. Correct only the center-eye height that
+        // those targets need. Changing X/Z, orientation or FOV over the whole
+        // pre-render window also changes Retail's portal/occlusion decisions
+        // and can leave wall sectors invisible. Restore Retail's object before
+        // the stereo hook builds the two real eye cameras.
+        g_preRenderCameraRecovery = retailCamera;
+        g_preRenderCameraRecoveryFovX = retailFovX;
+        g_preRenderCameraRecoveryFovY = retailFovY;
+        g_preRenderCameraOverrideObject = g_playerCameraObject;
+        g_preRenderCameraOverridePending = true;
+        if (g_client->SetObjectTransform(
+                g_playerCameraObject, renderTargetCamera) != LT_OK) {
+            g_preRenderCameraOverridePending = false;
+            g_preRenderCameraOverrideObject = nullptr;
+            return;
+        }
+        if (InterlockedCompareExchange(
+                &g_renderTargetCameraStabilizedLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "render_target_camera_stabilized",
+                "Water mirror/refraction render targets use the current "
+                "center-eye height without modifying Retail portal culling, "
+                "camera orientation or FOV.");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        RestorePreRenderCameraOverride();
+    }
+}
+
+void RemoveFlashlightModel() noexcept;
+void RemoveVrMuzzleFlashObjects() noexcept;
+
+bool ResolveHeadFlashlightPose(LTRigidTransform& pose) noexcept {
+    if (!g_headTracking.centered || g_headTracking.trackingLost) {
+        return false;
+    }
+    const RelativeEyePose tracked =
+        TrackedPoseRelativeToRecenter(
+            g_headTracking.recenter,
+            g_headTracking.currentCenter);
+    if (!tracked.valid) {
+        return false;
+    }
+    const LTRotation localRotation(
+        tracked.rotation.x, tracked.rotation.y,
+        tracked.rotation.z, tracked.rotation.w);
+    pose.m_vPos =
+        g_weaponAim.trackingBase.m_vPos +
+        g_weaponAim.trackingBase.m_rRot.RotateVector(
+            g_leanViewOffsetUnits);
+    pose.m_rRot =
+        g_weaponAim.trackingBase.m_rRot * localRotation;
+    return true;
+}
+
+bool ResolveFlashlightPoses(
+    const void* activeWeapon, LTRigidTransform& modelPose,
+    LTRigidTransform& lightPose, bool& showModel) noexcept {
+    LTRigidTransform mountPose;
+    switch (g_flashlightMount) {
+    case FlashlightMount::LeftHand:
+        if (!g_weaponAim.leftGripValid ||
+            !g_weaponAim.leftAimValid) {
+            return false;
+        }
+        mountPose = LTRigidTransform(
+            EffectiveLeftHandPosition() +
+                EffectiveFlashlightRotation().Forward() * 2.0F,
+            EffectiveFlashlightRotation());
+        showModel = true;
+        break;
+    case FlashlightMount::Head:
+        if (!ResolveHeadFlashlightPose(mountPose)) {
+            return false;
+        }
+        showModel = false;
+        break;
+    case FlashlightMount::Weapon: {
+        if (activeWeapon == nullptr || g_weaponDisabled ||
+            !g_weaponAim.valid) {
+            return false;
+        }
+        LTRigidTransform muzzlePose;
+        ResolveMuzzleWorldTransform(muzzlePose);
+        LTVector right;
+        LTVector up;
+        LTVector forward;
+        g_weaponAim.fireTransform.m_rRot.GetVectors(
+            right, up, forward);
+        mountPose = LTRigidTransform(
+            muzzlePose.m_vPos - up * 5.0F - forward * 10.0F,
+            g_weaponAim.fireTransform.m_rRot);
+        lightPose = LTRigidTransform(
+            muzzlePose.m_vPos - up * 3.0F + forward * 4.0F,
+            g_weaponAim.fireTransform.m_rRot);
+        modelPose = mountPose;
+        showModel = true;
+        return true;
+    }
+    default:
+        return false;
+    }
+
+    LTVector right;
+    LTVector up;
+    LTVector forward;
+    mountPose.m_rRot.GetVectors(right, up, forward);
+    modelPose = mountPose;
+    if (g_flashlightMount == FlashlightMount::Head) {
+        // Der Projektor sitzt oberhalb und vor der Augenmitte. Objekt-Schatten
+        // werden fuer diesen Mount weiter unten deaktiviert; so koennen Arme,
+        // Waffe oder Player-Body den kopffesten Lichtkegel nicht verdecken.
+        // Weltgeometrie wirft weiterhin Schatten.
+        lightPose = LTRigidTransform(
+            mountPose.m_vPos + up * 6.0F + forward * 12.0F,
+            mountPose.m_rRot);
+    } else {
+        // Keep the hand projector beyond the hand, matching Retail's
+        // flashlight offset and avoiding a large self-shadow.
+        lightPose = LTRigidTransform(
+            mountPose.m_vPos - right * 10.0F + forward * 13.0F,
+            mountPose.m_rRot);
+    }
+    return true;
+}
+
+void SetFlashlightObjectVisible(
+    HLOCALOBJ object, bool visible) noexcept {
+    if (object == nullptr || g_client == nullptr) {
+        return;
+    }
+    __try {
+        ILTCommon* const common = g_client->Common();
+        if (common != nullptr) {
+            common->SetObjectFlags(
+                object, OFT_Flags,
+                visible ? FLAG_VISIBLE : 0, FLAG_VISIBLE);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Retails First-Person-Muendungsblitz wird an das animierte Waffenmodell
+// geparentet. Unsere finale VR-Waffenpose wird erst nach Retails Update gesetzt;
+// dadurch landet der Retail-FX in manchen Laufzeitpfaden hinter der Kamera oder
+// am alten Hand-Socket. Dieser kleine native Ersatz wird aus demselben
+// ausgelieferten Muzzle-Material aufgebaut, aber direkt an die von uns
+// gemessene Laufmuendung gesetzt.
+constexpr ULONGLONG kVrMuzzleFlashDurationMs = 70;
+constexpr ULONGLONG kVrMuzzleFlashMinimumTriggerGapMs = 30;
+
+void TriggerVrMuzzleFlash(bool leftWeaponFired) noexcept {
+    VrMuzzleFlashState& flash = g_vrMuzzleFlash[
+        leftWeaponFired ? kVrMuzzleFlashLeft : kVrMuzzleFlashRight];
+    const ULONGLONG now = GetTickCount64();
+    if (flash.lastTriggerTick != 0 &&
+        now - flash.lastTriggerTick < kVrMuzzleFlashMinimumTriggerGapMs) {
+        // GetFireVectors kann denselben Schuss aus zwei Retail-Pfaden melden.
+        // Die Sichtzeit darf dabei verlaengert, aber die Animation nicht
+        // sichtbar neu gestartet werden.
+        flash.visibleUntilTick = (std::max)(
+            flash.visibleUntilTick, now + kVrMuzzleFlashDurationMs);
+        return;
+    }
+    flash.lastTriggerTick = now;
+    flash.pulseStartedTick = now;
+    flash.visibleUntilTick = now + kVrMuzzleFlashDurationMs;
+    ++flash.pulseSerial;
+    if (InterlockedCompareExchange(
+            &g_vrMuzzleFlashActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "vr_muzzle_flash_active",
+            "Confirmed shots drive a native muzzle flare and warm point light "
+            "at the measured barrel end; empty trigger pulls stay dark.");
+    }
+}
+
+bool ResolveVrMuzzleFlashPose(
+    bool leftWeapon, LTRigidTransform& pose) noexcept {
+    if (!g_weaponAim.valid || g_weaponDisabled) {
+        return false;
+    }
+    if (leftWeapon) {
+        if (!DualPistolsVrActive() ||
+            !g_weaponAim.leftWeaponTransformValid) {
+            return false;
+        }
+        return ResolveLeftMuzzleWorldTransform(pose);
+    }
+    return ResolveMuzzleWorldTransform(pose);
+}
+
+bool CreateVrMuzzleFlashObjects(
+    VrMuzzleFlashState& flash,
+    const LTRigidTransform& pose) noexcept {
+    if (g_client == nullptr) {
+        return false;
+    }
+    if (flash.light == nullptr) {
+        ObjectCreateStruct create;
+        create.m_ObjectType = OT_LIGHT;
+        create.m_Pos = pose.m_vPos;
+        create.m_Rotation = pose.m_rRot;
+        flash.light = g_client->CreateObject(&create);
+        if (flash.light != nullptr) {
+            g_client->SetLightType(flash.light, eEngineLight_Point);
+            g_client->SetLightRadius(flash.light, 150.0F);
+            g_client->SetLightDetailSettings(
+                flash.light,
+                eEngineLOD_Low, eEngineLOD_Never, eEngineLOD_Never);
+        }
+    }
+    if (flash.light == nullptr) {
+        return false;
+    }
+    if (InterlockedCompareExchange(
+            &g_vrMuzzleFlashCreatedLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "vr_muzzle_flash_created",
+            "The native shadowless muzzle-flash point light was created; "
+            "visible stereo geometry is drawn directly per eye.");
+    }
+    return true;
+}
+
+void UpdateVrMuzzleFlash() noexcept {
+    if (g_client == nullptr) {
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    for (std::size_t index = 0; index < kVrMuzzleFlashCount; ++index) {
+        VrMuzzleFlashState& flash = g_vrMuzzleFlash[index];
+        const bool active = flash.visibleUntilTick > now;
+        LTRigidTransform muzzlePose;
+        const bool leftWeapon = index == kVrMuzzleFlashLeft;
+        if (!active || !ResolveVrMuzzleFlashPose(leftWeapon, muzzlePose)) {
+            SetFlashlightObjectVisible(flash.flare, false);
+            SetFlashlightObjectVisible(flash.light, false);
+            continue;
+        }
+
+        LTVector right;
+        LTVector up;
+        LTVector forward;
+        muzzlePose.m_rRot.GetVectors(right, up, forward);
+        if (!CreateVrMuzzleFlashObjects(flash, muzzlePose)) {
+            SetFlashlightObjectVisible(flash.flare, false);
+            SetFlashlightObjectVisible(flash.light, false);
+            continue;
+        }
+
+        const float age = static_cast<float>(
+            now - flash.pulseStartedTick) /
+            static_cast<float>(kVrMuzzleFlashDurationMs);
+        const float life = (std::max)(0.0F, 1.0F - age);
+        const LTRigidTransform lightPose(
+            muzzlePose.m_vPos + forward * 3.0F,
+            muzzlePose.m_rRot);
+        g_client->SetObjectTransform(flash.light, lightPose);
+        g_client->SetObjectColor(
+            flash.light, 1.0F, 0.46F, 0.12F, life);
+        g_client->SetLightIntensityScale(
+            flash.light, 0.35F + 1.65F * life);
+        SetFlashlightObjectVisible(flash.light, true);
+    }
+}
+
+void RenderVrMuzzleFlash(HLOCALOBJ camera) noexcept {
+    if (g_client == nullptr || camera == nullptr ||
+        !g_weaponAim.valid || g_weaponDisabled) {
+        return;
+    }
+    ILTDrawPrim* const drawPrim = g_client->GetDrawPrim();
+    if (drawPrim == nullptr) {
+        return;
+    }
+    LTRigidTransform eye;
+    if (g_client->GetObjectTransform(camera, &eye) != LT_OK) {
+        return;
+    }
+
+    const HOBJECT oldCamera = drawPrim->GetCamera();
+    const ELTDrawPrimTransformMode oldTransformMode =
+        drawPrim->GetTransformMode();
+    const ELTDrawPrimZMode oldZMode = drawPrim->GetZMode();
+    const ELTDrawPrimRenderMode oldRenderMode =
+        drawPrim->GetRenderMode();
+    drawPrim->SetCamera(camera);
+    drawPrim->SetTransformMode(eLTDrawPrimTransformMode_World);
+    drawPrim->SetZMode(eLTDrawPrimZMode_NoWrite);
+    drawPrim->SetRenderMode(eLTDrawPrimRenderMode_Modulate_Additive);
+    drawPrim->SetTexture(nullptr);
+
+    const ULONGLONG now = GetTickCount64();
+    bool rendered = false;
+    for (std::size_t index = 0; index < kVrMuzzleFlashCount; ++index) {
+        const VrMuzzleFlashState& flash = g_vrMuzzleFlash[index];
+        if (flash.visibleUntilTick <= now) {
+            continue;
+        }
+        LTRigidTransform muzzle;
+        if (!ResolveVrMuzzleFlashPose(
+                index == kVrMuzzleFlashLeft, muzzle)) {
+            continue;
+        }
+
+        const float age = std::clamp(
+            static_cast<float>(now - flash.pulseStartedTick) /
+                static_cast<float>(kVrMuzzleFlashDurationMs),
+            0.0F, 1.0F);
+        const float life = 1.0F - age;
+        const float variation =
+            0.90F + 0.10F * static_cast<float>(flash.pulseSerial % 3);
+        const float radius = 5.8F * variation * (0.72F + 0.28F * life);
+        const LTVector center =
+            muzzle.m_vPos + muzzle.m_rRot.Forward() * 1.0F;
+        const LTVector cameraRight = eye.m_rRot.Right() * radius;
+        const LTVector cameraUp = eye.m_rRot.Up() * radius;
+        const LTVector perimeter[4] = {
+            center - cameraRight + cameraUp,
+            center + cameraRight + cameraUp,
+            center + cameraRight - cameraUp,
+            center - cameraRight - cameraUp,
+        };
+        LT_POLYG3 glow[4];
+        const std::uint8_t coreAlpha = static_cast<std::uint8_t>(
+            std::clamp(255.0F * life, 0.0F, 255.0F));
+        for (std::size_t triangle = 0; triangle < 4; ++triangle) {
+            glow[triangle].verts[0].pos = center;
+            glow[triangle].verts[1].pos = perimeter[triangle];
+            glow[triangle].verts[2].pos = perimeter[(triangle + 1) % 4];
+            glow[triangle].verts[0].rgba.Init(
+                255, 238, 170, coreAlpha);
+            glow[triangle].verts[1].rgba.Init(255, 72, 8, 0);
+            glow[triangle].verts[2].rgba.Init(255, 72, 8, 0);
+        }
+        drawPrim->DrawPrim(glow, 4);
+        rendered = true;
+    }
+
+    drawPrim->SetRenderMode(oldRenderMode);
+    drawPrim->SetZMode(oldZMode);
+    drawPrim->SetTransformMode(oldTransformMode);
+    drawPrim->SetCamera(oldCamera);
+    if (rendered && InterlockedCompareExchange(
+            &g_vrMuzzleFlashRenderedLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "vr_muzzle_flash_stereo_rendered",
+            "The muzzle flash was drawn directly into both stereo eyes at "
+            "the same measured Flash socket used by bullets and aim rays.");
+    }
+}
+
+void RemoveVrMuzzleFlashObjects() noexcept {
+    for (VrMuzzleFlashState& flash : g_vrMuzzleFlash) {
+        if (g_client != nullptr) {
+            if (flash.flare != nullptr) {
+                __try {
+                    g_client->RemoveObject(flash.flare);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+            if (flash.light != nullptr) {
+                __try {
+                    g_client->RemoveObject(flash.light);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+        }
+        flash = VrMuzzleFlashState{};
+    }
+}
+
+void UpdateFlashlightModel(const void* activeWeapon) noexcept {
+    if (g_disableFlashlight || g_client == nullptr) {
+        return;
+    }
+
+    LTRigidTransform modelPose;
+    LTRigidTransform lightPose;
+    bool showModel = false;
+    if (!ResolveFlashlightPoses(
+            activeWeapon, modelPose, lightPose, showModel)) {
+        SetFlashlightObjectVisible(g_flashlightModel, false);
+        SetFlashlightObjectVisible(g_flashlightLight, false);
         return;
     }
 
     // Retail replaces the first-person hand/weapon presentation on a weapon
     // switch. Recreate our proxy at that boundary so it cannot remain tied to
     // an object that Retail has just hidden or discarded.
-    if (g_leftFlashlightModel != nullptr &&
-        g_leftFlashlightWeapon != activeWeapon) {
-        RemoveLeftFlashlightModel();
+    if (g_flashlightModel != nullptr &&
+        g_flashlightModelWeapon != activeWeapon) {
+        RemoveFlashlightModel();
     }
 
-    // Die Lampe sitzt an der Hand, also folgt sie ihr auch, wenn die Hand
-    // waehrend des Zweihandgriffs an der Waffe klebt — leuchtet dort aber
-    // entlang der Waffenachse.
-    const LTRotation leftHandRotation = EffectiveFlashlightRotation();
-    LTVector right;
-    LTVector up;
-    LTVector forward;
-    leftHandRotation.GetVectors(right, up, forward);
-    LTRigidTransform pose(
-        EffectiveLeftHandPosition() + forward * 2.0f,
-        leftHandRotation);
-    // Keep the projector beyond the hand, matching Retail's flashlight
-    // offset. This prevents the left hand from sitting between the source
-    // and the illuminated cone and casting a large self-shadow.
-    const LTRigidTransform lightPose(
-        pose.m_vPos - pose.m_rRot.Right() * 10.0f +
-            pose.m_rRot.Forward() * 13.0f,
-        pose.m_rRot);
-    if (g_leftFlashlightModel == nullptr) {
+    if (showModel && g_flashlightModel == nullptr) {
         ObjectCreateStruct create;
         create.m_ObjectType = OT_MODEL;
         create.m_Flags = FLAG_VISIBLE;
-        create.m_Pos = lightPose.m_vPos;
-        create.m_Rotation = lightPose.m_rRot;
+        create.m_Pos = modelPose.m_vPos;
+        create.m_Rotation = modelPose.m_rRot;
         create.m_Scale = 1.5f;
         create.SetFileName("models/keypadlight.Model00p");
-        g_leftFlashlightModel = g_client->CreateObject(&create);
-        if (g_leftFlashlightModel != nullptr) {
-            g_leftFlashlightWeapon = activeWeapon;
-            g_client->SetObjectColor(g_leftFlashlightModel, 1.0f, 0.82f, 0.35f, 1.0f);
-            Report("INFO", "left_flashlight_model_created",
-                   "Visible flashlight proxy created in the left hand.");
+        g_flashlightModel = g_client->CreateObject(&create);
+        if (g_flashlightModel != nullptr) {
+            g_flashlightModelWeapon = activeWeapon;
+            g_client->SetObjectColor(
+                g_flashlightModel,
+                1.0f, 0.82f, 0.35f, 1.0f);
+            Report(
+                "INFO", "flashlight_model_created",
+                "Visible flashlight proxy created at the selected mount.");
         } else {
-            Report("WARN", "left_flashlight_model_failed",
-                   "Could not create the visible left-hand flashlight proxy.");
+            Report(
+                "WARN", "flashlight_model_failed",
+                "Could not create the visible flashlight proxy.");
         }
     }
-    if (g_leftFlashlightModel != nullptr) {
-        g_client->SetObjectTransform(g_leftFlashlightModel, pose);
+    if (g_flashlightModel != nullptr) {
+        if (showModel) {
+            g_client->SetObjectTransform(
+                g_flashlightModel, modelPose);
+        }
+        SetFlashlightObjectVisible(
+            g_flashlightModel, showModel);
     }
 
-    if (g_leftFlashlightLight == nullptr) {
+    if (g_flashlightLight == nullptr) {
         ObjectCreateStruct create;
         create.m_ObjectType = OT_LIGHT;
         create.m_Flags = FLAG_VISIBLE;
-        create.m_Pos = pose.m_vPos;
-        create.m_Rotation = pose.m_rRot;
-        g_leftFlashlightLight = g_client->CreateObject(&create);
-        if (g_leftFlashlightLight != nullptr) {
+        create.m_Pos = lightPose.m_vPos;
+        create.m_Rotation = lightPose.m_rRot;
+        g_flashlightLight = g_client->CreateObject(&create);
+        if (g_flashlightLight != nullptr) {
             g_client->SetLightType(
-                g_leftFlashlightLight, eEngineLight_SpotProjector);
+                g_flashlightLight, eEngineLight_SpotProjector);
             g_client->SetLightTexture(
-                g_leftFlashlightLight, "Tex\\Lights\\Headlight.dds");
+                g_flashlightLight, "Tex\\Lights\\Headlight.dds");
             g_client->SetObjectColor(
-                g_leftFlashlightLight, 1.0f, 1.0f, 1.0f, 1.0f);
-            g_client->SetLightRadius(g_leftFlashlightLight, 1000.0f);
+                g_flashlightLight, 1.0f, 1.0f, 1.0f, 1.0f);
+            g_client->SetLightRadius(g_flashlightLight, 1000.0f);
             g_client->SetLightSpotInfo(
-                g_leftFlashlightLight, 0.698132f, 0.698132f, 1.0f);
-            g_client->SetLightIntensityScale(g_leftFlashlightLight, 1.5f);
-            g_client->Common()->SetObjectFlags(
-                g_leftFlashlightLight, OFT_Flags,
-                g_flashlightEnabled ? FLAG_VISIBLE : 0, FLAG_VISIBLE);
-            Report("INFO", "left_flashlight_light_created",
-                   "Native left-hand spot projector created and forced on.");
+                g_flashlightLight, 0.698132f, 0.698132f, 1.0f);
+            g_client->SetLightIntensityScale(g_flashlightLight, 1.5f);
+            SetFlashlightObjectVisible(
+                g_flashlightLight, g_flashlightEnabled);
+            Report(
+                "INFO", "flashlight_light_created",
+                "Native spot projector created at the selected mount.");
         } else {
-            Report("WARN", "left_flashlight_light_failed",
-                   "Could not create the native left-hand spot projector.");
+            Report(
+                "WARN", "flashlight_light_failed",
+                "Could not create the native flashlight spot projector.");
         }
     }
-    if (g_leftFlashlightLight != nullptr) {
-        g_client->SetObjectTransform(g_leftFlashlightLight, lightPose);
-        g_client->Common()->SetObjectFlags(
-            g_leftFlashlightLight, OFT_Flags,
-            g_flashlightEnabled ? FLAG_VISIBLE : 0, FLAG_VISIBLE);
+    if (g_flashlightLight != nullptr) {
+        // Nur das Headlight ignoriert Schatten dynamischer Objekte. Beim
+        // Hand-/Waffenmount bleibt Retails volle Schattenwirkung erhalten;
+        // beim Umschalten wird der vorherige LOD-Zustand deshalb explizit
+        // zurueckgesetzt.
+        const EEngineLOD objectShadowDetail =
+            g_flashlightMount == FlashlightMount::Head
+                ? eEngineLOD_Never
+                : eEngineLOD_Low;
+        g_client->SetLightDetailSettings(
+            g_flashlightLight,
+            eEngineLOD_Low, eEngineLOD_Low, objectShadowDetail);
+        g_client->SetObjectTransform(g_flashlightLight, lightPose);
+        SetFlashlightObjectVisible(
+            g_flashlightLight, g_flashlightEnabled);
     }
 }
 
-void RemoveLeftFlashlightModel() noexcept {
-    if (g_leftFlashlightModel != nullptr && g_client != nullptr) {
+void RemoveFlashlightModel() noexcept {
+    if (g_flashlightModel != nullptr && g_client != nullptr) {
         __try {
-            g_client->RemoveObject(g_leftFlashlightModel);
+            g_client->RemoveObject(g_flashlightModel);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
-    g_leftFlashlightModel = nullptr;
-    g_leftFlashlightWeapon = nullptr;
-    if (g_leftFlashlightLight != nullptr && g_client != nullptr) {
+    g_flashlightModel = nullptr;
+    g_flashlightModelWeapon = nullptr;
+    if (g_flashlightLight != nullptr && g_client != nullptr) {
         // Ohne SEH wie beim Modell darueber: Ein Weltwechsel kann das Objekt
         // bereits zerstoert haben.
         __try {
-            g_client->RemoveObject(g_leftFlashlightLight);
+            g_client->RemoveObject(g_flashlightLight);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
-    g_leftFlashlightLight = nullptr;
+    g_flashlightLight = nullptr;
 }
 
 LTRESULT __fastcall HookRenderPlayerCamera(
     ILTRenderer* renderer, void* ignoredEdx, HLOCALOBJ camera) {
     (void)ignoredEdx;
-    RestoreFlashlightCameraOverride();
+    RestorePreRenderCameraOverride();
     g_playerCameraObject = camera;
     if (InterlockedCompareExchange(
             &g_playerHookCallLogged, 1, 0) == 0) {
@@ -4592,16 +6574,13 @@ void PrepareWeaponSwitchPulse() noexcept {
     g_weaponSwitchTriggered = down;
 }
 
-// Rechte Sekundaertaste: kurz laedt nach, gehalten wirft eine Granate. Der
-// Wurf loest bereits beim Erreichen der Haltezeit aus und nicht erst beim
-// Loslassen, damit die Taste sich wie ein Auslöser anfuehlt. Nachladen kommt
-// dagegen zwangslaeufig erst beim Loslassen, denn vorher ist nicht bekannt,
-// ob es ein kurzer Druck war.
+// Rechte Sekundaer- bzw. Menütaste: kurz lädt nach, gehalten wirft eine
+// Granate. Der Wurf löst bereits beim Erreichen der Haltezeit aus und nicht
+// erst beim Loslassen, damit die Taste sich wie ein Auslöser anfühlt.
+// Nachladen kommt erst beim Loslassen, weil vorher die Haltedauer unbekannt ist.
 void PrepareGrenadeAndReloadPulse() noexcept {
     constexpr ULONGLONG kGrenadeHoldMs = 350;
-    const bool down =
-        (g_currentInput.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
-        (g_currentInput.buttons & FEARVR_IB_RIGHT_SECONDARY) != 0;
+    const bool down = RightSecondaryButtonDown(g_currentInput);
     const ULONGLONG now = GetTickCount64();
 
     if (down && !g_secondaryWasDown) {
@@ -4613,12 +6592,12 @@ void PrepareGrenadeAndReloadPulse() noexcept {
         g_grenadeConsumed = true;
         Report(
             "INFO", "grenade_throw_gesture",
-            "Grenade thrown after holding the right secondary button.");
+            "Grenade thrown after holding the right secondary/menu button.");
     } else if (!down && g_secondaryWasDown && !g_grenadeConsumed) {
         g_reloadPulseUntil = now + kCommandPulseMs;
         Report(
             "INFO", "reload_gesture",
-            "Reload triggered by a short press of the right secondary "
+            "Reload triggered by a short press of the right secondary/menu "
             "button.");
     }
     g_secondaryWasDown = down;
@@ -4639,6 +6618,7 @@ void UpdateMeleeActions() noexcept {
     frame.input = g_currentInput;
     frame.nowNs = MonotonicNanoseconds();
     frame.headHeightValid =
+        g_physicalDuckEnabled &&
         g_headTracking.centered && !g_headTracking.trackingLost &&
         g_headTracking.lastFreshFrameTick != 0 &&
         now - g_headTracking.lastFreshFrameTick <= 250 &&
@@ -4956,6 +6936,36 @@ bool IsPulseDrivenCommand(std::uint32_t command) noexcept {
            command == FEARVR_CMD_ALT_FIRING;
 }
 
+FearVrCommandValue MapVrControllerCommand(
+    std::uint32_t command) noexcept {
+    if (DualPistolsVrActive()) {
+        constexpr float kTriggerThreshold = 0.55F;
+        const bool leftActive =
+            (g_currentInput.activeHands & FEARVR_HAND_MASK_LEFT) != 0;
+        const bool rightActive =
+            (g_currentInput.activeHands & FEARVR_HAND_MASK_RIGHT) != 0;
+        if (command == FEARVR_CMD_FIRING) {
+            const bool firing =
+                (leftActive &&
+                 g_currentInput.trigger[FEARVR_HAND_LEFT] >=
+                     kTriggerThreshold) ||
+                (rightActive &&
+                 g_currentInput.trigger[FEARVR_HAND_RIGHT] >=
+                     kTriggerThreshold);
+            return {1.0F, firing};
+        }
+        if (command == FEARVR_CMD_SLOWMO) {
+            return {1.0F, g_dualPistolSlowMoActive};
+        }
+    }
+    FearVrCommandValue mapped = MapControllerCommand(
+        g_currentInput, command, g_twoHandedGripActive);
+    if (command == FEARVR_CMD_DUCK && g_physicalDuckActive) {
+        mapped = {1.0F, true};
+    }
+    return mapped;
+}
+
 // Ein Kommandowert fuer die Injektion: Klettern hat Vorrang, danach die
 // Pulsgesten, sonst die zustandslose Zuordnung.
 //
@@ -4984,8 +6994,7 @@ FearVrCommandValue ResolveInjectedCommand(
     if (IsPulseDrivenCommand(command)) {
         return {1.0F, IsWeaponSwitchPulse(command)};
     }
-    return MapControllerCommand(
-        g_currentInput, command, g_twoHandedGripActive);
+    return MapVrControllerCommand(command);
 }
 
 void LogRegressionCommandTransition(
@@ -5181,9 +7190,7 @@ float __fastcall HookRetailGetBindingValue(
             IsPulseDrivenCommand(binding->command)
                 ? FearVrCommandValue{
                       1.0F, IsWeaponSwitchPulse(binding->command)}
-                : MapControllerCommand(
-                      g_currentInput, binding->command,
-                      g_twoHandedGripActive);
+                : MapVrControllerCommand(binding->command);
     }
     if (binding->command <
         sizeof(g_controllerCommandActive) /
@@ -5231,12 +7238,14 @@ float __fastcall HookRetailGetBindingValue(
 bool ResolveRetailWeaponTargets(
     void*& weaponManagerUpdate, void*& setWeaponTransform,
     void*& setWeaponVisible, void*& getFireVectors,
-    void*& setTrackedTarget) noexcept {
+    void*& setTrackedTarget,
+    void*& vectorObjectFilter) noexcept {
     weaponManagerUpdate = nullptr;
     setWeaponTransform = nullptr;
     setWeaponVisible = nullptr;
     getFireVectors = nullptr;
     setTrackedTarget = nullptr;
+    vectorObjectFilter = nullptr;
 
     HMODULE module = GetModuleHandleW(L"GameOrig.dll");
     if (module == nullptr) {
@@ -5269,6 +7278,8 @@ bool ResolveRetailWeaponTargets(
     auto* const setVisible = base + kRetailSetWeaponVisibleRva;
     auto* const fireVectors = base + kRetailGetFireVectorsRva;
     auto* const trackedTarget = base + kRetailSetTrackedTargetRva;
+    auto* const vectorFilter =
+        base + kRetailVectorObjectFilterRva;
     constexpr unsigned char kUpdatePrefix[] = {
         0x56, 0x8B, 0xF1, 0x83, 0x7E, 0x08, 0xFF, 0x75,
         0x50, 0x8B, 0x46, 0x0C, 0x85, 0xC0, 0x74, 0x49};
@@ -5287,9 +7298,15 @@ bool ResolveRetailWeaponTargets(
         0x83, 0xEC, 0x58, 0xA1};
     constexpr unsigned char kFireVectorsBody[] = {
         0x57, 0xC7, 0x44, 0x24, 0x2C, 0x00, 0x00, 0x00, 0x00};
+    constexpr unsigned char kFireVectorsFireHandProbe[] = {
+        0x8A, 0x87, 0xE3, 0x01, 0x00, 0x00};
     constexpr unsigned char kTrackedTargetPrefix[] = {
         0x8B, 0x44, 0x24, 0x04, 0x83, 0xF8, 0xFF, 0x74,
         0x71, 0x8B, 0x54, 0x24, 0x08, 0x3B, 0x51, 0x10};
+    constexpr unsigned char kVectorFilterPrefix[] = {
+        0x8B, 0x48, 0x14, 0x8B, 0x41, 0x10, 0x56,
+        0x8B, 0x74, 0x24, 0x08, 0x3B, 0xF0, 0x75, 0x04,
+        0x32, 0xC0, 0x5E, 0xC3};
     if (!MatchesCode(
             update, kUpdatePrefix, sizeof(kUpdatePrefix)) ||
         !MatchesCode(
@@ -5309,8 +7326,15 @@ bool ResolveRetailWeaponTargets(
             fireVectors + 8, kFireVectorsBody,
             sizeof(kFireVectorsBody)) ||
         !MatchesCode(
+            fireVectors + kRetailGetFireVectorsFireHandProbeOffset,
+            kFireVectorsFireHandProbe,
+            sizeof(kFireVectorsFireHandProbe)) ||
+        !MatchesCode(
             trackedTarget, kTrackedTargetPrefix,
-            sizeof(kTrackedTargetPrefix))) {
+            sizeof(kTrackedTargetPrefix)) ||
+        !MatchesCode(
+            vectorFilter + 5, kVectorFilterPrefix,
+            sizeof(kVectorFilterPrefix))) {
         return false;
     }
 
@@ -5319,6 +7343,7 @@ bool ResolveRetailWeaponTargets(
     setWeaponVisible = setVisible;
     getFireVectors = fireVectors;
     setTrackedTarget = trackedTarget;
+    vectorObjectFilter = vectorFilter;
     return true;
 }
 
@@ -5429,17 +7454,127 @@ LTVector ResolveTrackedHandBasePosition(
             g_retailMovement.available &&
             (g_retailMovement.controlFlags &
              kRetailControlFlagDuck) != 0;
+        // Beim Zweihandgriff verschieben Lauf-, Schuss- und Sprunganimationen
+        // den animierten PlayerCamera-Socket. Die visuelle Augenhoehe wird
+        // deshalb waehrend des gesamten Griffs aus dem physischen PlayerBody
+        // rekonstruiert. Ducken sowie echte Kollisionskorrekturen behalten
+        // Vorrang.
+        const bool stabilizeTwoHandedCamera =
+            g_twoHandedGripActive &&
+            g_retailMovement.available &&
+            !ducking;
+        LTRigidTransform playerBodyTransform;
+        float playerBodyHeight = 0.0F;
+        bool playerBodyHeightValid = false;
+        if (g_playerBodyObject != nullptr) {
+            if (g_client->GetObjectTransform(
+                    g_playerBodyObject,
+                    &playerBodyTransform) == LT_OK &&
+                std::isfinite(playerBodyTransform.m_vPos.y)) {
+                playerBodyHeight = playerBodyTransform.m_vPos.y;
+                playerBodyHeightValid = true;
+            }
+        }
+        const TwoHandedJumpCameraOutput jumpHeight =
+            UpdateTwoHandedJumpCamera(
+                g_twoHandedJumpCamera,
+                playerBodyHeight,
+                playerBodyHeightValid,
+                cameraTransform.m_vPos.y,
+                g_retailMovement.onGround,
+                g_retailMovement.airborne,
+                ducking,
+                g_twoHandedGripActive,
+                g_retailMovement.available);
+        // Remove the complete local camera bob, not just its world Y value.
+        // Head-bob offsets are authored in camera-local space; after yaw/pitch
+        // projection their X/Z components can appear as a vertical weapon
+        // shift in the headset. Learn the stable body-to-camera offset outside
+        // a two-hand grip, then carry the physical PlayerBody with that fixed
+        // local offset for the whole grip.
+        bool positionAnchorActive = false;
+        LTVector anchoredCameraPosition = cameraTransform.m_vPos;
+        if (playerBodyHeightValid &&
+            RotationIsFiniteAndUsable(retailBaseRotation)) {
+            const bool learnPositionAnchor =
+                g_retailMovement.onGround &&
+                !g_retailMovement.airborne && !ducking &&
+                !g_twoHandedGripActive;
+            if (learnPositionAnchor) {
+                LTRotation inverseBase = retailBaseRotation.Conjugate();
+                inverseBase.Normalize();
+                const LTVector sample = inverseBase.RotateVector(
+                    cameraTransform.m_vPos - playerBodyTransform.m_vPos);
+                if (std::isfinite(sample.x) &&
+                    std::isfinite(sample.y) &&
+                    std::isfinite(sample.z) &&
+                    sample.MagSqr() < 1000000.0F) {
+                    if (!g_twoHandedCameraPosition.valid) {
+                        g_twoHandedCameraPosition.localCameraOffset = sample;
+                        g_twoHandedCameraPosition.valid = true;
+                    } else {
+                        constexpr float kStableOffsetLearningRate = 0.08F;
+                        g_twoHandedCameraPosition.localCameraOffset +=
+                            (sample -
+                             g_twoHandedCameraPosition.localCameraOffset) *
+                            kStableOffsetLearningRate;
+                    }
+                }
+            }
+            if (stabilizeTwoHandedCamera &&
+                g_twoHandedCameraPosition.valid) {
+                anchoredCameraPosition =
+                    playerBodyTransform.m_vPos +
+                    retailBaseRotation.RotateVector(
+                        g_twoHandedCameraPosition.localCameraOffset);
+                const LTVector correction =
+                    anchoredCameraPosition - cameraTransform.m_vPos;
+                constexpr float kPositionCollisionGuardUnits = 35.0F;
+                positionAnchorActive =
+                    std::isfinite(anchoredCameraPosition.x) &&
+                    std::isfinite(anchoredCameraPosition.y) &&
+                    std::isfinite(anchoredCameraPosition.z) &&
+                    correction.MagSqr() <=
+                        kPositionCollisionGuardUnits *
+                        kPositionCollisionGuardUnits;
+            }
+        }
+        const float stabilizedCameraHeight = positionAnchorActive
+            ? anchoredCameraPosition.y
+            : jumpHeight.visualHeight;
         const VerticalCameraHeightOutput height =
             UpdateVerticalCameraHeight(
                 g_verticalCameraHeight,
                 retailBasePosition.y,
-                cameraTransform.m_vPos.y,
+                stabilizedCameraHeight,
                 g_retailMovement.airborne,
                 ducking,
-                g_retailMovement.available);
-        g_visualCameraHeight = height.visualHeight;
+                g_retailMovement.available,
+                stabilizeTwoHandedCamera);
+        LTVector resolvedPosition = positionAnchorActive
+            ? anchoredCameraPosition
+            : cameraTransform.m_vPos;
+        resolvedPosition.y = height.visualHeight;
+        g_visualCameraPosition = resolvedPosition;
         g_visualCameraHeightSampleTick = GetTickCount64();
         g_visualCameraHeightValid = true;
+        if (positionAnchorActive &&
+            InterlockedCompareExchange(
+                &g_twoHandedCameraPositionStabilizedLogged, 1, 0) == 0) {
+            const LTVector correction =
+                resolvedPosition - cameraTransform.m_vPos;
+            char message[224]{};
+            std::snprintf(
+                message, sizeof(message),
+                "Full PlayerBody camera anchor active; removed local "
+                "animation offset (%.2f, %.2f, %.2f) game units.",
+                static_cast<double>(correction.x),
+                static_cast<double>(correction.y),
+                static_cast<double>(correction.z));
+            Report(
+                "INFO", "two_handed_camera_position_stabilized",
+                message);
+        }
         if (InterlockedCompareExchange(
                 &g_weaponCameraBaseSyncActiveLogged, 1, 0) == 0) {
             Report(
@@ -5455,11 +7590,33 @@ LTVector ResolveTrackedHandBasePosition(
                 "Descending stairs and airborne motion use Retail's raw "
                 "visual height until its smoothing filter catches up.");
         }
-        LTVector resolvedPosition = cameraTransform.m_vPos;
-        resolvedPosition.y = height.visualHeight;
+        if (stabilizeTwoHandedCamera &&
+            InterlockedCompareExchange(
+                &g_twoHandedCameraHeightStabilizedLogged, 1, 0) == 0) {
+            char message[320]{};
+            std::snprintf(
+                message, sizeof(message),
+                "%s raw_y=%.2f final_y=%.2f body_y=%.2f visual_y=%.2f "
+                "body_valid=%d anchor_valid=%d collision_guard=%d.",
+                jumpHeight.anchorActive
+                    ? "Physical PlayerBody height anchor active."
+                    : "PlayerBody anchor unavailable; final camera fallback.",
+                static_cast<double>(retailBasePosition.y),
+                static_cast<double>(cameraTransform.m_vPos.y),
+                static_cast<double>(playerBodyHeight),
+                static_cast<double>(height.visualHeight),
+                playerBodyHeightValid ? 1 : 0,
+                g_twoHandedJumpCamera.groundedEyeOffsetValid ? 1 : 0,
+                jumpHeight.collisionGuarded ? 1 : 0);
+            Report(
+                "INFO", "two_handed_camera_height_stabilized",
+                message);
+        }
         return resolvedPosition;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ResetVerticalCameraHeight(g_verticalCameraHeight);
+        ResetTwoHandedJumpCamera(g_twoHandedJumpCamera);
+        g_twoHandedCameraPosition = TwoHandedCameraPositionState{};
         g_visualCameraHeightValid = false;
         return retailBasePosition;
     }
@@ -5548,66 +7705,1539 @@ HOBJECT RetailRightWeaponModel(const void* weapon) noexcept {
     return model;
 }
 
-// Das zweite Waffenmodell (`CClientWeapon::m_LeftHandWeapon`) und der Grund,
-// warum es hier ueberhaupt vorkommt:
-//
-// Jede Waffe legt in `Init` beide Modelle an, das rechte *und* das linke —
-// letzteres existiert also auch fuer eine ganz normale Einhandwaffe, es
-// steht bei Retail nur nirgends im Bild. `SetWeaponTransform` setzt jedoch
-// *beide* Modelle auf dieselbe Transformation. Unser Aufruf, der die
-// sichtbare Waffe mit dem korrigierten Handsocket zusammenhaelt, holt das
-// zweite Modell damit an genau dieselbe Stelle. Weil es fuer die linke Hand
-// modelliert ist, steckt es dort schraeg im Lauf der gefuehrten Waffe: die
-// beobachtete "zweite Pistole".
-//
-// Der Offset dieses Modells in der Retail-Struktur ist nicht dokumentiert
-// und wird deshalb nicht geraten, sondern gemessen: Direkt nach dem eigenen
-// `SetWeaponTransform`-Aufruf steht genau an der gesetzten Position, was
-// dieser Aufruf selbst gesetzt hat — das rechte Modell (bekannter Offset)
-// und das zweite. Ein Kandidat, der ueber die Engine-API ein gueltiges
-// Objekt an exakt dieser Position ist, kann daher nichts anderes sein.
-volatile LONG g_secondaryWeaponHiddenLogged = 0;
-
-// Entfernt das zweite Waffenmodell endgueltig.
-//
-// Verstecken reichte nicht: Retail spielt Feuer- und Nachladeanimationen
-// weiterhin auf diesem Modell ab, wenn ein Model-Key die linke Hand nennt.
-// Sichtbar war das als Schuss ohne Animation — die Bewegung lief am
-// unsichtbaren Zwilling. `m_hObject` ist ein `LTObjRef`, also eine Referenz,
-// die beim Entfernen des Objekts von der Engine selbst genullt wird. Danach
-// scheitern alle `if (m_LeftHandWeapon.m_hObject)`-Pruefungen in Retail, und
-// jedes Schussereignis kommt aus der gefuehrten Waffe.
-void RemoveSecondaryWeaponModel(
-    const void* weapon, HOBJECT rightModel) noexcept {
-    if (g_client == nullptr || weapon == nullptr) {
-        return;
+// Nur "Dual Pistols" besitzt in der ausgelieferten Datenbank ein linkes
+// HHModel. Normale Einhandwaffen liefern hier nullptr.
+HOBJECT RetailLeftWeaponModel(const void* weapon) noexcept {
+    if (weapon == nullptr) {
+        return nullptr;
     }
-    // Jedes Bild geprueft, nicht nur beim Waffenwechsel: Retail legt das
-    // Modell beim Selektieren einer Waffe neu an.
-    HOBJECT secondary = nullptr;
+    HOBJECT model = nullptr;
     __try {
-        secondary = *reinterpret_cast<HOBJECT const*>(
+        model = *reinterpret_cast<HOBJECT const*>(
             static_cast<const unsigned char*>(weapon) +
             kRetailLeftWeaponModelObjectOffset);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+    return model;
+}
+
+bool RetailDualPistolsActive(const void* weapon) noexcept {
+    const HOBJECT right = RetailRightWeaponModel(weapon);
+    const HOBJECT left = RetailLeftWeaponModel(weapon);
+    return right != nullptr && left != nullptr && left != right;
+}
+
+bool RetailWeaponFiresLeft(const void* weapon) noexcept {
+    if (!RetailDualPistolsActive(weapon)) {
+        return false;
+    }
+    __try {
+        return *(static_cast<const unsigned char*>(weapon) +
+                 kRetailWeaponFireLeftHandOffset) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void UpdateRetailDualPistolState(const void* weapon) noexcept {
+    HOBJECT leftModel = nullptr;
+    if (RetailDualPistolsActive(weapon)) {
+        leftModel = RetailLeftWeaponModel(weapon);
+    }
+    if (leftModel == g_weaponAim.leftWeaponModel) {
         return;
     }
-    if (secondary == nullptr || secondary == rightModel) {
+
+    g_weaponAim.leftWeaponModel = leftModel;
+    g_weaponAim.leftWeaponTransformValid = false;
+    g_weaponAim.leftMuzzleValid = false;
+    g_weaponAim.leftMuzzleLocalValid = false;
+    if (leftModel != nullptr &&
+        InterlockedCompareExchange(
+            &g_dualPistolsActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "dual_pistols_vr_active",
+            "Retail Dual Pistols use independent weapon and support-hand "
+            "poses, muzzle origins, aim guides and firing-hand haptics.");
+    }
+}
+
+#if 0
+// Removed custom prop interaction. Physically attaching or pushing Retail
+// level props from tracked hands/weapons caused unstable rotations and could
+// trigger breakable glass. Keep the retired implementation excluded from the
+// binary until the surrounding Retail-physics reverse engineering is removed.
+constexpr float kHandPhysicsContactRadiusUnits = 6.0F;
+constexpr float kHandPhysicsPalmForwardUnits = 4.0F;
+constexpr float kHandPhysicsColliderRadiusUnits = 4.5F;
+constexpr float kHandPhysicsColliderBackUnits = 2.0F;
+constexpr float kHandPhysicsColliderForwardUnits = 7.0F;
+// Retail's legacy values are deliberately much larger than real kilograms:
+// the tested drinks can reports 30. A movable hammer can therefore sit well
+// above the previous 50/120 limits even though bullets move it easily.
+constexpr float kHandPhysicsMaximumContactMassKg = 5000.0F;
+// Several compact bullet-reactive tools use unusually high Havok mass
+// values. Their size/mobility is represented by an unpinned solid body, so
+// accepting that body is safer than treating the raw number as kilograms.
+constexpr float kHandPhysicsMaximumRigidBodyMassKg = 100000.0F;
+constexpr ULONGLONG kHandPhysicsContactPulseGapMs = 65;
+// Retail configures this user group for the local melee collider. It collides
+// with debris, pickups, ragdolls and world geometry without affecting the
+// player controller.
+constexpr EPhysicsGroup kHandPhysicsCollisionGroup =
+    static_cast<EPhysicsGroup>(ePhysicsGroup_UserStart + 7);
+constexpr std::uint32_t kFearUserFlagMoveable = 1U << 5;
+constexpr std::uint32_t kFearUserFlagCharacter = 1U << 7;
+constexpr std::uint32_t kFearUserFlagHitbox = 1U << 11;
+
+struct HandPhysicsQuery {
+    ILTPhysicsSim* physics{nullptr};
+    LTVector center;
+    float maximumMassKg{0.0F};
+    std::uint32_t hand{FEARVR_HAND_LEFT};
+    HPHYSICSRIGIDBODY body{INVALID_PHYSICS_RIGID_BODY};
+    HOBJECT object{nullptr};
+    LTVector centerOfMass;
+    LTVector closestPoint;
+    float massKg{0.0F};
+    float distanceSquared{(std::numeric_limits<float>::max)()};
+    bool legacyObject{false};
+};
+
+class HandPhysicsShapeDistance final : public IShapeTraversalCallback {
+public:
+    explicit HandPhysicsShapeDistance(
+        const LTVector& point) noexcept
+        : point_(point) {}
+
+    void HandleSphere(
+        const LTVector& center, float radius, float, float) override {
+        LTVector direction = point_ - center;
+        const float length = direction.Mag();
+        if (!std::isfinite(length) || !std::isfinite(radius) ||
+            radius < 0.0F) {
+            return;
+        }
+        if (length <= radius) {
+            Consider(point_);
+            return;
+        }
+        direction /= length;
+        Consider(center + direction * radius);
+    }
+
+    void HandleCapsule(
+        const LTVector& point1, const LTVector& point2, float radius,
+        float, float) override {
+        const LTVector segment = point2 - point1;
+        const float segmentLengthSquared = segment.MagSqr();
+        float along = 0.0F;
+        if (segmentLengthSquared > 0.0001F) {
+            along = std::clamp(
+                (point_ - point1).Dot(segment) /
+                    segmentLengthSquared,
+                0.0F, 1.0F);
+        }
+        const LTVector axisPoint = point1 + segment * along;
+        LTVector direction = point_ - axisPoint;
+        const float length = direction.Mag();
+        if (!std::isfinite(length) || !std::isfinite(radius) ||
+            radius < 0.0F) {
+            return;
+        }
+        if (length <= radius) {
+            Consider(point_);
+            return;
+        }
+        direction /= length;
+        Consider(axisPoint + direction * radius);
+    }
+
+    void HandleOBB(
+        const LTRigidTransform& transform, const LTVector& halfDims,
+        float, float) override {
+        const LTRotation inverse =
+            transform.m_rRot.Conjugate();
+        const LTVector local = inverse.RotateVector(
+            point_ - transform.m_vPos);
+        const LTVector closestLocal(
+            std::clamp(local.x, -std::fabs(halfDims.x),
+                       std::fabs(halfDims.x)),
+            std::clamp(local.y, -std::fabs(halfDims.y),
+                       std::fabs(halfDims.y)),
+            std::clamp(local.z, -std::fabs(halfDims.z),
+                       std::fabs(halfDims.z)));
+        Consider(
+            transform.m_vPos +
+            transform.m_rRot.RotateVector(closestLocal));
+    }
+
+    bool valid() const noexcept {
+        return valid_;
+    }
+
+    float distanceSquared() const noexcept {
+        return distanceSquared_;
+    }
+
+    const LTVector& closestPoint() const noexcept {
+        return closestPoint_;
+    }
+
+private:
+    void Consider(const LTVector& candidate) noexcept {
+        const float distanceSquared =
+            (candidate - point_).MagSqr();
+        if (!std::isfinite(distanceSquared) ||
+            distanceSquared >= distanceSquared_) {
+            return;
+        }
+        closestPoint_ = candidate;
+        distanceSquared_ = distanceSquared;
+        valid_ = true;
+    }
+
+    LTVector point_;
+    LTVector closestPoint_;
+    float distanceSquared_{
+        (std::numeric_limits<float>::max)()};
+    bool valid_{false};
+};
+
+bool MeasureHandPhysicsShapeDistance(
+    ILTPhysicsSim* physics, HPHYSICSRIGIDBODY body,
+    HPHYSICSSHAPE shape, const LTVector& center,
+    LTVector& closestPoint, float& distanceSquared) noexcept {
+    if (physics == nullptr ||
+        body == INVALID_PHYSICS_RIGID_BODY ||
+        shape == INVALID_PHYSICS_SHAPE) {
+        return false;
+    }
+    LTRigidTransform bodyTransform;
+    HandPhysicsShapeDistance shapeDistance(center);
+    if (physics->GetRigidBodyTransform(
+            body, bodyTransform) != LT_OK ||
+        physics->TraverseShapeHeirarchy(
+            shape, &shapeDistance, bodyTransform) != LT_OK ||
+        !shapeDistance.valid()) {
+        return false;
+    }
+    closestPoint = shapeDistance.closestPoint();
+    distanceSquared = shapeDistance.distanceSquared();
+    return true;
+}
+
+bool IsHandPhysicsObjectExcluded(HOBJECT object) noexcept {
+    if (object == nullptr || object == g_playerBodyObject ||
+        object == g_playerCameraObject || object == g_flashlightModel ||
+        object == g_flashlightLight ||
+        object == RetailRightWeaponModel(g_weaponAim.retailWeapon) ||
+        object == g_weaponAim.leftWeaponModel) {
+        return true;
+    }
+    return false;
+}
+
+void ConsiderHandPhysicsBody(
+    HandPhysicsQuery& query, HOBJECT object,
+    HPHYSICSRIGIDBODY body) noexcept {
+    if (body == INVALID_PHYSICS_RIGID_BODY ||
+        query.physics == nullptr) {
+        return;
+    }
+
+    bool keepReference = false;
+    __try {
+        bool pinned = true;
+        bool solid = false;
+        if (query.physics->IsRigidBodyPinned(body, pinned) != LT_OK ||
+            pinned ||
+            query.physics->GetRigidBodySolid(body, solid) != LT_OK ||
+            !solid) {
+            query.physics->ReleaseRigidBody(body);
+            return;
+        }
+
+        HPHYSICSSHAPE shape = INVALID_PHYSICS_SHAPE;
+        float massKg = 0.0F;
+        if (query.physics->GetRigidBodyShape(body, shape) != LT_OK ||
+            shape == INVALID_PHYSICS_SHAPE) {
+            query.physics->ReleaseRigidBody(body);
+            return;
+        }
+        const LTRESULT massResult =
+            query.physics->GetShapeMass(shape, massKg);
+        if (massResult != LT_OK || !std::isfinite(massKg) ||
+            massKg <= 0.0F ||
+            massKg > kHandPhysicsMaximumRigidBodyMassKg) {
+            query.physics->ReleaseShape(shape);
+            query.physics->ReleaseRigidBody(body);
+            return;
+        }
+
+        LTVector centerOfMass;
+        if (query.physics->GetRigidBodyCenterOfMassInWorld(
+                body, centerOfMass) != LT_OK) {
+            query.physics->ReleaseShape(shape);
+            query.physics->ReleaseRigidBody(body);
+            return;
+        }
+        LTVector closestPoint = centerOfMass;
+        float distanceSquared =
+            (centerOfMass - query.center).MagSqr();
+        MeasureHandPhysicsShapeDistance(
+            query.physics, body, shape, query.center,
+            closestPoint, distanceSquared);
+        query.physics->ReleaseShape(shape);
+        if (!std::isfinite(distanceSquared) ||
+            distanceSquared >= query.distanceSquared) {
+            query.physics->ReleaseRigidBody(body);
+            return;
+        }
+
+        if (query.body != INVALID_PHYSICS_RIGID_BODY) {
+            query.physics->ReleaseRigidBody(query.body);
+        }
+        query.body = body;
+        query.object = object;
+        query.centerOfMass = centerOfMass;
+        query.closestPoint = closestPoint;
+        // Use a gameplay interaction mass for the hand impulse. The physical
+        // body keeps its real Havok mass; this value only prevents a compact
+        // high-mass tool from being treated like immovable furniture.
+        query.massKg = std::clamp(massKg, 1.0F, 250.0F);
+        query.distanceSquared = distanceSquared;
+        query.legacyObject = false;
+        keepReference = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+
+    if (!keepReference) {
+        // Every normal rejection path released above. Reaching this point by
+        // structured exception means the engine handle may already be stale;
+        // invoking it again would turn a recoverable world transition into a
+        // crash, so deliberately forget that transient reference.
+    }
+}
+
+void ConsiderLegacyHandPhysicsObject(
+    HandPhysicsQuery& query, HOBJECT object,
+    bool explicitlyMoveable) noexcept {
+    if (g_client == nullptr || object == nullptr ||
+        (query.object == object &&
+         query.body != INVALID_PHYSICS_RIGID_BODY)) {
+        return;
+    }
+
+    __try {
+        ILTPhysics* const physics = g_client->Physics();
+        if (physics == nullptr) {
+            return;
+        }
+        LTVector position;
+        LTVector halfDims;
+        float massKg = 0.0F;
+        if (g_client->GetObjectPos(object, &position) != LT_OK) {
+            return;
+        }
+
+        bool dimsValid =
+            physics->GetObjectDims(object, &halfDims) == LT_OK &&
+            std::isfinite(halfDims.x) &&
+            std::isfinite(halfDims.y) &&
+            std::isfinite(halfDims.z) &&
+            halfDims.MagSqr() > 0.01F;
+        if (!dimsValid && explicitlyMoveable) {
+            ILTModel* const model = g_client->GetModelLT();
+            if (model != nullptr) {
+                dimsValid = model->GetModelAnimUserDims(
+                                object,
+                                g_client->GetModelAnimation(object),
+                                &halfDims) == LT_OK &&
+                            std::isfinite(halfDims.x) &&
+                            std::isfinite(halfDims.y) &&
+                            std::isfinite(halfDims.z) &&
+                            halfDims.MagSqr() > 0.01F;
+            }
+        }
+        if (!dimsValid) {
+            return;
+        }
+
+        const LTRESULT massResult =
+            physics->GetMass(object, &massKg);
+        if (massResult != LT_OK || !std::isfinite(massKg) ||
+            massKg <= 0.0F) {
+            if (!explicitlyMoveable) {
+                return;
+            }
+            // Some old Prop records expose their bullet-reactive MOVEABLE
+            // state but no useful client mass. A hammer is one such case.
+            massKg = 50.0F;
+        }
+        const float maximumHalfExtent = (std::max)(
+            (std::max)(
+                std::fabs(halfDims.x),
+                std::fabs(halfDims.y)),
+            std::fabs(halfDims.z));
+        constexpr float kSmallMoveableMaximumHalfExtent = 64.0F;
+        constexpr float kSmallMoveableMaximumLegacyMass = 100000.0F;
+        if (massKg > query.maximumMassKg &&
+            (!explicitlyMoveable ||
+             maximumHalfExtent >
+                 kSmallMoveableMaximumHalfExtent ||
+             massKg > kSmallMoveableMaximumLegacyMass)) {
+            return;
+        }
+
+        LTRigidTransform transform;
+        if (g_client->GetObjectTransform(
+                object, &transform) != LT_OK) {
+            transform.m_vPos = position;
+            transform.m_rRot.Init();
+        }
+        const LTVector local =
+            transform.m_rRot.Conjugate().RotateVector(
+                query.center - transform.m_vPos);
+        const LTVector closestLocal(
+            std::clamp(
+                local.x, -std::fabs(halfDims.x),
+                std::fabs(halfDims.x)),
+            std::clamp(
+                local.y, -std::fabs(halfDims.y),
+                std::fabs(halfDims.y)),
+            std::clamp(
+                local.z, -std::fabs(halfDims.z),
+                std::fabs(halfDims.z)));
+        const LTVector closestPoint =
+            transform.m_vPos +
+            transform.m_rRot.RotateVector(closestLocal);
+        const float distanceSquared =
+            (closestPoint - query.center).MagSqr();
+        if (!std::isfinite(distanceSquared) ||
+            distanceSquared >= query.distanceSquared) {
+            return;
+        }
+
+        if (query.body != INVALID_PHYSICS_RIGID_BODY) {
+            query.physics->ReleaseRigidBody(query.body);
+            query.body = INVALID_PHYSICS_RIGID_BODY;
+        }
+        query.object = object;
+        query.centerOfMass = position;
+        query.closestPoint = closestPoint;
+        // Legacy mass values are gameplay-scaled. Cap only the interaction
+        // mass so a small but numerically heavy hammer still follows a hand
+        // impulse; the size limit above prevents furniture from qualifying.
+        query.massKg = std::clamp(massKg, 1.0F, 250.0F);
+        query.distanceSquared = distanceSquared;
+        query.legacyObject = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void QueryHandPhysicsObject(
+    HOBJECT object, void* userData) {
+    auto* const query = static_cast<HandPhysicsQuery*>(userData);
+    if (query == nullptr || query->physics == nullptr ||
+        IsHandPhysicsObjectExcluded(object) || g_client == nullptr) {
+        return;
+    }
+
+    __try {
+        ILTCommon* const common = g_client->Common();
+        if (common == nullptr) {
+            return;
+        }
+
+        std::uint32_t userFlags = 0;
+        if (common->GetObjectFlags(
+                object, OFT_User, userFlags) == LT_OK &&
+            (userFlags &
+             (kFearUserFlagCharacter | kFearUserFlagHitbox)) != 0) {
+            return;
+        }
+        const bool legacyMoveable =
+            (userFlags & kFearUserFlagMoveable) != 0;
+
+        std::uint32_t objectType = OT_NORMAL;
+        if (common->GetObjectType(object, &objectType) != LT_OK) {
+            return;
+        }
+        if (objectType == OT_WORLDMODEL) {
+            HPHYSICSRIGIDBODY body = INVALID_PHYSICS_RIGID_BODY;
+            if (query->physics->GetWorldModelRigidBody(
+                    object, body) == LT_OK) {
+                ConsiderHandPhysicsBody(*query, object, body);
+            }
+            if (legacyMoveable) {
+                ConsiderLegacyHandPhysicsObject(
+                    *query, object, true);
+            }
+            return;
+        }
+        if (objectType != OT_MODEL) {
+            return;
+        }
+
+        std::uint32_t bodyCount = 0;
+        const bool rigidBodyQuerySucceeded =
+            query->physics->GetNumModelRigidBodies(
+                object, bodyCount) == LT_OK;
+        if (rigidBodyQuerySucceeded) {
+            bodyCount = (std::min)(bodyCount, 32U);
+            for (std::uint32_t index = 0; index < bodyCount; ++index) {
+                HPHYSICSRIGIDBODY body = INVALID_PHYSICS_RIGID_BODY;
+                if (query->physics->GetModelRigidBody(
+                        object, index, body) == LT_OK) {
+                    ConsiderHandPhysicsBody(*query, object, body);
+                }
+            }
+        }
+        // A number of ordinary level props (including some tools) predate
+        // Havok and omit USRFLG_MOVEABLE even though they have mass, solid
+        // dimensions and react to bullets. Treat model objects without any
+        // Havok body as legacy physics candidates; the mass/type/character
+        // checks above still reject scenery, actors and hitboxes.
+        if (legacyMoveable ||
+            !rigidBodyQuerySucceeded || bodyCount == 0) {
+            ConsiderLegacyHandPhysicsObject(
+                *query, object, legacyMoveable);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+bool FindNearestHandPhysicsBody(
+    std::uint32_t hand, const LTVector& position, float radius,
+    float maximumMassKg, HandPhysicsQuery& result) noexcept {
+    if (g_client == nullptr || hand >= FEARVR_HAND_COUNT) {
+        return false;
+    }
+    __try {
+        result.physics = g_client->PhysicsSim();
+        result.center = position;
+        result.maximumMassKg = maximumMassKg;
+        result.hand = hand;
+        result.distanceSquared = radius * radius;
+        if (result.physics == nullptr ||
+            g_client->FindObjectsInBox(
+                position, LTVector(radius, radius, radius),
+                &QueryHandPhysicsObject, &result) != LT_OK) {
+            if (result.physics != nullptr &&
+                result.body != INVALID_PHYSICS_RIGID_BODY) {
+                result.physics->ReleaseRigidBody(result.body);
+                result.body = INVALID_PHYSICS_RIGID_BODY;
+            }
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        result.body = INVALID_PHYSICS_RIGID_BODY;
+        return false;
+    }
+    return result.body != INVALID_PHYSICS_RIGID_BODY ||
+           result.legacyObject && result.object != nullptr;
+}
+
+void RequestHandPhysicsHaptic(
+    std::uint32_t hand, float amplitude,
+    std::uint64_t durationNanoseconds) noexcept {
+    if (hand >= FEARVR_HAND_COUNT ||
+        g_submitHapticRequest == nullptr ||
+        !g_controllerHapticsEnabled) {
+        return;
+    }
+    FearVrHapticRequest request{};
+    request.requestId = ++g_hapticRequestId;
+    request.durationNs = durationNanoseconds;
+    request.amplitude = std::clamp(amplitude, 0.0F, 1.0F);
+    request.frequency = 0.0F;
+    const bool semanticLeft = hand == FEARVR_HAND_LEFT;
+    const bool physicalLeft =
+        g_leftHandedBindings ? !semanticLeft : semanticLeft;
+    request.handMask = physicalLeft
+        ? FEARVR_HAND_MASK_LEFT
+        : FEARVR_HAND_MASK_RIGHT;
+    request.flags = FEARVR_HF_VALID;
+    g_submitHapticRequest(&request);
+}
+
+void ResetHandPhysicsState(
+    HandPhysicsState& state) noexcept {
+    state.contactBody = INVALID_PHYSICS_RIGID_BODY;
+    state.lastPosition.Init();
+    state.velocity.Init();
+    state.lastPoseTick = 0;
+    state.lastContactHapticTick = 0;
+    state.contactBodyRetryAt = 0;
+    state.poseValid = false;
+}
+
+void ReleaseHandPhysicsContactBody(
+    std::uint32_t hand) noexcept {
+    if (hand >= FEARVR_HAND_COUNT) {
+        return;
+    }
+    HandPhysicsState& state = g_handPhysics[hand];
+    const HPHYSICSRIGIDBODY body = state.contactBody;
+    state.contactBody = INVALID_PHYSICS_RIGID_BODY;
+    if (body == INVALID_PHYSICS_RIGID_BODY || g_client == nullptr) {
         return;
     }
     __try {
-        g_client->RemoveObject(secondary);
+        ILTPhysicsSim* const physics = g_client->PhysicsSim();
+        if (physics != nullptr) {
+            physics->ReleaseRigidBody(body);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return;
-    }
-    if (InterlockedCompareExchange(
-            &g_secondaryWeaponHiddenLogged, 1, 0) == 0) {
-        Report(
-            "INFO", "secondary_weapon_model_removed",
-            "The second, left-hand weapon model was removed; every shot "
-            "event now comes from the carried weapon.");
     }
 }
+
+bool UpdateHandPhysicsContactBody(
+    HandPhysicsState& state,
+    const LTRigidTransform& handTransform,
+    ULONGLONG now) noexcept {
+    if (g_client == nullptr || now < state.contactBodyRetryAt) {
+        return state.contactBody != INVALID_PHYSICS_RIGID_BODY;
+    }
+    __try {
+        ILTPhysicsSim* const physics = g_client->PhysicsSim();
+        if (physics == nullptr) {
+            state.contactBodyRetryAt = now + 500;
+            return false;
+        }
+        if (state.contactBody == INVALID_PHYSICS_RIGID_BODY) {
+            HPHYSICSSHAPE shape = physics->CreateCapsuleShape(
+                LTVector(
+                    0.0F, 0.0F,
+                    -kHandPhysicsColliderBackUnits),
+                LTVector(
+                    0.0F, 0.0F,
+                    kHandPhysicsColliderForwardUnits),
+                kHandPhysicsColliderRadiusUnits,
+                1.0F, 1000.0F);
+            if (shape == INVALID_PHYSICS_SHAPE) {
+                state.contactBodyRetryAt = now + 500;
+                return false;
+            }
+            const HPHYSICSRIGIDBODY body =
+                physics->CreateRigidBody(
+                    shape, handTransform, true,
+                    kHandPhysicsCollisionGroup, 0,
+                    0.65F, 0.0F);
+            physics->ReleaseShape(shape);
+            if (body == INVALID_PHYSICS_RIGID_BODY) {
+                state.contactBodyRetryAt = now + 500;
+                return false;
+            }
+            state.contactBody = body;
+            physics->EnableRigidBodyPinnedCollisions(body, true);
+            if (InterlockedCompareExchange(
+                    &g_handPhysicsColliderActiveLogged, 1, 0) == 0) {
+                Report(
+                    "INFO", "hand_physics_colliders_active",
+                    "Pinned palm/finger capsules follow both OpenXR grip "
+                    "poses and physically collide with movable Havok props.");
+            }
+            return true;
+        }
+
+        const float frameSeconds =
+            std::clamp(g_client->GetFrameTime(), 0.005F, 0.05F);
+        if (physics->KeyframeRigidBody(
+                state.contactBody, handTransform,
+                frameSeconds) == LT_OK) {
+            return true;
+        }
+        physics->ReleaseRigidBody(state.contactBody);
+        state.contactBody = INVALID_PHYSICS_RIGID_BODY;
+        state.contactBodyRetryAt = now + 250;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // A level transition can invalidate the whole client simulation.
+        // Forget the old-world handle and create a fresh collider later.
+        state.contactBody = INVALID_PHYSICS_RIGID_BODY;
+        state.contactBodyRetryAt = now + 250;
+    }
+    return false;
+}
+
+void ClearLegacyPropSimulation(
+    LegacyPropSimulationState& state) noexcept {
+    state = LegacyPropSimulationState{};
+}
+
+void ForgetAllLegacyPropSimulations() noexcept {
+    for (LegacyPropSimulationState& state :
+         g_legacyPropSimulation) {
+        ClearLegacyPropSimulation(state);
+    }
+}
+
+LTVector LegacyPropRollingAngularVelocity(
+    HOBJECT object, const LTVector& linearVelocity) noexcept {
+    if (g_client == nullptr || object == nullptr) {
+        return LTVector(0.0F, 0.0F, 0.0F);
+    }
+    float radius = 4.0F;
+    __try {
+        ILTPhysics* const physics = g_client->Physics();
+        LTVector halfDims;
+        if (physics != nullptr &&
+            physics->GetObjectDims(object, &halfDims) == LT_OK) {
+            radius = (std::max)(
+                2.0F, (std::min)(
+                          std::fabs(halfDims.x),
+                          std::fabs(halfDims.z)));
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return LTVector(
+        linearVelocity.z / radius, 0.0F,
+        -linearVelocity.x / radius);
+}
+
+void WakeLegacyPropSimulation(
+    HOBJECT object, const LTVector& angularVelocity,
+    ULONGLONG now, bool replaceAngularVelocity) noexcept {
+    if (g_client == nullptr || object == nullptr) {
+        return;
+    }
+
+    LegacyPropSimulationState* selected = nullptr;
+    LegacyPropSimulationState* oldestResting = nullptr;
+    LegacyPropSimulationState* oldest = nullptr;
+    for (LegacyPropSimulationState& state :
+         g_legacyPropSimulation) {
+        if (state.object == object) {
+            selected = &state;
+            break;
+        }
+        if (state.object == nullptr && selected == nullptr) {
+            selected = &state;
+        }
+        if (state.resting &&
+            (oldestResting == nullptr ||
+             state.lastTick < oldestResting->lastTick)) {
+            oldestResting = &state;
+        }
+        if (oldest == nullptr || state.lastTick < oldest->lastTick) {
+            oldest = &state;
+        }
+    }
+
+    if (selected != nullptr && selected->object == object) {
+        selected->angularVelocity = replaceAngularVelocity
+            ? angularVelocity
+            : selected->angularVelocity * 0.35F +
+                  angularVelocity * 0.65F;
+        selected->resting = false;
+        selected->restFrames = 0;
+        selected->lastTick = now;
+        return;
+    }
+    if (selected == nullptr) {
+        selected = oldestResting != nullptr ? oldestResting : oldest;
+    }
+    if (selected == nullptr) {
+        return;
+    }
+
+    LTRigidTransform transform;
+    bool valid = false;
+    __try {
+        valid =
+            g_client->GetObjectTransform(object, &transform) == LT_OK;
+        ILTCommon* const common = g_client->Common();
+        if (valid && common != nullptr) {
+            // MoveObject only resolves contacts for solid client objects.
+            // Preserve every other flag and make just this touched prop solid.
+            common->SetObjectFlags(
+                object, OFT_Flags, FLAG_SOLID, FLAG_SOLID);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        valid = false;
+    }
+    if (!valid) {
+        return;
+    }
+
+    ClearLegacyPropSimulation(*selected);
+    selected->object = object;
+    selected->position = transform.m_vPos;
+    selected->rotation = transform.m_rRot;
+    selected->angularVelocity = angularVelocity;
+    selected->lastTick = now;
+}
+
+void UpdateLegacyPropSimulations(ULONGLONG now) noexcept {
+    if (g_client == nullptr) {
+        return;
+    }
+
+    __try {
+        ILTClientPhysics* const physics =
+            static_cast<ILTClientPhysics*>(g_client->Physics());
+        if (physics == nullptr) {
+            return;
+        }
+
+        for (LegacyPropSimulationState& state :
+             g_legacyPropSimulation) {
+            if (state.object == nullptr) {
+                continue;
+            }
+
+            LTRigidTransform observed;
+            LTVector observedVelocity;
+            if (g_client->GetObjectTransform(
+                    state.object, &observed) != LT_OK ||
+                physics->GetVelocity(
+                    state.object, &observedVelocity) != LT_OK) {
+                ClearLegacyPropSimulation(state);
+                continue;
+            }
+
+            // A resting object may still receive a native bullet/explosion
+            // impulse. Adopt that new motion, but otherwise keep our stored
+            // client pose so ordinary server snapshots cannot snap a thrown
+            // prop back to where it was grabbed.
+            if (state.resting &&
+                observedVelocity.MagSqr() > 16.0F) {
+                state.position = observed.m_vPos;
+                state.rotation = observed.m_rRot;
+                state.angularVelocity =
+                    LegacyPropRollingAngularVelocity(
+                        state.object, observedVelocity);
+                state.resting = false;
+                state.restFrames = 0;
+            }
+
+            if (physics->MoveObject(
+                    state.object, state.position,
+                    MOVEOBJECT_TELEPORT) != LT_OK ||
+                g_client->SetObjectRotation(
+                    state.object, state.rotation) != LT_OK) {
+                ClearLegacyPropSimulation(state);
+                continue;
+            }
+
+            if (state.resting) {
+                observedVelocity.Init();
+                physics->SetVelocity(
+                    state.object, observedVelocity);
+                state.lastTick = now;
+                continue;
+            }
+
+            float frameSeconds = g_client->GetFrameTime();
+            if (state.lastTick != 0 && now > state.lastTick) {
+                frameSeconds = static_cast<float>(
+                    now - state.lastTick) * 0.001F;
+            }
+            frameSeconds =
+                std::clamp(frameSeconds, 0.005F, 0.05F);
+            state.lastTick = now;
+
+            std::uint32_t objectFlags = 0;
+            bool engineAppliesGravity = false;
+            ILTCommon* const common = g_client->Common();
+            if (common != nullptr &&
+                common->GetObjectFlags(
+                    state.object, OFT_Flags,
+                    objectFlags) == LT_OK) {
+                engineAppliesGravity =
+                    (objectFlags & FLAG_GRAVITY) != 0;
+            }
+            if (!engineAppliesGravity) {
+                LTVector gravity;
+                LTVector velocity;
+                if (physics->GetGlobalForce(gravity) == LT_OK &&
+                    physics->GetVelocity(
+                        state.object, &velocity) == LT_OK) {
+                    velocity += gravity * frameSeconds;
+                    physics->SetVelocity(state.object, velocity);
+                }
+            }
+
+            MoveInfo movement{};
+            movement.m_hObject = state.object;
+            movement.m_dt = frameSeconds;
+            if (physics->UpdateMovement(&movement) != LT_OK) {
+                ClearLegacyPropSimulation(state);
+                continue;
+            }
+
+            const LTVector targetPosition =
+                state.position + movement.m_Offset;
+            if (physics->MoveObject(
+                    state.object, targetPosition, 0) != LT_OK ||
+                g_client->GetObjectPos(
+                    state.object, &state.position) != LT_OK) {
+                ClearLegacyPropSimulation(state);
+                continue;
+            }
+
+            LTVector velocity;
+            if (physics->GetVelocity(
+                    state.object, &velocity) != LT_OK) {
+                ClearLegacyPropSimulation(state);
+                continue;
+            }
+            CollisionInfo standing{};
+            standing.m_hObject = nullptr;
+            standing.m_hPoly = INVALID_HPOLY;
+            const bool standingOnSurface =
+                physics->GetStandingOn(
+                    state.object, &standing) == LT_OK &&
+                (standing.m_hObject != nullptr ||
+                 standing.m_hPoly != INVALID_HPOLY);
+            const bool downwardMoveBlocked =
+                movement.m_Offset.y < -0.001F &&
+                state.position.y - targetPosition.y > 0.01F;
+            const bool onGround =
+                standingOnSurface || downwardMoveBlocked;
+            if (onGround && velocity.y < 0.0F) {
+                velocity.y = 0.0F;
+            }
+
+            if (onGround) {
+                const float rollingDamping =
+                    std::pow(0.18F, frameSeconds);
+                velocity.x *= rollingDamping;
+                velocity.z *= rollingDamping;
+                const LTVector rollingAngular =
+                    LegacyPropRollingAngularVelocity(
+                        state.object, velocity);
+                state.angularVelocity =
+                    state.angularVelocity * 0.35F +
+                    rollingAngular * 0.65F;
+                state.angularVelocity *= rollingDamping;
+            } else {
+                state.angularVelocity *=
+                    std::pow(0.92F, frameSeconds);
+            }
+            physics->SetVelocity(state.object, velocity);
+
+            const float angularSpeed =
+                state.angularVelocity.Mag();
+            if (std::isfinite(angularSpeed) &&
+                angularSpeed > 0.001F) {
+                const LTVector axis =
+                    state.angularVelocity / angularSpeed;
+                const LTRotation delta(
+                    axis, angularSpeed * frameSeconds);
+                state.rotation = delta * state.rotation;
+                state.rotation.Normalize();
+                g_client->SetObjectRotation(
+                    state.object, state.rotation);
+            }
+
+            const float horizontalSpeedSquared =
+                velocity.x * velocity.x +
+                velocity.z * velocity.z;
+            if (onGround && horizontalSpeedSquared < 4.0F &&
+                std::fabs(velocity.y) < 1.0F &&
+                angularSpeed < 0.35F) {
+                ++state.restFrames;
+            } else {
+                state.restFrames = 0;
+            }
+            if (state.restFrames >= 8) {
+                velocity.Init();
+                physics->SetVelocity(state.object, velocity);
+                state.angularVelocity.Init();
+                state.resting = true;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Level streaming can invalidate several client object handles at
+        // once. The world-change path clears them before the next frame.
+    }
+}
+
+void ReleaseHandPhysicsGrab(
+    std::uint32_t hand, bool applyThrow) noexcept {
+    if (hand >= FEARVR_HAND_COUNT) {
+        return;
+    }
+    HandPhysicsState& state = g_handPhysics[hand];
+    if (!HandPhysicsGrabActive(hand)) {
+        state.squeezeDown = false;
+        return;
+    }
+
+    HPHYSICSRIGIDBODY body = state.heldBody;
+    HOBJECT object = state.heldObject;
+    const bool legacyObject = state.heldLegacyObject;
+    LTVector releaseVelocity = state.velocity;
+    const float speed = releaseVelocity.Mag();
+    releaseVelocity *=
+        ClampHandPhysicsSpeedScale(speed);
+    LTVector releaseAngularVelocity = state.angularVelocity;
+    const float angularSpeed = releaseAngularVelocity.Mag();
+    if (!applyThrow) {
+        releaseVelocity.Init();
+        releaseAngularVelocity.Init();
+    }
+    // Auch ein nahezu bewegungslos losgelassenes Objekt muss aufgeweckt
+    // werden. Sonst bleibt insbesondere ein legacy MOVEABLE bis zum naechsten
+    // Spieler-/Weltkontakt scheinbar in der Luft stehen.
+    LTVector wakeVelocity = releaseVelocity;
+    if (wakeVelocity.MagSqr() <= 1.0F) {
+        wakeVelocity = LTVector(0.0F, -1.0F, 0.0F);
+    }
+    state.heldBody = INVALID_PHYSICS_RIGID_BODY;
+    state.heldObject = nullptr;
+    state.heldLegacyObject = false;
+
+    if (g_client != nullptr) {
+        __try {
+            if (legacyObject && object != nullptr) {
+                ILTPhysics* const physics = g_client->Physics();
+                if (physics != nullptr) {
+                    physics->SetVelocity(object, wakeVelocity);
+                    WakeLegacyPropSimulation(
+                        object, releaseAngularVelocity,
+                        GetTickCount64(), true);
+                }
+            } else {
+                ILTPhysicsSim* const physics = g_client->PhysicsSim();
+                if (physics == nullptr) {
+                    __leave;
+                }
+                physics->SetRigidBodyVelocity(body, wakeVelocity);
+                if (applyThrow &&
+                    releaseAngularVelocity.MagSqr() > 0.01F) {
+                    physics->SetRigidBodyAngularVelocity(
+                        body, releaseAngularVelocity);
+                }
+                physics->ReleaseRigidBody(body);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+
+    char message[160]{};
+    std::snprintf(
+        message, sizeof(message),
+        "hand=%s object=%p type=%s speed=%.1f angular=%.1f",
+        hand == FEARVR_HAND_LEFT ? "left" : "right", object,
+        legacyObject ? "moveable" : "rigid",
+        static_cast<double>(applyThrow ? speed : 0.0F),
+        static_cast<double>(applyThrow ? angularSpeed : 0.0F));
+    Report("INFO", "hand_physics_released", message);
+    RequestHandPhysicsHaptic(hand, 0.08F, 18'000'000);
+}
+
+void ReleaseAllHandPhysicsGrabs(bool applyThrow) noexcept {
+    for (std::uint32_t hand = 0; hand < FEARVR_HAND_COUNT; ++hand) {
+        ReleaseHandPhysicsGrab(hand, applyThrow);
+        ReleaseHandPhysicsContactBody(hand);
+        ResetHandPhysicsState(g_handPhysics[hand]);
+        ResetHandPhysicsState(g_weaponPhysicsContact[hand]);
+    }
+    ForgetAllLegacyPropSimulations();
+}
+
+void ForgetHandPhysicsAfterWorldChange() noexcept {
+    for (HandPhysicsState& state : g_handPhysics) {
+        // The level owns these bodies and has already destroyed the world.
+        // Never call ReleaseRigidBody with a handle from that old world.
+        ResetHandPhysicsState(state);
+    }
+    for (HandPhysicsState& state : g_weaponPhysicsContact) {
+        ResetHandPhysicsState(state);
+    }
+    ForgetAllLegacyPropSimulations();
+}
+
+void UpdateHandPhysicsVelocity(
+    HandPhysicsState& state, const LTVector& position,
+    const LTRotation& rotation,
+    ULONGLONG now) noexcept {
+    if (!state.poseValid || state.lastPoseTick == 0 ||
+        now <= state.lastPoseTick ||
+        now - state.lastPoseTick > 100) {
+        state.velocity = LTVector(0.0F, 0.0F, 0.0F);
+        state.angularVelocity = LTVector(0.0F, 0.0F, 0.0F);
+    } else {
+        const float seconds =
+            static_cast<float>(now - state.lastPoseTick) * 0.001F;
+        const LTVector measured =
+            (position - state.lastPosition) / seconds;
+        if (std::isfinite(measured.x) &&
+            std::isfinite(measured.y) &&
+            std::isfinite(measured.z)) {
+            state.velocity =
+                state.velocity * 0.35F + measured * 0.65F;
+        } else {
+            state.velocity = LTVector(0.0F, 0.0F, 0.0F);
+        }
+
+        LTRotation delta =
+            rotation * state.lastRotation.Conjugate();
+        delta.Normalize();
+        float x = delta[LTRotation::QX];
+        float y = delta[LTRotation::QY];
+        float z = delta[LTRotation::QZ];
+        float w = delta[LTRotation::QW];
+        if (w < 0.0F) {
+            x = -x;
+            y = -y;
+            z = -z;
+            w = -w;
+        }
+        const float vectorMagnitude =
+            std::sqrt(x * x + y * y + z * z);
+        if (std::isfinite(vectorMagnitude) &&
+            vectorMagnitude > 0.0001F &&
+            std::isfinite(w)) {
+            const float angle =
+                2.0F * std::atan2(
+                           vectorMagnitude,
+                           std::clamp(w, 0.0F, 1.0F));
+            LTVector measuredAngular(
+                x / vectorMagnitude * angle / seconds,
+                y / vectorMagnitude * angle / seconds,
+                z / vectorMagnitude * angle / seconds);
+            const float angularSpeed = measuredAngular.Mag();
+            if (std::isfinite(angularSpeed)) {
+                if (angularSpeed > 20.0F) {
+                    measuredAngular *= 20.0F / angularSpeed;
+                }
+                state.angularVelocity =
+                    state.angularVelocity * 0.35F +
+                    measuredAngular * 0.65F;
+            } else {
+                state.angularVelocity.Init();
+            }
+        } else {
+            state.angularVelocity *= 0.35F;
+        }
+    }
+    state.lastPosition = position;
+    state.lastRotation = rotation;
+    state.lastPoseTick = now;
+    state.poseValid = true;
+}
+
+bool HandPhysicsCanContact(std::uint32_t hand) noexcept {
+    if (!g_handPhysicsEnabled || hand >= FEARVR_HAND_COUNT ||
+        g_climbOnLadder) {
+        return false;
+    }
+    const std::uint32_t handMask = hand == FEARVR_HAND_LEFT
+        ? FEARVR_HAND_MASK_LEFT
+        : FEARVR_HAND_MASK_RIGHT;
+    if ((g_currentInput.activeHands & handMask) == 0) {
+        return false;
+    }
+    return hand == FEARVR_HAND_LEFT
+        ? g_weaponAim.leftGripValid
+        : g_weaponAim.gripValid;
+}
+
+bool HandPhysicsCanGrab(
+    std::uint32_t hand, const void* weapon) noexcept {
+    if (!HandPhysicsCanContact(hand)) {
+        return false;
+    }
+    if (hand == FEARVR_HAND_LEFT) {
+        return !DualPistolsVrActive() &&
+               !g_twoHandedGripActive;
+    }
+    return weapon == nullptr || RetailWeaponIsDisabled(weapon);
+}
+
+LTRigidTransform HandPhysicsTransform(
+    std::uint32_t hand) noexcept {
+    if (hand == FEARVR_HAND_LEFT) {
+        // The physical palm must occupy the same side of the wrist as the
+        // corrected visible hand; otherwise the player touches a prop while
+        // the grab volume sits behind it.
+        return LTRigidTransform(
+            EffectiveLeftHandPosition(),
+            EffectiveLeftHandRotation());
+    }
+    return g_weaponAim.gripTransform;
+}
+
+LTVector HandPhysicsPalmCenter(
+    const LTRigidTransform& handTransform) noexcept {
+    return handTransform.m_vPos +
+           handTransform.m_rRot.Forward() *
+               kHandPhysicsPalmForwardUnits;
+}
+
+void UpdateTrackedPhysicsContact(
+    std::uint32_t hand, HandPhysicsState& state,
+    const LTVector& contactCenter,
+    const LTVector& contactVelocity,
+    ULONGLONG now, float contactRadius) noexcept {
+    const float handSpeed = contactVelocity.Mag();
+    if (!std::isfinite(handSpeed) || handSpeed <= 4.0F) {
+        return;
+    }
+
+    HandPhysicsQuery hit;
+    if (!FindNearestHandPhysicsBody(
+            hand, contactCenter,
+            contactRadius,
+            kHandPhysicsMaximumContactMassKg, hit)) {
+        return;
+    }
+
+    __try {
+        LTVector bodyVelocity(0.0F, 0.0F, 0.0F);
+        LTRESULT velocityResult = LT_ERROR;
+        if (hit.legacyObject) {
+            ILTPhysics* const physics = g_client->Physics();
+            if (physics != nullptr) {
+                velocityResult =
+                    physics->GetVelocity(hit.object, &bodyVelocity);
+            }
+        } else {
+            velocityResult =
+                hit.physics->GetRigidBodyVelocity(
+                    hit.body, bodyVelocity);
+        }
+        const LTVector direction = contactVelocity / handSpeed;
+        const float relativeSpeed =
+            (contactVelocity - bodyVelocity).Dot(direction);
+        const float impulseMagnitude =
+            HandPhysicsPushImpulseMagnitude(
+                hit.massKg, relativeSpeed);
+        LTRESULT impulseResult = LT_ERROR;
+        if (velocityResult == LT_OK && impulseMagnitude > 0.0F) {
+            if (hit.legacyObject) {
+                ILTPhysics* const physics = g_client->Physics();
+                if (physics != nullptr) {
+                    const LTVector velocityDelta =
+                        direction *
+                        (impulseMagnitude / hit.massKg);
+                    const LTVector pushedVelocity =
+                        bodyVelocity + velocityDelta;
+                    impulseResult = physics->SetVelocity(
+                        hit.object, pushedVelocity);
+                    if (impulseResult == LT_OK) {
+                        WakeLegacyPropSimulation(
+                            hit.object,
+                            LegacyPropRollingAngularVelocity(
+                                hit.object, pushedVelocity),
+                            now, false);
+                    }
+                }
+            } else {
+                impulseResult =
+                    hit.physics->ApplyRigidBodyImpulseWorldSpace(
+                        hit.body, hit.closestPoint,
+                        direction * impulseMagnitude);
+                if (impulseResult == LT_OK) {
+                    // A kinematic tracked hand must transfer translation as
+                    // well as off-centre torque. Some compact tools (notably
+                    // the hammer prop) use a very large Havok mass: an impulse
+                    // at the touched edge merely spins them around one axis.
+                    // Preserve their current velocity and add the hand's
+                    // normal component directly so the body actually moves.
+                    const float transferredSpeed = std::clamp(
+                        relativeSpeed * 0.65F, 0.0F, 350.0F);
+                    const LTVector pushedVelocity =
+                        bodyVelocity + direction * transferredSpeed;
+                    const LTRESULT velocitySetResult =
+                        hit.physics->SetRigidBodyVelocity(
+                            hit.body, pushedVelocity);
+                    if (velocitySetResult != LT_OK) {
+                        impulseResult = velocitySetResult;
+                    }
+                }
+            }
+        }
+        if (impulseResult == LT_OK) {
+            if (state.lastContactHapticTick == 0 ||
+                now - state.lastContactHapticTick >=
+                    kHandPhysicsContactPulseGapMs) {
+                state.lastContactHapticTick = now;
+                RequestHandPhysicsHaptic(
+                    hand, std::clamp(
+                              impulseMagnitude / 900.0F,
+                              0.04F, 0.16F),
+                    14'000'000);
+            }
+            if (InterlockedCompareExchange(
+                    &g_handPhysicsActiveLogged, 1, 0) == 0) {
+                Report(
+                    "INFO", "hand_physics_active",
+                    "Tracked hands push both Havok rigid bodies and legacy "
+                    "F.E.A.R. MOVEABLE props; squeeze near a prop grabs it "
+                    "and release velocity is preserved for throwing.");
+            }
+        }
+        if (!hit.legacyObject &&
+            hit.body != INVALID_PHYSICS_RIGID_BODY) {
+            hit.physics->ReleaseRigidBody(hit.body);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void UpdateOneHandPhysics(
+    std::uint32_t hand, const void* weapon,
+    ULONGLONG now) noexcept {
+    HandPhysicsState& state = g_handPhysics[hand];
+    const bool canContact = HandPhysicsCanContact(hand);
+    if (!canContact) {
+        if (HandPhysicsGrabActive(hand)) {
+            ReleaseHandPhysicsGrab(hand, false);
+        }
+        ReleaseHandPhysicsContactBody(hand);
+        state.poseValid = false;
+        state.squeezeDown = false;
+        return;
+    }
+
+    const LTRigidTransform handTransform =
+        HandPhysicsTransform(hand);
+    UpdateHandPhysicsVelocity(
+        state, handTransform.m_vPos,
+        handTransform.m_rRot, now);
+    if (HandPhysicsGrabActive(hand)) {
+        // A held body is keyframed separately. Keeping the physical palm
+        // collider active would make both bodies fight at the grab point.
+        ReleaseHandPhysicsContactBody(hand);
+    } else {
+        UpdateHandPhysicsContactBody(
+            state, handTransform, now);
+    }
+    const bool canGrab = HandPhysicsCanGrab(hand, weapon);
+    if (!canGrab) {
+        if (HandPhysicsGrabActive(hand)) {
+            ReleaseHandPhysicsGrab(hand, false);
+            UpdateHandPhysicsContactBody(
+                state, handTransform, now);
+        }
+        state.squeezeDown = false;
+        UpdateTrackedPhysicsContact(
+            hand, state, HandPhysicsPalmCenter(handTransform),
+            state.velocity, now,
+            kHandPhysicsContactRadiusUnits);
+        return;
+    }
+    const bool squeezeDown = UpdateHandPhysicsSqueeze(
+        g_currentInput.squeeze[hand], state.squeezeDown);
+    const bool squeezePressed =
+        squeezeDown && !state.squeezeDown;
+    state.squeezeDown = squeezeDown;
+
+    if (HandPhysicsGrabActive(hand)) {
+        if (!squeezeDown) {
+            ReleaseHandPhysicsGrab(hand, true);
+            return;
+        }
+        __try {
+            const LTRigidTransform desired =
+                handTransform * state.bodyInHand;
+            if (state.heldLegacyObject) {
+                LTRigidTransform currentObject;
+                ILTPhysics* const physics = g_client->Physics();
+                if (state.heldObject == nullptr || physics == nullptr ||
+                    g_client->GetObjectTransform(
+                        state.heldObject, &currentObject) != LT_OK ||
+                    (desired.m_vPos - currentObject.m_vPos).MagSqr() >
+                        10000.0F ||
+                    physics->MoveObject(
+                        state.heldObject, desired.m_vPos,
+                        MOVEOBJECT_TELEPORT) != LT_OK ||
+                    g_client->SetObjectRotation(
+                        state.heldObject, desired.m_rRot) != LT_OK) {
+                    ReleaseHandPhysicsGrab(hand, false);
+                }
+            } else {
+                ILTPhysicsSim* const physics = g_client->PhysicsSim();
+                LTRigidTransform currentBody;
+                const float frameSeconds =
+                    std::clamp(g_client->GetFrameTime(), 0.005F, 0.05F);
+                if (physics == nullptr ||
+                    physics->GetRigidBodyTransform(
+                        state.heldBody, currentBody) != LT_OK ||
+                    (desired.m_vPos - currentBody.m_vPos).MagSqr() >
+                        10000.0F ||
+                    physics->KeyframeRigidBody(
+                        state.heldBody, desired,
+                        frameSeconds) != LT_OK) {
+                    ReleaseHandPhysicsGrab(hand, false);
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // A streaming transition can invalidate the client physics world
+            // between two WeaponManager updates. Forget the handle; the world
+            // owns its lifetime in this exceptional path.
+            state.heldBody = INVALID_PHYSICS_RIGID_BODY;
+            state.heldObject = nullptr;
+            state.heldLegacyObject = false;
+        }
+        return;
+    }
+
+    if (squeezePressed) {
+        HandPhysicsQuery grab;
+        const LTVector palmCenter =
+            HandPhysicsPalmCenter(handTransform);
+        if (FindNearestHandPhysicsBody(
+                hand, palmCenter,
+                kHandPhysicsGrabRadiusUnits,
+                kHandPhysicsMaximumGrabMassKg, grab)) {
+            LTRigidTransform bodyTransform;
+            bool acquired = false;
+            __try {
+                acquired = grab.legacyObject
+                    ? g_client->GetObjectTransform(
+                          grab.object, &bodyTransform) == LT_OK
+                    : grab.physics->GetRigidBodyTransform(
+                          grab.body, bodyTransform) == LT_OK;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                acquired = false;
+            }
+            if (acquired) {
+                // Preserve orientation, but snap the touched surface point
+                // into the palm. Keeping the old object origin relative to
+                // the hand preserved the entire search-radius gap and made a
+                // prop orbit outside the fingers.
+                const LTVector grabPointInBody =
+                    bodyTransform.m_rRot.Conjugate().RotateVector(
+                        grab.closestPoint -
+                        bodyTransform.m_vPos);
+                LTRigidTransform heldTransform = bodyTransform;
+                heldTransform.m_vPos =
+                    palmCenter -
+                    heldTransform.m_rRot.RotateVector(
+                        grabPointInBody);
+                state.heldBody = grab.body;
+                state.heldObject = grab.object;
+                state.heldLegacyObject = grab.legacyObject;
+                state.bodyInHand =
+                    handTransform.GetInverse() * heldTransform;
+                if (grab.legacyObject) {
+                    ForgetLegacyPropSimulation(grab.object);
+                }
+                ReleaseHandPhysicsContactBody(hand);
+                char message[160]{};
+                std::snprintf(
+                    message, sizeof(message),
+                    "hand=%s object=%p type=%s mass_kg=%.2f "
+                    "surface_snap_cm=%.1f",
+                    hand == FEARVR_HAND_LEFT ? "left" : "right",
+                    grab.object,
+                    grab.legacyObject ? "moveable" : "rigid",
+                    static_cast<double>(grab.massKg),
+                    static_cast<double>(
+                        std::sqrt(grab.distanceSquared)));
+                Report("INFO", "hand_physics_grabbed", message);
+                RequestHandPhysicsHaptic(
+                    hand, 0.14F, 28'000'000);
+                InterlockedExchange(&g_handPhysicsActiveLogged, 1);
+                return;
+            }
+            if (!grab.legacyObject &&
+                grab.body != INVALID_PHYSICS_RIGID_BODY) {
+                __try {
+                    grab.physics->ReleaseRigidBody(grab.body);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+        } else if (now >= g_handPhysicsMissDiagnosticAt) {
+            char message[160]{};
+            std::snprintf(
+                message, sizeof(message),
+                "hand=%s pos=(%.1f,%.1f,%.1f) radius=%.1f",
+                hand == FEARVR_HAND_LEFT ? "left" : "right",
+                static_cast<double>(handTransform.m_vPos.x),
+                static_cast<double>(handTransform.m_vPos.y),
+                static_cast<double>(handTransform.m_vPos.z),
+                static_cast<double>(kHandPhysicsGrabRadiusUnits));
+            Report("INFO", "hand_physics_grip_miss", message);
+            g_handPhysicsMissDiagnosticAt = now + 500;
+        }
+    }
+
+    UpdateTrackedPhysicsContact(
+        hand, state, HandPhysicsPalmCenter(handTransform),
+        state.velocity, now,
+        kHandPhysicsContactRadiusUnits);
+}
+
+void UpdateHandPhysics(
+    const void* weapon, ULONGLONG now) noexcept {
+    // Legacy props do not advance from SetVelocity alone. Restore their local
+    // pose before hand queries, then run LithTech's own collision movement so
+    // released and touched cans continue falling and rolling without waiting
+    // for player locomotion to wake them.
+    UpdateLegacyPropSimulations(now);
+
+    UpdateOneHandPhysics(FEARVR_HAND_LEFT, weapon, now);
+    UpdateOneHandPhysics(FEARVR_HAND_RIGHT, weapon, now);
+
+    if (weapon != nullptr && !g_weaponDisabled &&
+        g_weaponAim.valid) {
+        const LTVector rightMuzzle =
+            g_weaponAim.muzzleValid
+                ? g_weaponAim.muzzleTransform.m_vPos
+                : g_weaponAim.fireTransform.m_vPos +
+                      g_weaponAim.fireTransform.m_rRot.Forward() *
+                          24.0F;
+        const LTVector rightContact =
+            (g_weaponAim.fireTransform.m_vPos + rightMuzzle) *
+            0.5F;
+        const float rightContactRadius = std::clamp(
+            (rightMuzzle -
+             g_weaponAim.fireTransform.m_vPos).Mag() *
+                    0.5F +
+                4.0F,
+            7.0F, 22.0F);
+        HandPhysicsState& rightState =
+            g_weaponPhysicsContact[FEARVR_HAND_RIGHT];
+        UpdateHandPhysicsVelocity(
+            rightState, rightContact,
+            g_weaponAim.fireTransform.m_rRot, now);
+        UpdateTrackedPhysicsContact(
+            FEARVR_HAND_RIGHT, rightState, rightContact,
+            rightState.velocity, now, rightContactRadius);
+    } else {
+        g_weaponPhysicsContact[FEARVR_HAND_RIGHT].poseValid =
+            false;
+    }
+
+    if (weapon != nullptr && !g_weaponDisabled &&
+        DualPistolsVrActive() && g_weaponAim.leftAimValid) {
+        const LTVector leftMuzzle =
+            g_weaponAim.leftMuzzleValid
+                ? g_weaponAim.leftMuzzleTransform.m_vPos
+                : g_weaponAim.leftAimTransform.m_vPos +
+                      g_weaponAim.leftAimTransform.m_rRot.Forward() *
+                          24.0F;
+        const LTVector leftContact =
+            (g_weaponAim.leftAimTransform.m_vPos + leftMuzzle) *
+            0.5F;
+        const float leftContactRadius = std::clamp(
+            (leftMuzzle -
+             g_weaponAim.leftAimTransform.m_vPos).Mag() *
+                    0.5F +
+                4.0F,
+            7.0F, 22.0F);
+        HandPhysicsState& leftState =
+            g_weaponPhysicsContact[FEARVR_HAND_LEFT];
+        UpdateHandPhysicsVelocity(
+            leftState, leftContact,
+            g_weaponAim.leftAimTransform.m_rRot, now);
+        UpdateTrackedPhysicsContact(
+            FEARVR_HAND_LEFT, leftState, leftContact,
+            leftState.velocity, now, leftContactRadius);
+    } else {
+        g_weaponPhysicsContact[FEARVR_HAND_LEFT].poseValid =
+            false;
+    }
+}
+#endif
 
 bool UpdateRetailMuzzlePosition(const void* weapon) noexcept {
     if (weapon != g_weaponAim.muzzleWeapon) {
@@ -5728,6 +9358,63 @@ bool UpdateRetailMuzzlePosition(const void* weapon) noexcept {
     return true;
 }
 
+bool UpdateRetailLeftMuzzlePosition() noexcept {
+    const HOBJECT weaponModel = g_weaponAim.leftWeaponModel;
+    if (g_client == nullptr || weaponModel == nullptr) {
+        return false;
+    }
+
+    HMODELSOCKET muzzleSocket = INVALID_MODEL_SOCKET;
+    LTTransform muzzleTransform;
+    LTRigidTransform weaponTransform;
+    __try {
+        ILTModel* const model = g_client->GetModelLT();
+        // In the shipped Dual Pistols record, both RDPistol and LDPistol use
+        // the explicitly named "Flash" muzzle socket.
+        if (model == nullptr ||
+            model->GetSocket(
+                weaponModel, "Flash", muzzleSocket) != LT_OK ||
+            muzzleSocket == INVALID_MODEL_SOCKET ||
+            model->GetSocketTransform(
+                weaponModel, muzzleSocket,
+                muzzleTransform, true) != LT_OK ||
+            g_client->GetObjectTransform(
+                weaponModel, &weaponTransform) != LT_OK) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!std::isfinite(muzzleTransform.m_vPos.x) ||
+        !std::isfinite(muzzleTransform.m_vPos.y) ||
+        !std::isfinite(muzzleTransform.m_vPos.z)) {
+        return false;
+    }
+
+    const LTVector referencePosition = g_weaponAim.leftGripValid
+        ? g_weaponAim.leftGripTransform.m_vPos
+        : g_weaponAim.leftAimTransform.m_vPos;
+    const LTVector separation =
+        muzzleTransform.m_vPos - referencePosition;
+    if (muzzleTransform.m_vPos.MagSqr() < 0.0001F ||
+        separation.MagSqr() > 40000.0F) {
+        return false;
+    }
+
+    g_weaponAim.leftMuzzleTransform.m_vPos = muzzleTransform.m_vPos;
+    g_weaponAim.leftMuzzleTransform.m_rRot = muzzleTransform.m_rRot;
+    const LTRotation weaponRotationInverse =
+        weaponTransform.m_rRot.Conjugate();
+    g_weaponAim.leftMuzzleOffsetInWeapon =
+        weaponRotationInverse.RotateVector(
+            muzzleTransform.m_vPos - weaponTransform.m_vPos);
+    g_weaponAim.leftMuzzleRotationInWeapon =
+        weaponRotationInverse * muzzleTransform.m_rRot;
+    g_weaponAim.leftMuzzleLocalValid = true;
+    g_weaponAim.leftMuzzleValid = true;
+    return true;
+}
+
 HOBJECT CurrentRetailPlayerBody() noexcept {
     const HMODULE module = GetModuleHandleW(L"GameOrig.dll");
     if (module == nullptr) {
@@ -5746,39 +9433,6 @@ HOBJECT CurrentRetailPlayerBody() noexcept {
 }
 
 void EnsureHandNodeControls(HOBJECT playerBody) noexcept;
-
-void ApplyHandOrientationCalibration(
-    const LTRotation& viewRotation,
-    LTRigidTransform& handTransform,
-    bool poseValid,
-    HandOrientationCalibration& calibration,
-    const char* handName) noexcept {
-    if (!poseValid) {
-        return;
-    }
-    const LONG resetGeneration = InterlockedCompareExchange(
-        &g_trackingResetGeneration, 0, 0);
-    if (!calibration.valid ||
-        calibration.resetGeneration != resetGeneration) {
-        // At each recenter, the current controller orientation becomes the
-        // hand's forward-looking neutral orientation. Subsequent controller
-        // rotations remain fully relative and independent for both hands.
-        calibration.offset =
-            handTransform.m_rRot.Conjugate() * viewRotation;
-        calibration.resetGeneration = resetGeneration;
-        calibration.valid = true;
-        char message[144]{};
-        std::snprintf(
-            message, sizeof(message),
-            "%s hand orientation calibrated to view forward at "
-            "recenter generation %ld.",
-            handName, static_cast<long>(resetGeneration));
-        Report(
-            "INFO", "hand_orientation_recentered", message);
-    }
-    handTransform.m_rRot =
-        handTransform.m_rRot * calibration.offset;
-}
 
 bool RotationBetweenDirections(
     LTVector from, LTVector to, LTRotation& rotation) noexcept {
@@ -5810,6 +9464,72 @@ bool RotationBetweenDirections(
     }
     axis.Normalize();
     rotation.Init(axis, std::acos(dot));
+    return true;
+}
+
+void SelectDualPistolFromTriggers(void* weapon) noexcept {
+    if (!RetailDualPistolsActive(weapon)) {
+        return;
+    }
+    constexpr float kTriggerThreshold = 0.55F;
+    const bool leftDown =
+        (g_currentInput.activeHands & FEARVR_HAND_MASK_LEFT) != 0 &&
+        g_currentInput.trigger[FEARVR_HAND_LEFT] >= kTriggerThreshold;
+    const bool rightDown =
+        (g_currentInput.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
+        g_currentInput.trigger[FEARVR_HAND_RIGHT] >= kTriggerThreshold;
+    // Bei genau einem gedrueckten Trigger ist die Wahl eindeutig. Sind beide
+    // gedrueckt, darf Retails Dual-Pistol-Animation weiterhin abwechseln.
+    if (leftDown == rightDown) {
+        return;
+    }
+    __try {
+        *(static_cast<unsigned char*>(weapon) +
+          kRetailWeaponFireLeftHandOffset) =
+            leftDown ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+bool ApplyRetailLeftWeaponTransform() noexcept {
+    if (g_client == nullptr ||
+        g_weaponAim.leftWeaponModel == nullptr ||
+        !g_weaponAim.leftAimValid ||
+        !g_weaponAim.leftGripValid) {
+        g_weaponAim.leftWeaponTransformValid = false;
+        return false;
+    }
+
+    LTRotation weaponRotation = g_weaponAim.leftAimTransform.m_rRot;
+    if (g_weaponAim.leftMuzzleLocalValid) {
+        // worldMuzzle = worldWeapon * muzzleInWeapon. Also ist die eindeutige
+        // Waffenrotation fuer eine gewuenschte OpenXR-Muendungsrotation:
+        // worldWeapon = aim * inverse(muzzleInWeapon).
+        //
+        // Anders als eine reine Vorwaertsvektor-Korrektur behebt das auch den
+        // Rollversatz des gespiegelten LDPistol-Modells.
+        weaponRotation =
+            g_weaponAim.leftAimTransform.m_rRot *
+            g_weaponAim.leftMuzzleRotationInWeapon.Conjugate();
+        weaponRotation.Normalize();
+    }
+
+    g_weaponAim.leftWeaponTransform =
+        LTRigidTransform(
+            g_weaponAim.leftGripTransform.m_vPos,
+            weaponRotation);
+    __try {
+        if (g_client->SetObjectTransform(
+                g_weaponAim.leftWeaponModel,
+                g_weaponAim.leftWeaponTransform) != LT_OK) {
+            g_weaponAim.leftWeaponTransformValid = false;
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_weaponAim.leftWeaponTransformValid = false;
+        return false;
+    }
+    g_weaponAim.leftWeaponTransformValid = true;
     return true;
 }
 
@@ -5895,7 +9615,8 @@ bool ClampTwoHandedTargetDirection(
 void UpdateTwoHandedGrip() noexcept {
     const bool usable =
         g_twoHandedGripEnabled && g_weaponAim.valid &&
-        g_weaponAim.gripValid && g_weaponAim.leftGripValid;
+        g_weaponAim.gripValid && g_weaponAim.leftGripValid &&
+        !DualPistolsVrActive();
     if (g_twoHandedGripActive) {
         if (!usable || ShouldReleaseTwoHandedGrip(g_currentInput)) {
             g_twoHandedGripActive = false;
@@ -5921,17 +9642,13 @@ void UpdateTwoHandedGrip() noexcept {
         RotationBetweenDirections(
             support, forward, g_twoHandedGrip.offset);
 
-    // Griffpunkt im Waffenraum festhalten. Die Waffe sitzt im rechten Griff,
-    // ihre Ausrichtung ist die Feuerachse — beides ist hier aktuell.
-    const LTRotation weaponRotationInverse =
-        g_weaponAim.fireTransform.m_rRot.Conjugate();
-    g_twoHandedGrip.grabOffsetInWeapon =
-        weaponRotationInverse.RotateVector(
-            g_weaponAim.leftGripTransform.m_vPos -
-            g_weaponAim.gripTransform.m_vPos);
-    g_twoHandedGrip.grabRotationInWeapon =
-        weaponRotationInverse * g_weaponAim.leftAimTransform.m_rRot;
-    g_twoHandedGrip.placementValid = g_weaponAim.leftAimValid;
+    // Die sichtbare Hand darf nicht an der zufaelligen Controllerstelle
+    // einrasten. Die naechste unveraenderte Player-Body-Auswertung liefert
+    // stattdessen Retails original animierten linken Griff relativ zum
+    // rechten Waffenhand-Socket.
+    g_twoHandedGrip.placementValid = false;
+    g_twoHandedGrip.animatedRightSocketValid = false;
+    g_twoHandedGrip.animatedLeftSocketValid = false;
 
     if (InterlockedCompareExchange(
             &g_twoHandedGripActiveLogged, 1, 0) == 0) {
@@ -5941,7 +9658,8 @@ void UpdateTwoHandedGrip() noexcept {
             message, sizeof(message),
             "The left hand is supporting the weapon; barrel length "
             "%.1f cm gives an aim blend of %.2f. The grab holds until "
-            "the button is released; sprint and leaning rest until then.",
+            "the button is released; the visible hand uses Retail's "
+            "weapon-specific animated grip.",
             barrelLengthMeters * 100.0F,
             TwoHandedAimBlend(barrelLengthMeters));
         Report("INFO", "two_handed_grip_active", message);
@@ -6018,7 +9736,7 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // waere die Kamera bis hierher entfuehrt geblieben. Spaetestens jetzt
     // zuruecksetzen, damit der Override nie laenger als einen Updatezyklus
     // offen steht.
-    RestoreFlashlightCameraOverride();
+    RestorePreRenderCameraOverride();
 
     const ULONGLONG now = GetTickCount64();
     const bool enteringPlayingState =
@@ -6096,13 +9814,10 @@ int __fastcall HookRetailWeaponManagerUpdate(
     g_weaponAim.trackingBaseValid =
         g_weaponAim.valid || g_weaponAim.gripValid ||
         g_weaponAim.leftAimValid || g_weaponAim.leftGripValid;
-    // OpenXR's right-hand aim pose already defines the canonical firing
-    // axis. Do not turn the controller's arbitrary pose at recenter/load
-    // into a permanent pitch/roll offset; the HMD recenter basis was
-    // already applied in BuildTrackedHandTransform.
-    ApplyHandOrientationCalibration(
-        trackedBaseRotation, g_weaponAim.leftAimTransform,
-        g_weaponAim.leftAimValid, g_leftHandOrientation, "Left");
+    void* weapon = CurrentRetailWeapon(weaponManager);
+    g_weaponAim.retailWeapon = weapon;
+    UpdateRetailDualPistolState(weapon);
+    SelectDualPistolFromTriggers(weapon);
 
     if (g_weaponAim.valid && g_weaponAim.muzzleDirectionValid) {
         const LTVector predictedMuzzleForward =
@@ -6118,6 +9833,12 @@ int __fastcall HookRetailWeaponManagerUpdate(
                 directionCorrection *
                 g_weaponAim.fireTransform.m_rRot;
         }
+    }
+    if (DualPistolsVrActive() && !g_disableWeaponTransform) {
+        // Der GetFireVectors-Hook kann innerhalb des folgenden Retail-Updates
+        // laufen. Deshalb muss die aktuelle linke Controllerpose bereits vor
+        // diesem Aufruf als Schusstransformation bereitstehen.
+        ApplyRetailLeftWeaponTransform();
     }
 
     // Erst nach der Muendungskorrektur: Die Stuetzhand dreht die fertige
@@ -6170,9 +9891,9 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // sampled socket can be one frame old. The hand node is already solved to
     // this exact grip/aim transform, so apply the same transform to the weapon
     // after Retail updates it and keep both visually locked together.
-    void* const weapon = CurrentRetailWeapon(weaponManager);
+    weapon = CurrentRetailWeapon(weaponManager);
     g_weaponAim.retailWeapon = weapon;
-    UpdateLeftFlashlightModel(weapon);
+    UpdateRetailDualPistolState(weapon);
     if (weapon != nullptr && !g_disableWeaponTransform &&
         g_weaponAim.valid && g_weaponAim.gripValid &&
         g_retailSetWeaponTransform != nullptr) {
@@ -6195,23 +9916,33 @@ int __fastcall HookRetailWeaponManagerUpdate(
     if (g_weaponAim.valid) {
         UpdateRetailMuzzlePosition(weapon);
     }
+    if (weapon != nullptr && !g_disableWeaponTransform &&
+        DualPistolsVrActive()) {
+        // Retails SetWeaponTransform setzt beide Modelle auf die Waffenhand.
+        // Das linke Modell bekommt danach seine eigene Support-Hand-Pose. Die
+        // erste Anwendung liefert den Socket, die zweite nutzt dessen
+        // gemessene lokale Laufachse bereits im selben Bild.
+        if (ApplyRetailLeftWeaponTransform()) {
+            UpdateRetailLeftMuzzlePosition();
+            ApplyRetailLeftWeaponTransform();
+        }
+    }
     // Retails Deaktivierung gilt vor unserer Sichtbarkeit: Waehrend die Waffe
     // abgeschaltet ist (Leiter, Zwischensequenz, Geschuetz), gehoert auch der
     // Zielstrahl nicht ins Bild. `SetVisible` selbst kehrt in diesem Zustand
     // ohnehin folgenlos zurueck.
     g_weaponDisabled = RetailWeaponIsDisabled(weapon);
+    UpdateFlashlightModel(weapon);
+    UpdateVrMuzzleFlash();
     if (weapon != nullptr && !g_weaponDisabled &&
         g_retailSetWeaponVisible != nullptr) {
         g_retailSetWeaponVisible(weapon, true, true);
     }
-    // Zwingend NACH `SetWeaponVisible`: Das schaltet beide Modelle sichtbar,
-    // also auch das zweite, fuer die linke Hand modellierte, das unser
-    // `SetWeaponTransform` schraeg in die gefuehrte Waffe gelegt hat. Wird es
-    // vorher versteckt, hebt der Sichtbarkeitsaufruf das sofort wieder auf —
-    // genau daran ist die erste Fassung gescheitert.
-    if (weapon != nullptr && !g_disableWeaponTransform) {
-        RemoveSecondaryWeaponModel(
-            weapon, RetailRightWeaponModel(weapon));
+    // Noch einmal nach SetWeaponVisible anwenden: Das linke Retail-Modell
+    // bleibt damit garantiert am Support-Controller statt an der Waffenhand.
+    if (weapon != nullptr && !g_disableWeaponTransform &&
+        DualPistolsVrActive()) {
+        ApplyRetailLeftWeaponTransform();
     }
     if (weapon != nullptr && g_weaponAim.valid) {
         if (InterlockedCompareExchange(
@@ -6227,17 +9958,17 @@ int __fastcall HookRetailWeaponManagerUpdate(
     //
     // Frueher wurde sie per Kommandopuls dauerhaft eingeschaltet, und die
     // Kamera — ihr Folgeobjekt — bekam fuer die Dauer ihres Updates die
-    // Handpose. Daneben existiert aber ohnehin ein eigener Spotprojektor an
-    // der linken Hand, der schaltbar ist und der Hand exakt folgt. Beide
-    // Lampen lagen im Normalfall uebereinander und fielen deshalb nicht auf.
+    // Handpose. Daneben existiert aber ohnehin unser eigener, schaltbarer
+    // Spotprojektor. In der Standardposition an der linken Hand lagen beide
+    // Lampen im Normalfall uebereinander und fielen deshalb nicht auf.
     //
     // Nach Zwischensequenzen ruht der Kameraeingriff jedoch, weil die Kamera
     // dann der Engine gehoert. Die Retail-Lampe leuchtete in diesem Moment
-    // wieder vom Kopf aus, waehrend der Handscheinwerfer weiterlief: zwei
+    // wieder vom Kopf aus, waehrend der VR-Scheinwerfer weiterlief: zwei
     // getrennte Kegel, deren Lichtfelder sich addierten, und nur einer davon
     // liess sich ausschalten.
     //
-    // Der Handscheinwerfer allein deckt denselben Zweck ab. Damit entfaellt
+    // Der VR-Scheinwerfer allein deckt denselben Zweck ab. Damit entfaellt
     // zugleich ein weiterer Kameraeingriff in geskripteten Szenen — genau die
     // Sorte Eingriff, die hier bereits einmal zu Abstuerzen gefuehrt hat.
     return state;
@@ -6279,6 +10010,80 @@ bool ApplyHandSocketPose(
         data.m_pModelTransform->GetInverse() * desiredNodeWorld;
     data.m_pNodeTransform->m_vPos = desiredObject.m_vPos;
     data.m_pNodeTransform->m_rRot = desiredObject.m_rRot;
+    return true;
+}
+
+bool CaptureOriginalTwoHandSocket(
+    const NodeControlData& data,
+    const HandNodeControlState& control,
+    bool rightHand) noexcept {
+    if (!g_twoHandedGripActive ||
+        g_twoHandedGrip.placementValid ||
+        !control.installed || !control.socketFromNodeValid ||
+        data.m_hModel != g_playerBodyObject ||
+        data.m_hNode != control.node ||
+        data.m_pModelTransform == nullptr ||
+        data.m_pNodeTransform == nullptr) {
+        return false;
+    }
+
+    // Zu diesem Zeitpunkt enthalten Node und Socket noch Retails aktuelle
+    // Waffenanimation. Die Arm-Controller lassen fuer diese eine Auswertung
+    // absichtlich beide Ketten unangetastet.
+    const LTTransform animatedNodeWorld =
+        *data.m_pModelTransform * LTTransform(*data.m_pNodeTransform);
+    const LTTransform animatedSocketWorld =
+        animatedNodeWorld * control.socketFromNode;
+    const LTRigidTransform socket(
+        animatedSocketWorld.m_vPos, animatedSocketWorld.m_rRot);
+    if (!std::isfinite(socket.m_vPos.x) ||
+        !std::isfinite(socket.m_vPos.y) ||
+        !std::isfinite(socket.m_vPos.z)) {
+        return false;
+    }
+
+    if (rightHand) {
+        g_twoHandedGrip.animatedRightSocket = socket;
+        g_twoHandedGrip.animatedRightSocketValid = true;
+    } else {
+        g_twoHandedGrip.animatedLeftSocket = socket;
+        g_twoHandedGrip.animatedLeftSocketValid = true;
+    }
+    if (!g_twoHandedGrip.animatedRightSocketValid ||
+        !g_twoHandedGrip.animatedLeftSocketValid) {
+        return false;
+    }
+
+    const LTRigidTransform& animatedRight =
+        g_twoHandedGrip.animatedRightSocket;
+    const LTRigidTransform& animatedLeft =
+        g_twoHandedGrip.animatedLeftSocket;
+    const LTRotation rightInverse =
+        animatedRight.m_rRot.Conjugate();
+    const LTVector gripOffset =
+        rightInverse.RotateVector(
+            animatedLeft.m_vPos - animatedRight.m_vPos);
+    const float separation = gripOffset.Mag();
+    if (!std::isfinite(separation) ||
+        separation < 2.0F || separation > 120.0F) {
+        g_twoHandedGrip.animatedRightSocketValid = false;
+        g_twoHandedGrip.animatedLeftSocketValid = false;
+        return false;
+    }
+
+    g_twoHandedGrip.grabOffsetInWeapon = gripOffset;
+    g_twoHandedGrip.grabRotationInWeapon =
+        rightInverse * animatedLeft.m_rRot;
+    g_twoHandedGrip.grabRotationInWeapon.Normalize();
+    g_twoHandedGrip.placementValid = true;
+
+    char message[192]{};
+    std::snprintf(
+        message, sizeof(message),
+        "Retail's animated LeftHand socket is fixed %.1f cm from the "
+        "weapon hand and now supplies the visible two-hand grip.",
+        static_cast<double>(separation));
+    Report("INFO", "two_handed_original_grip_captured", message);
     return true;
 }
 
@@ -6440,6 +10245,10 @@ bool ApplyForearmTarget(
 void RightUpperArmNodeControl(
     const NodeControlData& data, void* userData) {
     (void)userData;
+    if (g_twoHandedGripActive &&
+        !g_twoHandedGrip.placementValid) {
+        return;
+    }
     if (g_weaponAim.gripValid) {
         ApplyUpperArmTarget(
             data, g_rightHandControl,
@@ -6450,6 +10259,10 @@ void RightUpperArmNodeControl(
 void LeftUpperArmNodeControl(
     const NodeControlData& data, void* userData) {
     (void)userData;
+    if (g_twoHandedGripActive &&
+        !g_twoHandedGrip.placementValid) {
+        return;
+    }
     if (g_weaponAim.leftGripValid) {
         ApplyUpperArmTarget(
             data, g_leftHandControl,
@@ -6460,6 +10273,10 @@ void LeftUpperArmNodeControl(
 void RightForearmNodeControl(
     const NodeControlData& data, void* userData) {
     (void)userData;
+    if (g_twoHandedGripActive &&
+        !g_twoHandedGrip.placementValid) {
+        return;
+    }
     if (!g_weaponAim.gripValid) {
         return;
     }
@@ -6479,6 +10296,10 @@ void RightForearmNodeControl(
 void LeftForearmNodeControl(
     const NodeControlData& data, void* userData) {
     (void)userData;
+    if (g_twoHandedGripActive &&
+        !g_twoHandedGrip.placementValid) {
+        return;
+    }
     if (!g_weaponAim.leftGripValid) {
         return;
     }
@@ -6501,6 +10322,8 @@ void RightHandNodeControl(
     if (!g_weaponAim.valid || !g_weaponAim.gripValid) {
         return;
     }
+    CaptureOriginalTwoHandSocket(
+        data, g_rightHandControl, true);
     const LTRigidTransform desiredSocket(
         g_weaponAim.gripTransform.m_vPos,
         g_weaponAim.fireTransform.m_rRot);
@@ -6518,9 +10341,11 @@ void RightHandNodeControl(
 void LeftHandNodeControl(
     const NodeControlData& data, void* userData) {
     (void)userData;
-    if (!g_weaponAim.leftGripValid || !g_weaponAim.leftAimValid) {
+    if (!g_weaponAim.leftGripValid) {
         return;
     }
+    CaptureOriginalTwoHandSocket(
+        data, g_leftHandControl, false);
     const LTRigidTransform desiredSocket(
         EffectiveLeftHandPosition(), EffectiveLeftHandRotation());
     if (ApplyHandSocketPose(
@@ -6530,7 +10355,8 @@ void LeftHandNodeControl(
             &g_leftHandTrackingActiveLogged, 1, 0) == 0) {
         Report(
             "INFO", "left_hand_tracking_active",
-            "The Retail LeftHand socket follows the left OpenXR grip pose.");
+            "The Retail LeftHand socket follows the anatomical OpenXR grip "
+            "pose; aim and pistol orientation remain independent.");
     }
 }
 
@@ -6902,18 +10728,28 @@ void ConfigureRetailArmPieceVisibility(
         : "fearvr\\player_body.Mat00";
     const LTRESULT bodyMaterialResult = model->SetMaterialFilename(
         playerBody, 0, bodyMaterial);
+    const char* const hiddenHeadMaterial =
+        "fearvr\\player_hidden.Mat00";
+    const LTRESULT headMaterialResult = model->SetMaterialFilename(
+        playerBody, 1, hiddenHeadMaterial);
     if (InterlockedCompareExchange(
             &g_bodyMaterialOverrideLogged, 1, 0) == 0) {
-        char materialMessage[192]{};
+        char materialMessage[256]{};
         std::snprintf(
             materialMessage, sizeof(materialMessage),
-            "Player body material slot 0 was explicitly set to "
-            "%s (result %ld; arms %s).",
+            "Player body material slot 0 was set to %s "
+            "(result %ld; arms %s); slot 1 uses %s "
+            "(result %ld; head hidden).",
             bodyMaterial, static_cast<long>(bodyMaterialResult),
-            g_showPlayerArms ? "visible" : "hidden");
+            g_showPlayerArms ? "visible" : "hidden",
+            hiddenHeadMaterial,
+            static_cast<long>(headMaterialResult));
+        const bool materialsApplied =
+            bodyMaterialResult == LT_OK &&
+            headMaterialResult == LT_OK;
         Report(
-            bodyMaterialResult == LT_OK ? "INFO" : "WARN",
-            bodyMaterialResult == LT_OK
+            materialsApplied ? "INFO" : "WARN",
+            materialsApplied
                 ? "vr_body_material_override"
                 : "vr_body_material_override_failed",
             materialMessage);
@@ -7027,6 +10863,15 @@ void ConfigureRetailArmPieceVisibility(
 
 void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
     if (g_disableHandNodes) {
+        return;
+    }
+    const int gameState = ReadRetailGameState();
+    if (gameState >= 0 &&
+        gameState != kRetailGameStatePlaying) {
+        // Nach dem Invalidieren in GS_LOADINGLEVEL darf ein spaeter
+        // Node-Tracker-Aufruf die alten Bindungen nicht schon auf einem
+        // Lade-/Postload-Modell neu installieren. Erst GS_PLAYING garantiert,
+        // dass PlayerBody und sein D3DX-Skelett wieder dauerhaft gehoeren.
         return;
     }
     if (playerBody == nullptr || g_client == nullptr) {
@@ -7144,7 +10989,7 @@ void __fastcall HookRetailSetTrackedTarget(
 // seinen beiden Feuerpfaden genau einmal pro Schuss, nicht pro Bild — das ist
 // deshalb die verlaessliche Schussquelle. Sie ist der Triggerflanke auch
 // inhaltlich voraus: Bei leerem Magazin faellt die Vibration korrekt aus.
-void RequestFireHaptic() noexcept {
+void RequestFireHaptic(bool leftWeaponFired) noexcept {
     // Beide Feuerpfade koennen denselben Schuss abfragen. Ein Mindestabstand
     // deutlich unterhalb der schnellsten Kadenz fasst das zu einem Impuls
     // zusammen, ohne echte Schuesse zu verschlucken.
@@ -7167,9 +11012,15 @@ void RequestFireHaptic() noexcept {
     request.frequency = 0.0F;
     // Der Haptikauftrag adressiert wieder einen physischen Controller und
     // muss deshalb zurueckgespiegelt werden.
-    request.handMask = g_leftHandedBindings
-        ? FEARVR_HAND_MASK_LEFT
-        : FEARVR_HAND_MASK_RIGHT;
+    if (leftWeaponFired) {
+        request.handMask = g_leftHandedBindings
+            ? FEARVR_HAND_MASK_RIGHT
+            : FEARVR_HAND_MASK_LEFT;
+    } else {
+        request.handMask = g_leftHandedBindings
+            ? FEARVR_HAND_MASK_LEFT
+            : FEARVR_HAND_MASK_RIGHT;
+    }
     request.flags = FEARVR_HF_VALID;
     if (g_submitHapticRequest(&request) &&
         InterlockedCompareExchange(
@@ -7186,29 +11037,134 @@ bool __fastcall HookRetailGetFireVectors(
     LTVector& right, LTVector& up,
     LTVector& forward, LTVector& firePosition) {
     (void)ignoredEdx;
+    SelectDualPistolFromTriggers(
+        const_cast<void*>(weapon));
+    const bool leftWeaponFired =
+        RetailWeaponFiresLeft(weapon) &&
+        g_weaponAim.leftWeaponTransformValid;
     const bool result = g_retailGetFireVectors(
         weapon, right, up, forward, firePosition);
     if (result) {
-        RequestFireHaptic();
+        RequestFireHaptic(leftWeaponFired);
+        TriggerVrMuzzleFlash(leftWeaponFired);
     }
     if (!result || !g_weaponAim.valid) {
         return result;
     }
-    g_weaponAim.fireTransform.m_rRot.GetVectors(right, up, forward);
-    UpdateRetailMuzzlePosition(weapon);
 
     // Projektil und Zielstrahl teilen sich denselben Ursprung, siehe
     // ResolveMuzzleWorldTransform.
     LTRigidTransform muzzle;
-    ResolveMuzzleWorldTransform(muzzle);
+    if (leftWeaponFired) {
+        ResolveLeftMuzzleWorldTransform(muzzle);
+    } else {
+        UpdateRetailMuzzlePosition(weapon);
+        ResolveMuzzleWorldTransform(muzzle);
+    }
     muzzle.m_rRot.GetVectors(right, up, forward);
     firePosition = muzzle.m_vPos;
     return true;
 }
 
+void RemoveVrCameraCollisionHook() noexcept {
+    if (g_retailCalcNoClipTarget != nullptr) {
+        MH_DisableHook(g_retailCalcNoClipTarget);
+        MH_RemoveHook(g_retailCalcNoClipTarget);
+    }
+    g_retailCalcNoClipTarget = nullptr;
+    g_retailCalcNoClip = nullptr;
+}
+
+bool ResolveRetailCalcNoClipTarget(
+    void*& calcNoClip) noexcept {
+    calcNoClip = nullptr;
+    HMODULE module = GetModuleHandleW(L"GameOrig.dll");
+    if (module == nullptr) {
+        return false;
+    }
+    auto* const base = reinterpret_cast<unsigned char*>(module);
+    __try {
+        const auto* const dos =
+            reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE ||
+            dos->e_lfanew <= 0) {
+            return false;
+        }
+        const auto* const nt =
+            reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE ||
+            nt->FileHeader.TimeDateStamp !=
+                kRetailGameClientTimeDateStamp ||
+            nt->OptionalHeader.SizeOfImage !=
+                kRetailGameClientSizeOfImage) {
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    auto* const target = base + kRetailCalcNoClipRva;
+    constexpr unsigned char kCalcNoClipPrefix[] = {
+        0x81, 0xEC, 0x9C, 0x00, 0x00, 0x00,
+        0x8B, 0x84, 0x24, 0xA4, 0x00, 0x00, 0x00,
+        0xD9, 0x00, 0x56, 0xD8, 0x48, 0x04, 0x57};
+    if (!MatchesCode(
+            target, kCalcNoClipPrefix,
+            sizeof(kCalcNoClipPrefix))) {
+        return false;
+    }
+    calcNoClip = target;
+    return true;
+}
+
+bool InstallVrCameraCollisionHook() noexcept {
+    void* target = nullptr;
+    if (!ResolveRetailCalcNoClipTarget(target)) {
+        Report(
+            "ERROR", "vr_camera_collision_layout_mismatch",
+            "Retail 1.08 camera raycast signature did not match; "
+            "character filtering remains disabled.");
+        return false;
+    }
+
+    const MH_STATUS initialize = MH_Initialize();
+    if (initialize != MH_OK &&
+        initialize != MH_ERROR_ALREADY_INITIALIZED) {
+        Report(
+            "ERROR", "vr_camera_collision_hook_initialize_failed",
+            MH_StatusToString(initialize));
+        return false;
+    }
+
+    g_retailCalcNoClipTarget = target;
+    MH_STATUS status = MH_CreateHook(
+        target,
+        reinterpret_cast<void*>(&HookRetailCalcNoClip),
+        reinterpret_cast<void**>(&g_retailCalcNoClip));
+    if (status == MH_OK) {
+        status = MH_EnableHook(target);
+    }
+    if (status != MH_OK) {
+        Report(
+            "ERROR", "vr_camera_collision_hook_install_failed",
+            MH_StatusToString(status));
+        RemoveVrCameraCollisionHook();
+        return false;
+    }
+    Report(
+        "INFO", "vr_camera_collision_filter_installed",
+        "Verified Retail camera anti-clipping rays ignore character and "
+        "corpse hitboxes in native VR.");
+    return true;
+}
+
 void RemoveWeaponAimHooks() noexcept {
-    RestoreFlashlightCameraOverride();
-    RemoveLeftFlashlightModel();
+    RestorePreRenderCameraOverride();
+    ResetTwoHandedJumpCamera(g_twoHandedJumpCamera);
+    g_twoHandedCameraPosition = TwoHandedCameraPositionState{};
+    RemoveVrMuzzleFlashObjects();
+    RemoveFlashlightModel();
     RemoveHandNodeControls();
     if (g_retailWeaponManagerUpdateTarget != nullptr) {
         MH_DisableHook(g_retailWeaponManagerUpdateTarget);
@@ -7230,6 +11186,7 @@ void RemoveWeaponAimHooks() noexcept {
     g_retailSetWeaponVisible = nullptr;
     g_retailGetFireVectors = nullptr;
     g_retailSetTrackedTarget = nullptr;
+    g_retailVectorObjectFilter = nullptr;
     g_retailAccuracyManager = nullptr;
     g_weaponAim.valid = false;
     g_weaponAim.gripValid = false;
@@ -7240,10 +11197,12 @@ void RemoveWeaponAimHooks() noexcept {
     g_weaponAim.muzzleLocalValid = false;
     g_weaponAim.muzzleDiagnosticLogged = false;
     g_weaponAim.muzzleWeapon = nullptr;
+    g_weaponAim.leftWeaponModel = nullptr;
+    g_weaponAim.leftWeaponTransformValid = false;
+    g_weaponAim.leftMuzzleValid = false;
+    g_weaponAim.leftMuzzleLocalValid = false;
     g_weaponAim.retailWeapon = nullptr;
     g_weaponAim.trackingBaseValid = false;
-    g_rightHandOrientation = HandOrientationCalibration{};
-    g_leftHandOrientation = HandOrientationCalibration{};
     // Ohne Aim-Hooks laeuft kein Weapon-Manager-Update mehr, das den Griff
     // wieder loesen koennte. Sprinten und Lehnen duerfen nicht haengen.
     g_twoHandedGripActive = false;
@@ -7251,6 +11210,7 @@ void RemoveWeaponAimHooks() noexcept {
     g_lastWeaponManagerUpdateTick = 0;
     g_flashlightEnabled = true;
     g_flashlightButtonWasDown = false;
+    g_dualPistolSlowMoActive = false;
     g_weaponSwitchPulseUntil = 0;
     g_weaponSwitchTriggered = false;
     g_secondaryHoldStartTick = 0;
@@ -7295,9 +11255,10 @@ bool InstallWeaponAimHooks() noexcept {
     void* setVisible = nullptr;
     void* fireVectors = nullptr;
     void* setTrackedTarget = nullptr;
+    void* vectorObjectFilter = nullptr;
     if (!ResolveRetailWeaponTargets(
             update, setTransform, setVisible, fireVectors,
-            setTrackedTarget)) {
+            setTrackedTarget, vectorObjectFilter)) {
         Report(
             "ERROR", "weapon_aim_layout_mismatch",
             "Retail 1.08 weapon transform/fire-vector signatures "
@@ -7322,6 +11283,8 @@ bool InstallWeaponAimHooks() noexcept {
     g_retailSetWeaponVisible =
         reinterpret_cast<RetailSetWeaponVisibleFunction>(
             setVisible);
+    g_retailVectorObjectFilter =
+        reinterpret_cast<ObjectFilterFn>(vectorObjectFilter);
     const HMODULE retailModule =
         GetModuleHandleW(L"GameOrig.dll");
     g_retailAccuracyManager =
@@ -7616,6 +11579,26 @@ void PollControllerInput() noexcept {
     input.turnX = std::clamp(
         input.turnX * kTurnSpeedScale[turnPreset], -1.0F, 1.0F);
     g_currentInput = input;
+    const bool trackingFresh =
+        g_headTracking.centered && !g_headTracking.trackingLost &&
+        g_headTracking.lastFreshFrameTick != 0 &&
+        now - g_headTracking.lastFreshFrameTick <= 250;
+    const bool wasPhysicallyDucking = g_physicalDuckActive;
+    g_physicalDuckActive = UpdatePhysicalDuck(
+        g_physicalDuckEnabled, trackingFresh,
+        g_headTracking.currentCenter.py,
+        g_headTracking.recenter.py,
+        g_physicalDuckActive);
+    if (g_physicalDuckActive != wasPhysicallyDucking) {
+        Report(
+            "INFO",
+            g_physicalDuckActive
+                ? "physical_duck_engaged"
+                : "physical_duck_released",
+            g_physicalDuckActive
+                ? "Headset lowered by 26cm; Retail crouch is active."
+                : "Headset returned above the 18cm release height.");
+    }
     // Der Griff wird im Weapon-Manager-Update geloest. Steht das still —
     // Menue, Zwischensequenz, Ladebildschirm — bleibt der letzte Zustand
     // sonst stehen und haelt Sprinten und Lehnen dauerhaft zurueck.
@@ -7625,7 +11608,6 @@ void PollControllerInput() noexcept {
         g_twoHandedGripActive = false;
         g_twoHandedGrip = TwoHandedGripState{};
     }
-
     if (input.activeHands != g_lastActiveHands) {
         char message[96]{};
         std::snprintf(
@@ -7686,16 +11668,23 @@ void PollFlashlightToggle() noexcept {
     const bool flashlightButtonDown =
         (g_currentInput.activeHands & FEARVR_HAND_MASK_LEFT) != 0 &&
         (g_currentInput.buttons & FEARVR_IB_LEFT_PRIMARY) != 0;
+    if (DualPistolsVrActive()) {
+        // Mit zwei Pistolen gehoeren beide Trigger den Waffen. X uebernimmt
+        // dann direkt Slow-Mo; der aktuelle Lichtzustand bleibt unangetastet.
+        g_dualPistolSlowMoActive = flashlightButtonDown;
+        g_flashlightButtonWasDown = flashlightButtonDown;
+        return;
+    }
+
+    g_dualPistolSlowMoActive = false;
     if (flashlightButtonDown && !g_flashlightButtonWasDown) {
         g_flashlightEnabled = !g_flashlightEnabled;
         Report(
-            "INFO", "left_flashlight_toggled",
+            "INFO", "flashlight_toggled",
             g_flashlightEnabled
                 ? "X enabled the flashlight."
                 : "X disabled the flashlight.");
     }
-    // Edge-triggered on purpose: holding X keeps the selected state and
-    // does not retrigger the toggle every frame.
     g_flashlightButtonWasDown = flashlightButtonDown;
 }
 
@@ -7829,6 +11818,23 @@ int ReadRetailGameState() noexcept {
         return -1;
     }
     if (state != g_lastReportedRetailGameState) {
+        // `GS_EXITINGLEVEL` und `GS_LOADINGLEVEL` zerstoeren die aktuelle
+        // Client-Welt. Die bislang alleinige Erkennung ueber eine Pause des
+        // Weapon-Manager-Hooks kam zu spaet: Beim ersten Rendern des neuen
+        // Levels konnte D3DX noch einen Node-Controller des alten PlayerBody
+        // auswerten. Das endete reproduzierbar in D3DX9_27+0xFCCDF.
+        //
+        // Nur diese beiden Weltwechsel-Zustaende invalidieren die Handles.
+        // GS_MENU/GS_PAUSED/GS_SCREEN duerfen die Hand-Bindungen behalten,
+        // damit ESC- und VR-Menue nicht unnoetig in die Welt eingreifen.
+        if (state == kRetailGameStateExitingLevel ||
+            state == kRetailGameStateLoadingLevel) {
+            ForgetWorldObjectsAfterLevelChange();
+            // Der naechste echte Waffenframe muss alle Weltbindungen neu
+            // aufbauen, auch wenn der Ladebildschirm kuerzer als die bisherige
+            // Ein-Sekunden-Heuristik war.
+            g_lastWeaponManagerUpdateTick = 0;
+        }
         g_lastReportedRetailGameState = state;
         char message[128];
         _snprintf_s(
@@ -7838,6 +11844,68 @@ int ReadRetailGameState() noexcept {
         Report("INFO", "retail_game_state", message);
     }
     return state;
+}
+
+void UpdateRetailHudOverride() noexcept {
+    if (g_client == nullptr) {
+        return;
+    }
+
+    bool stereoEnabled = false;
+    __try {
+        stereoEnabled =
+            g_isStereoEnabled != nullptr && g_isStereoEnabled();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        stereoEnabled = false;
+    }
+    const bool hideRetailStatus =
+        stereoEnabled &&
+        ReadRetailGameState() == kRetailGameStatePlaying;
+    if (hideRetailStatus == g_retailHudOverrideApplied) {
+        return;
+    }
+
+    bool configured = true;
+    __try {
+        for (RetailHudVariableOverride& variable :
+             g_retailHudVariables) {
+            if (!variable.originalKnown) {
+                const HCONSOLEVAR handle =
+                    g_client->GetConsoleVariable(variable.name);
+                if (handle == nullptr) {
+                    configured = false;
+                    continue;
+                }
+                variable.originalValue =
+                    g_client->GetConsoleVariableFloat(handle);
+                variable.originalKnown = true;
+            }
+            if (g_client->SetConsoleVariableFloat(
+                    variable.name,
+                    hideRetailStatus
+                        ? 0.0F
+                        : variable.originalValue) != LT_OK) {
+                configured = false;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        configured = false;
+    }
+    if (!configured) {
+        return;
+    }
+
+    g_retailHudOverrideApplied = hideRetailStatus;
+    Report(
+        "INFO",
+        hideRetailStatus
+            ? "retail_status_hud_hidden"
+            : "retail_status_hud_restored",
+        hideRetailStatus
+            ? "Retail health, armor, ammo, grenade and gear panels are "
+              "hidden during VR gameplay in favor of the wrist display."
+            : "Retail status HUD settings were restored for menu and "
+              "flat-panel rendering.");
 }
 
 void PollControllerMenuInput() noexcept {
@@ -7851,7 +11919,7 @@ void PollControllerMenuInput() noexcept {
     const bool triggerPressed =
         triggerDown && !g_lastMenuTriggerDown;
     const bool menuRequested =
-        (pressed & FEARVR_IB_LEFT_SECONDARY) != 0;
+        (pressed & kLeftPauseButtonMask) != 0;
     const bool escapeDown =
         (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     const bool escapePressed = escapeDown && !g_escapeWasDown;
@@ -7876,7 +11944,7 @@ void PollControllerMenuInput() noexcept {
             TapMenuKey(VK_ESCAPE);
             Report(
                 "INFO", "controller_pause_requested",
-                "Left stick click sent one Escape key edge.");
+                "Left secondary/menu button sent one Escape key edge.");
         }
     }
     // Main screens are intentionally mono until F8, so render coverage alone
@@ -7952,7 +12020,7 @@ void PollControllerMenuInput() noexcept {
         triggerPressed) {
         TapMenuKey(VK_RETURN);
     }
-    if ((pressed & FEARVR_IB_RIGHT_SECONDARY) != 0) {
+    if ((pressed & kRightSecondaryButtonMask) != 0) {
         if (g_vrSettingsPageActive) {
             LeaveRetailVrSettingsPage();
         } else {
@@ -7987,9 +12055,9 @@ void PollControllerMenuInput() noexcept {
 void __fastcall HookClientShellUpdate(
     IClientShell* clientShell, void* ignoredEdx) {
     (void)ignoredEdx;
-    // Safety net for a PreRender path that staged the left-hand flashlight
-    // pose but did not reach RenderCamera (for example during a state change).
-    RestoreFlashlightCameraOverride();
+    // Safety net for a frame that staged the center-eye camera for planar
+    // render targets but did not reach RenderCamera during a state change.
+    RestorePreRenderCameraOverride();
     if (InterlockedCompareExchange(
             &g_clientInputHookCallLogged, 1, 0) == 0) {
         Report(
@@ -8010,21 +12078,27 @@ void __fastcall HookClientShellUpdate(
         UpdateClimbMotion();
         PollControllerMenuInput();
     }
-    if (g_vrSettingsPageActive) {
-        // Tastatur, Maus und Controller navigieren alle direkt über
-        // CLTGUIListCtrl::NextSelection. Der Listenanfang muss deshalb hier
-        // festgehalten werden, nicht nur wenn der Hook selbst auswählt.
-        ResetRetailVrMenuScroll();
-    }
     if (!g_disableClientUpdateWork) {
         UpdateCrosshairOverride();
         UpdateVrCameraCollisionPath();
     }
     g_semanticBitsInjected = false;
     g_clientShellUpdate(clientShell);
+    if (g_vrSettingsPageActive) {
+        // Tastatur, Maus und Controller können die Auswahl vor oder in
+        // Retails Update ändern. Ein einziger Abgleich danach verhindert,
+        // dass zwei Korrekturen vor CalculatePositions den Listenanfang mit
+        // veralteten m_nLastShown-Daten hin und her setzen.
+        MaintainRetailVrMenuScroll();
+    }
     if (!g_disableClientUpdateWork) {
+        // Erst nach Retails Update: Eine gerade geoeffnete ESC-Seite hat dann
+        // bereits GS_MENU/GS_PAUSED gesetzt und bekommt im selben Renderframe
+        // ihre unveraenderten HUD-/UI-Variablen zurueck.
+        UpdateRetailHudOverride();
         MaintainSlideKickViewBase();
         UpdateRetailMeleeDiagnostics();
+        StagePreRenderCameraOverride();
     }
 }
 
@@ -8074,6 +12148,12 @@ bool InstallClientInputHook(void* masterDatabase) noexcept {
         RemoveSemanticInputHook();
         g_clientShellUpdate = nullptr;
         return false;
+    }
+    if (!InstallVrCameraCollisionHook()) {
+        Report(
+            "WARN", "vr_camera_collision_filter_unavailable",
+            "Native VR keeps Retail's unfiltered raycast fallback; "
+            "other controls and rendering remain active.");
     }
     if (!InstallWeaponAimHooks()) {
         Report(
@@ -8158,7 +12238,7 @@ bool TryInstallRendererHook() noexcept {
 }
 
 bool TryRemoveRendererHook() noexcept {
-    RestoreFlashlightCameraOverride();
+    RestorePreRenderCameraOverride();
     RestoreRetailCameraCollisionPath();
     AcquireSRWLockExclusive(&g_hookLock);
     if (!g_hookInstalled ||

@@ -43,6 +43,18 @@ Vorgeschlagene Interaction Profiles:
 - HTC Vive Controller;
 - KHR Simple Controller.
 
+Wenn die Runtime `XR_KHR_generic_controller` anbietet, aktiviert der Host die
+Erweiterung unter Beibehaltung des OpenXR-1.0-Anwendungsniveaus und schlägt
+zusätzlich das KHR Generic Controller Profile vor. SteamVR kann damit
+Controller aus neueren Treibern automatisch auf Sticks, Trigger, Grip,
+Primär-/Sekundärtasten, Posen und Haptik abbilden.
+
+Nach `xrSyncActions` und bei jedem
+`XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED` fragt der Host
+`xrGetCurrentInteractionProfile` für beide Hände ab. Das Ereignis
+`input_interaction_profile` im Hostlog zeigt daher nicht nur akzeptierte
+Vorschläge, sondern das tatsächlich aktive beziehungsweise emulierte Profil.
+
 Die Zustände bleiben im Transport zunächst physisch und werden erst im
 GameClient semantisch auf F.E.A.R.-Befehle abgebildet. Dadurch kann kein
 fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
@@ -54,9 +66,10 @@ fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
 - rechter Stick links/rechts: Drehen; hoch: Springen; runter: Ducken
   (jeweils ab 80 % Ausschlag);
 - A: Waffenwechsel; B kurz: Nachladen; B gehalten: Granate werfen;
-- X: Taschenlampe; Y: Pause;
+- X: Taschenlampe; bei ausgerüsteten Dual Pistols stattdessen Zeitlupe, ohne
+  den aktuellen Lichtzustand zu ändern; Y: Pause;
 - rechter Grip: Benutzen; rechter Trigger: Feuern; linker Trigger:
-  Zeitlupe;
+  Zeitlupe — bei Dual Pistols feuert er stattdessen die linke Pistole;
 - rechter Stick-Klick: in der 3D-Welt manueller Nahkampfangriff, in Menüs und
   anderen 2D-Ansichten den Flachbildschirm neu verankern;
 - linker Stick-Klick: Medkit benutzen (`COMMAND_ID_MEDKIT` = 70). Retail wertet
@@ -67,6 +80,27 @@ fehlerhaftes Profil unbemerkt Bewegung oder Feuer auslösen.
 - linke Hand seitlich neigen: um die Ecke lehnen;
 - Waffenhand schnell nach vorne stoßen: Nahkampf (`COMMAND_ID_ALT_FIRING`
   = 19 — die Sekundärattacke, die Retail im Optionsmenü „Melee Attack" nennt).
+
+### SteamVR-native Controller
+
+Valve Index Controller besitzen für alle obigen Aktionen eigene Eingaben:
+Thumbsticks und Klicks, A/B, analoge Trigger und Grips sowie Posen und Haptik.
+
+HTC Vive Wands verwenden stattdessen:
+
+- linkes/rechtes Trackpad für Bewegung und Drehung sowie hoch/runter für
+  Springen und Ducken;
+- Trackpad-Klick als physische Primärtaste;
+- den digitalen Grip-Klick als Float-Squeeze (OpenXR konvertiert `click` zu
+  `0.0` beziehungsweise `1.0`) für Rennen/Zweihandgriff und Benutzen;
+- linke Menütaste für Pause;
+- rechte Menütaste kurz für Nachladen, gehalten für Granate;
+- Trigger, Aim-/Grip-Pose und Haptik unverändert.
+
+Vive Wands besitzen keine Stick-Klicks. Medkit bleibt deshalb über die
+Tastatur erreichbar; der manuelle Stick-Klick-Nahkampf wird durch die bereits
+vorhandene Waffenhand-/Off-Hand-Geste ersetzt. Maus, Tastatur und Gamepad
+bleiben parallel aktiv.
 
 ### Physisches Lehnen (`Physical lean`, Standard an)
 
@@ -115,6 +149,14 @@ unverändert da.
 
 Umschaltbar im VR-Menü unter `Physical lean: ON / OFF`, gespeichert als
 `PhysicalLean` in `fearvr.ini`.
+
+### Physisches Ducken (`Physical duck`, Standard an)
+
+Eine Absenkung des HMD um 26 cm gegenueber der Recenter-Hoehe aktiviert Retails
+normales DUCK-Kommando. Erst oberhalb von 18 cm wird es wieder freigegeben;
+diese Hysterese verhindert Flattern an der Grenze. Der Stick bleibt in beiden
+Betriebsarten unveraendert nutzbar. Umschaltbar im VR-Menue, gespeichert als
+`PhysicalDuck` in `fearvr.ini`.
 
 ### Klettern an Leitern (abschaltbar, Standard aus)
 
@@ -296,7 +338,39 @@ Eingriff in die Retail-Animationen.
 Jeder abgefeuerte Schuss erzeugt einen kurzen Haptikimpuls, auch im
 Dauerfeuer. Auslöser ist der Retail-Aufruf der Fire-Vectors, den beide
 Feuerpfade genau einmal pro Schuss ausführen — nicht die Triggerflanke. Damit
-vibriert der Controller bei leerem Magazin korrekt gar nicht.
+vibriert der Controller bei leerem Magazin korrekt gar nicht. Bei Dual Pistols
+vibriert jeweils die Hand der tatsächlich schießenden Pistole.
+
+### Dual Pistols: eine Pistole pro Hand
+
+Retails Dual-Pistol-Waffe bringt bereits zwei getrennte Handmodelle,
+Magazinhälften, Feueranimationen und die Wahl `m_bFireLeftHand` mit. Der alte
+VR-Pfad löschte das linke Modell und ersetzte anschließend jeden Schuss durch
+die rechte Controllerpose. Der neue Pfad erhält das `LDPistol`-Modell und setzt
+es nach Retails gemeinsamem `SetWeaponTransform` auf die linke Grip-/Aim-Pose.
+
+- linker Trigger: linke Pistole; rechter Trigger: rechte Pistole;
+- beide Trigger: Retails vorhandene Dual-Pistol-Kadenz darf die Seiten
+  abwechseln;
+- X: Zeitlupe, solange X gedrückt ist; die Taschenlampe bleibt an bzw. aus;
+- zwei unabhängige rote Zielstrahlen und Mündungsursprünge;
+- Haptik auf dem Controller der tatsächlich feuernden Pistole;
+- der normale Zweihandgriff bleibt für diese Waffe aus, weil die Stützhand
+  bereits ihre eigene Pistole führt.
+
+Die Triggervorgabe wird vor dem Retail-Waffenupdate in das verifizierte
+`m_bFireLeftHand`-Byte bei `CClientWeapon+0x1E3` geschrieben. Dadurch sehen
+Munitionsabzug, Mündungsblitz, Servernachricht und Fire-Vectors dieselbe
+Feuerhand. `GetFireVectors` wird zusätzlich an der Instruktion
+`mov al,[edi+0x1E3]` geprüft; bei einer unbekannten GameOrig-Version wird der
+Hook nicht installiert. Der linke Lauf wird über den in der ausgelieferten
+Dual-Pistols-Datenbank eingetragenen Socket `Flash` gemessen und anschließend
+aus der eigenen Support-Hand-Transformation rekonstruiert. Die vollständige
+Socketrotation einschließlich Roll wird auf die OpenXR-Aim-Pose gelegt, nicht
+nur der Vorwärtsvektor. Die sichtbare linke Hand erhält dieselbe korrigierte
+Rotation wie das Waffenobjekt. Bei Dual Pistols entfällt außerdem die sonstige
+Recenter-Neutralkalibrierung der freien Support-Hand, weil eine Pistole direkt
+der kanonischen OpenXR-Feuerachse folgen muss.
 
 ### Zeigen statt hinsehen: Aktivieren und Aufnehmen
 
@@ -363,6 +437,18 @@ Die Korrektur sitzt in `ApplyTwoHandedAimSupport` und läuft im
 Weapon-Manager-Update **nach** der Mündungskorrektur, also auf der fertigen
 Feuerachse. Sichtbare Waffe, rechter Handknoten, Zielhilfe und Geschossbahn
 benutzen dieselbe Transformation und bleiben deshalb deckungsgleich.
+
+**Sichtbarer Originalgriff.** Beim Einrasten wird die sichtbare Stützhand nicht
+mehr an der aktuellen Controllerposition eingefroren. Für genau eine
+Animationsauswertung bleiben beide Armketten unangetastet; unmittelbar vor
+unserem Hand-Node-Override werden Retails animierte `RightHand`- und
+`LeftHand`-Sockets gelesen. Ihr relativer Transform ist der originale,
+waffenspezifische Griffpunkt und wird anschließend mit der VR-bewegten Waffe
+mitgeführt. Dadurch sitzen Handfläche und Handrotation beispielsweise bei
+Shotgun, SMG und Gewehr wieder an dem vom Spiel vorgesehenen Vordergriff. Die
+physische Stützhand steuert weiterhin die Feuerachse und wird nur für die
+Darstellung vom animierten Griff entkoppelt.
+
 Abschaltbar über `TwoHandGrip=0` in `fearvr.ini`.
 `tests/test_two_handed_grip.cpp` deckt Erkennung, Hysterese und Gewichtung ab.
 
@@ -408,32 +494,39 @@ erkannt.
 native Menüliste und ist deshalb mit Tastatur und VR-Controller bedienbar:
 Stick navigiert, A oder Trigger bestätigt, B geht zurück.
 
-Die Seite ist bewusst kurz und einseitig, damit kein Eintrag über den Rand des
-nativen 320px-Rahmens läuft und kein unsauberes Scrollen entsteht:
+Die Seite verwendet den von Retail dynamisch bemessenen Rahmen und scrollt so,
+dass die aktuelle Auswahl beim Wechsel zwischen den sichtbaren Zeilengruppen
+im Rahmen bleibt:
 
 1. Stereo rendering
 2. Stereo HUD
 3. Red aim guide
 4. Controller vibration
-5. Controls: RIGHT-HANDED / LEFT-HANDED
-6. Ladder climbing: HANDS / CLASSIC
-7. Melee: GESTURES / CLASSIC
-8. Show arms: ON / OFF
-9. FOV scale: 100% / 110% / 120% / 130%
-10. Turn speed
-11. Recenter 2D panel
-12. Reset VR defaults
-13. BACK
+5. Flashlight mount: LEFT HAND / HEAD / WEAPON
+6. Controls: RIGHT-HANDED / LEFT-HANDED
+7. Ladder climbing: HANDS / CLASSIC
+8. Physical lean: ON / OFF
+9. Physical duck: ON / OFF
+10. Melee: GESTURES / CLASSIC
+11. Show arms: ON / OFF
+12. FOV scale: 100% / 110% / 120% / 130%
+13. Turn speed
+14. Recenter 2D panel
+15. Reset VR defaults
+16. BACK
 
-`Show arms` ist standardmäßig `OFF`: Nur Ober- und Unterarme werden über ein
-lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine
-bleiben sichtbar. `ON` setzt sofort das unveränderte Retail-Material ein.
-Die Auswahl wird als `ShowArms` gespeichert.
+`Show arms` ist standardmäßig `OFF` und verwendet ein lokal erzeugtes
+Alpha-Test-Material, das nur Ober- und Unterarme ausblendet. Hände, Torso und
+Beine bleiben sichtbar; der Kopf wird über seinen separaten Materialslot
+verborgen. `ON` setzt das unveränderte Retail-Material ein. Die Auswahl wird
+als `ShowArms` gespeichert. Die Maske wird für alle elf DXT3-Mipmaps erzeugt,
+damit Hände und Körper auch beim Wechsel auf kleinere Texturstufen sichtbar
+bleiben.
 
 `FOV scale` erweitert das symmetrische Sichtfeld in Tangentenraum und wirkt
 gleichzeitig auf Retails Stereokamera und die an OpenXR übermittelte
 Projektionsschicht. Dadurch bleiben Bild und Headset-Projektion deckungsgleich.
-`100%` ist der unveränderte Standard; die Auswahl wird als `FovScale`
+`130%` ist der VR-Standard; die Auswahl wird als `FovScale`
 gespeichert.
 
 Die vier einzelnen Nahkampfaktionen gehören in `fearvr.ini` statt als vier
@@ -444,19 +537,66 @@ erhalten und werden weiterhin aus `fearvr.ini` gelesen und dorthin
 geschrieben, stehen aber nicht auf der sichtbaren Seite. Ein zweistufiges Menü
 wurde verworfen.
 
-Die Taschenlampe ist ein eigener Spot-Projektor an der linken Hand, ohne
-Batterieverbrauch und über einen Klick auf den linken Trigger schaltbar. Ihr
-Ursprung folgt der linken Grip-Pose, ihre Strahlrichtung der linken Aim-Pose.
+Die Taschenlampe ist ein eigener Spot-Projektor ohne Batterieverbrauch und
+über X schaltbar. `Flashlight mount` wählt zwischen linker Hand, Kopf und
+Waffe; Standard ist `WEAPON` (`FlashlightMount=2`). Die Auswahl wird als
+`FlashlightMount=0/1/2` gespeichert. An der Hand
+folgt der Ursprung der linken Grip-Pose und die Strahlrichtung der linken
+Aim-Pose. Am Kopf folgt beides der HMD-Pose, an der Waffe der aktuellen
+Mündung und Feuerachse. Beim Kopfmodus bleibt das sichtbare Lampenmodell
+ausgeblendet, damit es nicht in die Augen-Frusta ragt. Außerdem deaktiviert
+nur dieser Modus die Objektschatten des Projektors: Player-Body, Hände und
+Waffe können den kopffesten Lichtkegel damit nicht mehr verdecken,
+Weltgeometrie wirft weiterhin Schatten. Beim Wechsel zurück auf Hand oder
+Waffe wird die volle Schattenstufe wiederhergestellt.
 
 Die **Retail**-Taschenlampe wird dafür nicht mehr benutzt. Sie wurde früher per
 Kommandopuls dauerhaft eingeschaltet und folgte der Kamera, die währenddessen
 auf die Handpose gesetzt wurde. Im Normalfall lagen beide Lampen übereinander
 und fielen nicht auf — nach Zwischensequenzen aber ruht der Kameraeingriff,
 weil die Kamera dann der Engine gehört. Die Retail-Lampe leuchtete in diesem
-Moment wieder vom Kopf aus, während der Handscheinwerfer weiterlief: zwei
+Moment wieder vom Kopf aus, während der VR-Scheinwerfer weiterlief: zwei
 getrennte Kegel, deren Lichtfelder sich addierten, und nur einer davon ließ
-sich ausschalten. Der Handscheinwerfer allein deckt denselben Zweck ab und
+sich ausschalten. Der VR-Scheinwerfer allein deckt denselben Zweck ab und
 spart zugleich einen Kameraeingriff in geskripteten Szenen.
+
+## Support-hand Wrist-HUD
+
+Das Status-HUD wird als eigenes World-Space-Fenster nach jedem Stereo-
+Weltdurchlauf und vor dem Eye-Capture gerendert. Es sitzt am Handgelenk rund
+fünf Zentimeter vor der dem Gesicht zugewandten Handfläche. Sein Z-Test ist
+deaktiviert, damit die Hand das Informationsfenster nicht mehr verdeckt; die
+World-Space-Position und Stereo-Parallaxe bleiben erhalten. Weil die komplette
+Eingabe bei
+`Controls: LEFT-HANDED` vorher gespiegelt wird, bleibt diese logische linke
+Hand auch dann automatisch die physische Stützhand.
+
+Das Fenster erscheint nur, wenn
+
+- Retail `GS_PLAYING` meldet;
+- ein aktueller Weapon-Manager-Frame und gültige Grip-/Aim-Posen vorliegen;
+- keine Zwischensequenz aktiv ist; und
+- die Stützhand die Waffe nicht beidhändig gegriffen hält; und
+- die HMD-Vorwärtsachse innerhalb eines engen Blickkegels auf das Handgelenk
+  zeigt.
+
+Eine Haltezeit von 140 ms verhindert Flackern an der Kegelgrenze. Das
+15,2 × 9,2 cm große, zur HMD-Pose ausgerichtete Vektorfenster zeigt HP, Armor,
+Gesamtmunition, Splittergranaten, Näherungsmine, Fernladung, Medkits und einen
+Luftbalken. Dünne Segmentzeichen, umrandete Rasterbalken und feste Trennlinien
+ersetzen die frühere 3 × 5-Blockschrift. Es verwendet keine Retail-Texturen
+oder Fonts.
+
+Die Daten kommen aus dem versionsgeprüften Retail-1.08-`CPlayerStats`, aus
+`CWeaponDB::GetPlayerGrenade` für alle drei Wurfwaffen-Slots und aus
+`CPlayerStats::GetGearCount` für das Medkit. Die alten Status-Variablen werden
+erst nach Retails Client-Update auf null gesetzt. Sobald Retail Pause, ESC,
+Menü oder einen anderen Vollbildzustand meldet, werden ihre ursprünglichen
+Werte noch vor demselben Renderframe wiederhergestellt. Menü-Layout,
+Menüsteuerung und der Flachbildschirm-Pfad bleiben dadurch unverändert.
+
+Größe, Abstand, Blickwinkel und die endgültige Lesbarkeit werden nach jeder
+visuellen Iteration im Headset erneut abgenommen.
 
 ### Warum die Auswahl gesprungen ist
 
@@ -492,7 +632,7 @@ gespeicherte Master-Schalter. Neue und bestehende Konfigurationen ohne diese
 Schlüssel verwenden `1`; jede Aktion kann mit `0` einzeln abgeschaltet werden.
 
 - `ShowArms=0` — vom Menü gespeicherter Schalter; `0` ist der Standard und
-  verwendet die VR-Armmaske, `1` das sichtbare Retail-Material.
+  verwendet die VR-Armmaske, `1` das vollständig sichtbare Retail-Material.
 - `HiddenBodyPieces=0` — reine Entwicklerdiagnose für die F11-Piece-Probe.
   Der frühere Wert `2` wird auf `0` migriert, weil Retail-Piece #1
   `Body_Group` mit Armen, Torso und Beinen gemeinsam enthält.

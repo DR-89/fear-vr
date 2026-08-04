@@ -32,8 +32,11 @@
 #include "fearvr-version.h"
 #include "head_tracking_math.h"
 #include "ipc_bridge.h"
+#include "locomotion_reprojection.h"
 #include "protocol_utils.h"
+#include "reference_space_recenter.h"
 #include "stereo_math.h"
+#include "startup_splash.h"
 #include "texture_renderer.h"
 #include "xr_input.h"
 #include "xr_session_state.h"
@@ -52,6 +55,12 @@ std::atomic_bool g_stopRequested{false};
 // (such as VDXR's 2688x2880) remain untouched.
 constexpr std::uint32_t kQuest3EyeWidth = 2064;
 constexpr std::uint32_t kQuest3EyeHeight = 2208;
+// SteamVR can recommend 3132x3356 for the same Quest 3 for which VDXR asks
+// for 2688x2880. This host only enlarges an already rendered game image, so
+// those extra pixels add compositor load without revealing more world detail.
+// Use the proven VDXR ceiling consistently across runtimes.
+constexpr std::uint32_t kMaxEyeWidth = 2688;
+constexpr std::uint32_t kMaxEyeHeight = 2880;
 
 std::string JsonEscape(const std::string& value) {
     std::string escaped;
@@ -395,13 +404,19 @@ public:
     int Run() {
         try {
             CreateInstance();
+            // Das HMD-System zuerst auflösen. SteamVR kann zwar eine
+            // OpenXR-Instance anlegen, den Server ohne verbundenes Headset
+            // danach aber wieder beenden. Würden wir vorher Action-Pfade
+            // anlegen, erschiene dieser Zustand irreführend als
+            // Controller-Fehler statt als XR_ERROR_FORM_FACTOR_UNAVAILABLE.
+            CreateSystemAndDevice();
             xrInput_ = std::make_unique<XrInput>(
                 [this](const char* level, const char* event,
                        const std::string& message) {
                     logger_.Write(level, event, message);
                 });
-            xrInput_->Initialize(instance_);
-            CreateSystemAndDevice();
+            xrInput_->Initialize(
+                instance_, genericControllerExtensionEnabled_);
 
             bool restartSession = false;
             do {
@@ -469,9 +484,18 @@ private:
                 "an.");
         }
 
-        const char* enabledExtensions[] = {
-            XR_KHR_D3D11_ENABLE_EXTENSION_NAME,
-        };
+        genericControllerExtensionEnabled_ =
+            std::find_if(
+                extensions.begin(), extensions.end(), [](const auto& p) {
+                    return std::string(p.extensionName) ==
+                           XR_KHR_GENERIC_CONTROLLER_EXTENSION_NAME;
+                }) != extensions.end();
+        std::vector<const char*> enabledExtensions{
+            XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+        if (genericControllerExtensionEnabled_) {
+            enabledExtensions.push_back(
+                XR_KHR_GENERIC_CONTROLLER_EXTENSION_NAME);
+        }
         XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
         strncpy_s(createInfo.applicationInfo.applicationName, "F.E.A.R. VR",
                   _TRUNCATE);
@@ -483,8 +507,8 @@ private:
         // Khronos hello_xr deliberately makes the same compatibility choice.
         createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
         createInfo.enabledExtensionCount =
-            static_cast<std::uint32_t>(std::size(enabledExtensions));
-        createInfo.enabledExtensionNames = enabledExtensions;
+            static_cast<std::uint32_t>(enabledExtensions.size());
+        createInfo.enabledExtensionNames = enabledExtensions.data();
 
         CheckXr(XR_NULL_HANDLE, xrCreateInstance(&createInfo, &instance_),
                 "xrCreateInstance");
@@ -498,6 +522,12 @@ private:
                 << XR_VERSION_MINOR(properties.runtimeVersion) << '.'
                 << XR_VERSION_PATCH(properties.runtimeVersion);
         logger_.Write("INFO", "runtime", runtime.str());
+        logger_.Write(
+            "INFO", "controller_fallback",
+            genericControllerExtensionEnabled_
+                ? "XR_KHR_generic_controller enabled."
+                : "XR_KHR_generic_controller unavailable; hardware-specific "
+                  "profiles remain active.");
     }
 
     void CreateSystemAndDevice() {
@@ -621,6 +651,23 @@ private:
         logger_.Write("INFO", "d3d11_adapter", adapterMessage.str());
 
         textureRenderer_.Initialize(device_.Get());
+        if (!options_.startupImage.empty()) {
+            std::string splashError;
+            if (startupSplash_.Load(device_.Get(), options_.startupImage,
+                                    splashError)) {
+                std::ostringstream message;
+                message << "path=" << options_.startupImage.u8string()
+                        << " width=" << startupSplash_.Width()
+                        << " height=" << startupSplash_.Height();
+                logger_.Write("INFO", "startup_splash_ready",
+                              message.str());
+            } else {
+                logger_.Write(
+                    "WARN", "startup_splash_failed",
+                    "path=" + options_.startupImage.u8string() +
+                        " error=" + splashError);
+            }
+        }
         if (options_.ipcSessionId != 0) {
             const LUID& luid = adapterDescription_.AdapterLuid;
             const std::uint64_t packedLuid =
@@ -749,12 +796,16 @@ private:
             const XrViewConfigurationView& configuration =
                 viewConfiguration_[eye];
             Swapchain& swapchain = swapchains_[eye];
-            const std::uint32_t requestedWidth = (std::max)(
-                configuration.recommendedImageRectWidth,
-                kQuest3EyeWidth);
-            const std::uint32_t requestedHeight = (std::max)(
-                configuration.recommendedImageRectHeight,
-                kQuest3EyeHeight);
+            const std::uint32_t requestedWidth = (std::min)(
+                (std::max)(
+                    configuration.recommendedImageRectWidth,
+                    kQuest3EyeWidth),
+                kMaxEyeWidth);
+            const std::uint32_t requestedHeight = (std::min)(
+                (std::max)(
+                    configuration.recommendedImageRectHeight,
+                    kQuest3EyeHeight),
+                kMaxEyeHeight);
             const std::uint32_t width = (std::min)(
                 requestedWidth, configuration.maxImageRectWidth);
             const std::uint32_t height = (std::min)(
@@ -864,6 +915,39 @@ private:
                 logger_.Write("WARN", "events_lost",
                               "count=" + std::to_string(lost->lostEventCount));
             }
+            if (event.type ==
+                    XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED &&
+                xrInput_) {
+                const auto* changed =
+                    reinterpret_cast<
+                        const XrEventDataInteractionProfileChanged*>(
+                        &event);
+                if (changed->session == session_) {
+                    xrInput_->MarkInteractionProfileChanged();
+                    xrInput_->LogInteractionProfiles(session_);
+                }
+            }
+            if (event.type ==
+                XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+                const auto* changed = reinterpret_cast<
+                    const XrEventDataReferenceSpaceChangePending*>(&event);
+                if (changed->session == session_ &&
+                    changed->referenceSpaceType ==
+                        XR_REFERENCE_SPACE_TYPE_LOCAL) {
+                    ScheduleReferenceSpaceRecenter(
+                        referenceSpaceRecenter_,
+                        static_cast<std::int64_t>(changed->changeTime));
+                    std::ostringstream message;
+                    message << "change_time=" << changed->changeTime
+                            << " pose_valid="
+                            << (changed->poseValid == XR_TRUE ? 1 : 0)
+                            << "; world recenter waits for the first fully "
+                               "tracked pose in the new LOCAL origin.";
+                    logger_.Write(
+                        "INFO", "reference_space_change_pending",
+                        message.str());
+                }
+            }
             if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
                 const auto* changed =
                     reinterpret_cast<const XrEventDataSessionStateChanged*>(
@@ -951,10 +1035,12 @@ private:
             if (rightStickDown && !rightStickWasDown_ &&
                 !ipcBridge_->StereoActive()) {
                 monoQuadAnchored_ = false;
+                monoQuadUseGazeHeightOnNextAnchor_ = true;
                 logger_.Write(
                     "INFO", "mono_quad_recenter_requested",
                     "Right stick click will re-anchor the loading/menu "
-                    "panel at the current view direction.");
+                    "panel at the current horizontal and vertical view "
+                    "direction.");
             }
             rightStickWasDown_ = rightStickDown;
 
@@ -995,9 +1081,23 @@ private:
 
             const XrViewStateFlags requiredFlags =
                 XR_VIEW_STATE_POSITION_VALID_BIT |
-                XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+                XR_VIEW_STATE_ORIENTATION_VALID_BIT |
+                XR_VIEW_STATE_POSITION_TRACKED_BIT |
+                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT;
             if (viewCount == 2 &&
                 (viewState.viewStateFlags & requiredFlags) == requiredFlags) {
+                if (CommitReferenceSpaceRecenterIfReady(
+                        referenceSpaceRecenter_,
+                        static_cast<std::int64_t>(
+                            frameState.predictedDisplayTime),
+                        true)) {
+                    logger_.Write(
+                        "INFO", "reference_space_recenter_committed",
+                        "generation=" + std::to_string(
+                            referenceSpaceRecenter_.generation) +
+                            "; the game will rebuild its head/body anchor "
+                            "from this fully tracked pose.");
+                }
                 std::array<XrFovf, FEARVR_EYE_COUNT> submittedFov{
                     locatedViews_[FEARVR_EYE_LEFT].fov,
                     locatedViews_[FEARVR_EYE_RIGHT].fov};
@@ -1014,10 +1114,12 @@ private:
                     if (!nativeStereo &&
                         panelRecenterGeneration != 0) {
                         monoQuadAnchored_ = false;
+                        monoQuadUseGazeHeightOnNextAnchor_ = true;
                         logger_.Write(
                             "INFO", "mono_quad_recenter_requested",
                             "The 2D menu action or F9 will re-anchor the "
-                            "panel at the current view direction.");
+                            "panel at the current horizontal and vertical "
+                            "view direction.");
                     }
                 }
                 if (nativeStereo) {
@@ -1068,6 +1170,8 @@ private:
                     request.predictedDisplayTimeNs =
                         static_cast<std::uint64_t>(
                             frameState.predictedDisplayTime);
+                    request.recenterGeneration =
+                        referenceSpaceRecenter_.generation;
                     request.flags = FEARVR_RF_VALID;
                     for (std::uint32_t eye = 0;
                          eye < FEARVR_EYE_COUNT; ++eye) {
@@ -1099,6 +1203,7 @@ private:
                     ipcBridge_->ConsumeLatestPair();
                 }
                 const RenderPoseSample* imagePose = nullptr;
+                LocomotionReprojection locomotion{};
                 if (nativeStereo && ipcBridge_) {
                     const std::uint64_t imageFrameId =
                         ipcBridge_->LatestFrameId();
@@ -1108,11 +1213,15 @@ private:
                     if (imageFrameId != 0 &&
                         candidate.frameId == imageFrameId) {
                         imagePose = &candidate;
+                        const std::uint64_t framesBehind =
+                            requestFrameId_ >= imageFrameId
+                                ? requestFrameId_ - imageFrameId
+                                : 0;
+                        poseAgeTotalFrames_ += framesBehind;
+                        poseAgeMaxFrames_ = (std::max)(
+                            poseAgeMaxFrames_, framesBehind);
+                        ++poseAgeSamples_;
                         if (!imagePoseMatchLogged_) {
-                            const std::uint64_t framesBehind =
-                                requestFrameId_ >= imageFrameId
-                                    ? requestFrameId_ - imageFrameId
-                                    : 0;
                             logger_.Write(
                                 "INFO", "image_pose_matched",
                                 "image_frame=" +
@@ -1132,9 +1241,49 @@ private:
                         // dieser Fall nicht unbemerkt bleibt.
                         ++poseFallbacks_;
                     }
+                    if (imagePose != nullptr) {
+                        FearVrGameCameraSample imageCamera{};
+                        FearVrGameCameraSample latestCamera{};
+                        if (ipcBridge_->LatestImageCamera(imageCamera) &&
+                            ipcBridge_->LatestGameCamera(latestCamera)) {
+                            locomotion =
+                                ComputeLocomotionReprojection(
+                                    imageCamera, latestCamera);
+                            if (locomotion.valid &&
+                                locomotion.distanceMeters > 0.0001F) {
+                                ++locomotionSamples_;
+                                locomotionDistanceTotalMeters_ +=
+                                    locomotion.distanceMeters;
+                                locomotionDistanceMaxMeters_ =
+                                    (std::max)(
+                                        locomotionDistanceMaxMeters_,
+                                        locomotion.distanceMeters);
+                                if (!locomotionMotionLogged_) {
+                                    std::ostringstream message;
+                                    message
+                                        << "image_frame="
+                                        << imageCamera.frameId
+                                        << " latest_game_frame="
+                                        << latestCamera.frameId
+                                        << " planar_delta_m="
+                                        << locomotion.distanceMeters
+                                        << "; measured for transfer-latency "
+                                           "telemetry only; no depthless "
+                                           "projection-layer translation is "
+                                           "applied.";
+                                    logger_.Write(
+                                        "INFO",
+                                        "locomotion_image_age_measured",
+                                        message.str());
+                                    locomotionMotionLogged_ = true;
+                                }
+                            }
+                        }
+                    }
                 }
                 if (nativeStereo) {
                     monoQuadAnchored_ = false;
+                    monoQuadUseGazeHeightOnNextAnchor_ = false;
                     for (std::uint32_t eye = 0; eye < 2; ++eye) {
                         RenderEye(eye);
                         projectionViews_[eye].pose =
@@ -1157,6 +1306,10 @@ private:
                             &layer);
                 } else {
                     RenderEye(FEARVR_EYE_LEFT);
+                    const bool showingStartupSplash =
+                        startupSplash_.View() != nullptr &&
+                        (!ipcBridge_ ||
+                         !ipcBridge_->HasImage(FEARVR_EYE_LEFT));
                     if (!monoQuadAnchored_) {
                         TrackingQuaternion leftRotation{
                             locatedViews_[FEARVR_EYE_LEFT]
@@ -1189,8 +1342,6 @@ private:
                                 leftRotation.y + rightRotation.y,
                                 leftRotation.z + rightRotation.z,
                                 leftRotation.w + rightRotation.w});
-                        const TrackingVector forward = Rotate(
-                            centerRotation, {0.0F, 0.0F, -1.0F});
                         FearVrPose centerPose{};
                         centerPose.px =
                             (locatedViews_[FEARVR_EYE_LEFT]
@@ -1216,25 +1367,45 @@ private:
                         centerPose.qw = centerRotation.w;
                         const FearVrPose levelAnchor =
                             YawOnlyRecenterPose(centerPose);
+                        const TrackingVector levelForward = Rotate(
+                            PoseRotation(levelAnchor),
+                            {0.0F, 0.0F, -1.0F});
+                        const TrackingVector gazeForward = Rotate(
+                            centerRotation,
+                            {0.0F, 0.0F, -1.0F});
+                        const TrackingVector anchorForward =
+                            monoQuadUseGazeHeightOnNextAnchor_
+                                ? gazeForward
+                                : levelForward;
                         monoQuadPose_ = {};
                         monoQuadPose_.orientation = {
                             levelAnchor.qx, levelAnchor.qy,
                             levelAnchor.qz, levelAnchor.qw};
                         monoQuadPose_.position = {
-                            centerPose.px + forward.x * 2.0F,
-                            centerPose.py + forward.y * 2.0F,
-                            centerPose.pz + forward.z * 2.0F};
+                            centerPose.px + anchorForward.x * 2.0F,
+                            centerPose.py + anchorForward.y * 2.0F,
+                            centerPose.pz + anchorForward.z * 2.0F};
                         monoQuadAnchored_ = true;
+                        const bool usedGazeHeight =
+                            monoQuadUseGazeHeightOnNextAnchor_;
+                        monoQuadUseGazeHeightOnNextAnchor_ = false;
                         logger_.Write(
                             "INFO", "mono_quad_anchored",
-                            "Menu panel centered at the current gaze point "
-                            "with a level, yaw-only orientation.");
+                            showingStartupSplash
+                                ? "Startup image anchored in LOCAL space at "
+                                  "the current HMD height; it remains fixed "
+                                  "in the room while the head moves."
+                                : usedGazeHeight
+                                ? "Menu panel re-centered in the current "
+                                  "horizontal and vertical view direction."
+                                : "Menu panel centered at current HMD height "
+                                  "with a level, yaw-only orientation.");
                     }
                     quad.space = appSpace_;
+                    quad.pose = monoQuadPose_;
                     quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                     quad.subImage = projectionViews_[
                         FEARVR_EYE_LEFT].subImage;
-                    quad.pose = monoQuadPose_;
                     quad.size = {2.4F, 1.8F};
                     layers[0] =
                         reinterpret_cast<
@@ -1387,6 +1558,17 @@ private:
                 << " endframe_max_us=" << endFrameMaxMicroseconds_
                 << " long_frames=" << longFrames_
                 << " pose_fallback=" << poseFallbacks_
+                << " pose_age_avg_frames="
+                << average(poseAgeTotalFrames_, poseAgeSamples_)
+                << " pose_age_max_frames=" << poseAgeMaxFrames_
+                << " locomotion_samples=" << locomotionSamples_
+                << " locomotion_avg_mm="
+                << (locomotionSamples_ == 0
+                        ? 0.0
+                        : locomotionDistanceTotalMeters_ * 1000.0 /
+                              static_cast<double>(locomotionSamples_))
+                << " locomotion_max_mm="
+                << locomotionDistanceMaxMeters_ * 1000.0
                 << " handles=" << CurrentHandleCount();
         logger_.Write("INFO", "perf_frame", message.str());
         reusedFrames_ = 0;
@@ -1398,6 +1580,12 @@ private:
         endFrameMaxMicroseconds_ = 0;
         longFrames_ = 0;
         poseFallbacks_ = 0;
+        poseAgeTotalFrames_ = 0;
+        poseAgeMaxFrames_ = 0;
+        poseAgeSamples_ = 0;
+        locomotionSamples_ = 0;
+        locomotionDistanceTotalMeters_ = 0.0;
+        locomotionDistanceMaxMeters_ = 0.0F;
     }
 
     static std::uint32_t CurrentHandleCount() noexcept {
@@ -1475,12 +1663,17 @@ private:
                 ipcBridge_->ImageView(eye),
                 static_cast<float>(swapchain.width),
                 static_cast<float>(swapchain.height));
+        } else if (startupSplash_.View() != nullptr) {
+            textureRenderer_.DrawAspectFit(
+                deviceContext_.Get(), renderTarget.Get(),
+                startupSplash_.View(),
+                static_cast<float>(swapchain.width),
+                static_cast<float>(swapchain.height),
+                static_cast<float>(startupSplash_.Width()),
+                static_cast<float>(startupSplash_.Height()));
         } else {
-            constexpr std::array<float, 4> leftColor{
-                0.90F, 0.03F, 0.03F, 1.0F};
-            constexpr std::array<float, 4> rightColor{
-                0.03F, 0.12F, 0.90F, 1.0F};
-            const auto& color = eye == 0 ? leftColor : rightColor;
+            constexpr std::array<float, 4> color{
+                0.0F, 0.0F, 0.0F, 1.0F};
             deviceContext_->ClearRenderTargetView(renderTarget.Get(),
                                                   color.data());
         }
@@ -1572,8 +1765,10 @@ private:
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> deviceContext_;
     TextureRenderer textureRenderer_;
+    StartupSplash startupSplash_;
     std::unique_ptr<IpcBridge> ipcBridge_;
     std::unique_ptr<XrInput> xrInput_;
+    bool genericControllerExtensionEnabled_{false};
     std::vector<XrViewConfigurationView> viewConfiguration_;
     std::vector<XrView> locatedViews_;
     std::vector<XrCompositionLayerProjectionView> projectionViews_;
@@ -1589,6 +1784,7 @@ private:
     std::array<RenderPoseSample, kRenderPoseHistorySize>
         renderPoseHistory_{};
     XrSessionStateMachine lifecycle_;
+    ReferenceSpaceRecenterState referenceSpaceRecenter_;
     std::array<EyeStats, FEARVR_EYE_COUNT> eyeStats_{};
     std::chrono::steady_clock::time_point perfWindowStart_{
         std::chrono::steady_clock::now()};
@@ -1605,13 +1801,21 @@ private:
     std::uint64_t endFrameMaxMicroseconds_{0};
     std::uint64_t longFrames_{0};
     std::uint64_t poseFallbacks_{0};
+    std::uint64_t poseAgeTotalFrames_{0};
+    std::uint64_t poseAgeMaxFrames_{0};
+    std::uint64_t poseAgeSamples_{0};
+    std::uint64_t locomotionSamples_{0};
+    double locomotionDistanceTotalMeters_{0.0};
+    float locomotionDistanceMaxMeters_{0.0F};
     std::uint64_t lastSubmittedImageFrameId_{0};
     std::uint64_t submittedFrames_{0};
     std::uint64_t requestFrameId_{0};
     std::uint32_t loggedFovScalePercent_{0};
     bool imagePoseMatchLogged_{false};
+    bool locomotionMotionLogged_{false};
     bool monoQuadLogged_{false};
     bool monoQuadAnchored_{false};
+    bool monoQuadUseGazeHeightOnNextAnchor_{false};
     bool rightStickWasDown_{false};
     std::uint32_t panelRecenterGeneration_{0};
     XrPosef monoQuadPose_{{0.0F, 0.0F, 0.0F, 1.0F},

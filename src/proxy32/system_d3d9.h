@@ -11,6 +11,10 @@ FARPROC ResolveSystemD3D9Name(const char* name) noexcept;
 FARPROC ResolveSystemD3D9Ordinal(unsigned ordinal) noexcept;
 const wchar_t* SystemD3D9Path() noexcept;
 DWORD SystemD3D9LoadError() noexcept;
+const wchar_t* UpstreamD3D9Path() noexcept;
+bool UpstreamD3D9Present() noexcept;
+bool UpstreamD3D9Loaded() noexcept;
+DWORD UpstreamD3D9LoadError() noexcept;
 
 template <typename Function>
 Function ResolveSystemD3D9(const char* name) noexcept {

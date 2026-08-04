@@ -14,6 +14,11 @@ Als CMake/CTest-Ziele unter `tests/` (baubar ohne Headset):
       `input_state`: unnormierte und degenerierte Quaternionen)
 - [x] Pose relativ zum Recenter-Ursprung und Yaw-only-Recenter bei geneigtem
       beziehungsweise gesenktem Kopf (`head_tracking_math`)
+- [x] bildsynchrone Spielkamera-Bewegungsmessung einschließlich
+      Achsenrichtung, Basis-Yaw sowie Fail-closed-Fällen für Head-Bob,
+      Teleport, alte Samples und gleichzeitige Drehung
+      (`locomotion_reprojection`); die berechnete Layer-Translation bleibt
+      ohne Tiefenpuffer bewusst deaktiviert
 - [x] FOV-Winkel → gemeinsame symmetrische Projektion (`stereo_math`);
       echte Projektionsmatrizen baut LithTech selbst aus dem gesetzten FOV
 - [x] Ringpuffer-Paarung und Generationen
@@ -299,6 +304,9 @@ M4-Gate:
 - kein künstliches Rollen beim normalen Lauf gemeldet;
 - bei mehr als 250 ms ohne neue Pose Wechsel auf Mono und Recenter bei
   Wiederkehr; ungültige Posen sind automatisiert getestet;
+- ein zukünftiger OpenXR-`LOCAL`-Ursprungswechsel wird erst ab seinem
+  angekündigten Zeitpunkt und nur mit vollständig getrackter Pose übernommen;
+  überlappende Meldungen und Generationsüberlauf sind automatisiert getestet;
 - Haupt-/Pausemenü, Stereo-HUD, Übergänge und Theater-Unterdrückung bestätigt;
 - Benutzerabnahme: M4 darf abgeschlossen werden.
 
@@ -359,8 +367,31 @@ Benutzerabnahme am 24.07.2026:
 Die semantische Spielbelegung wurde anschließend nachgereicht und vom Benutzer
 im Spiel bestätigt: Bewegen, Drehen, Waffenwahl, Springen, Nachladen, Ducken,
 Zeitlupe, Rennen, Benutzen, Zielen/Feuern, Recenter und Pausenmenü. Die linke
-System-/Menütaste ist nicht nutzbar, weil SteamVR sie für das eigene
-Systemmenü abfängt.
+System-/Menütaste des getesteten Quest-Touch-Controllers ist nicht nutzbar,
+weil SteamVR sie für das eigene Systemmenü abfängt. Das gilt nicht für die
+Application-Menu-Tasten der Vive Wands.
+
+### SteamVR-native Controllerabdeckung, Implementierungsprüfung 28.07.2026
+
+- Valve Index: Thumbsticks, Trigger, analoge Grips, A/B, beide Stick-Klicks,
+  Aim-/Grip-Posen und Haptik besitzen explizite Bindings.
+- HTC Vive Wands: Trackpads, Trigger, digitale Grip-Klicks, beide
+  Application-Menu-Tasten, Aim-/Grip-Posen und Haptik besitzen explizite
+  Bindings. OpenXR konvertiert den digitalen Grip in die gemeinsame
+  Float-Squeeze-Action.
+- `XR_KHR_generic_controller` wird optional aktiviert und nur vorgeschlagen,
+  wenn die Runtime die Erweiterung meldet.
+- Das aktive beziehungsweise von SteamVR emulierte Interaction Profile wird
+  nach der Action-Synchronisierung und bei Profilwechsel pro Hand geloggt.
+- x86 und x64 bauen mit `/W4 /WX`; jeweils 13/13 CTest-Tests sind grün.
+- VDXR 1.0.10 akzeptierte die erweiterten Vive- und WMR-Vorschläge jeweils mit
+  `result=0`; die Runtime meldete den generischen KHR-Fallback als nicht
+  verfügbar. Ein Headset war bei dieser Initialisierungsprüfung nicht
+  verbunden.
+
+Ein physischer Index-/Vive-Wand-Lauf steht weiterhin aus. Bis dahin bedeutet
+„unterstützt“ eine vollständige Implementierungsabdeckung, nicht dieselbe
+Hardwarebestätigung wie bei Quest 3.
 
 ## 11. Native VR-Einstellungen im ESC-Menü
 
@@ -534,8 +565,10 @@ unsauberen Arbeitsbaum ausdrücklich (AD-017).
 
 `tools\uninstall-fearvr.ps1` ist ohne `-Apply` ein reiner Trockenlauf.
 
-Außerhalb der Projektwurzel schreibt der Mod genau einen Wert:
-`steamvr.autoShowGameTheater`. Beide Rückstellzweige wurden gegen eine Kopie
+Aktuelle Launcher stellen den einzelnen SteamVR-Wert wieder auf `false`, weil
+die Theaterfläche auf zwei Rechnern erneut auftrat. Der Deinstaller behält
+zusätzlich für alte Projektstände die gezielte Wiederherstellung von
+`steamvr.autoShowGameTheater`; beide Rückstellzweige wurden gegen eine Kopie
 der echten Konfiguration getestet:
 
 - Schlüssel war ursprünglich **nicht vorhanden** → die eingefügte Zeile wird
@@ -608,6 +641,28 @@ Einordnung:
 
 Damit ist die Kennzahlenpflicht aus §14 erfüllt.
 
+### Asynchroner Latest-Frame-Transport, geprüft am 31.07.2026
+
+Der Lauf `m5-fear-20260731-003753` nutzte VDXR und den frühen
+Root-`d3d9.dll`-Proxy. Die Logfolge
+`game_device_multithreaded`, `async_cpu_transfer_ready` und
+`frame_ready ... path=async` bestätigt, dass nicht der synchrone Fallback
+gemessen wurde.
+
+| Kennzahl | Vorher synchron | Latest-Frame-Worker |
+|---|---:|---:|
+| Blockierzeit im Present-Thread | Ø 16–17,5 ms, max. ca. 28 ms | meist Ø 0,18–0,28 ms |
+| Readback und Upload | Bestandteil der Blockierzeit | Ø ca. 14–15 ms im Worker |
+| Gesamtes Transportalter | direkt, aber spielthread-blockierend | Ø ca. 22,7–24,1 ms |
+| Neue Spielbilder im Host | häufig ca. 45 fps | ca. 44–49 fps im Gameplay |
+
+Es ist höchstens ein noch nicht begonnener Frame vorgemerkt. Trifft vorher ein
+neuerer Frame ein, wird der alte GPU-Frame nur noch abgeerntet und nicht mehr
+über CPU und D3D9Ex transportiert. Dadurch wächst keine Warteschlange an und
+der Host erhält nach einer Überlastung wieder das aktuellste verfügbare Bild.
+Der Live-Lauf blieb fehlerfrei; der subjektive Test meldete während des Laufs
+ein sehr gutes Ergebnis.
+
 ### Runtime-Unabhängigkeit, geprüft am 25.07.2026
 
 | Prüfung | Ergebnis |
@@ -615,30 +670,49 @@ Damit ist die Kennzahlenpflicht aus §14 erfüllt.
 | `--validate-only` unter VDXR | `VirtualDesktopXR 1.0.10`, `Meta Quest 3`, Adapter-LUID `0x0:D57B`, Swapchains 2×`2688x2880`, Exitcode 0 |
 | `--validate-only` unter SteamVR | `SteamVR/OpenXR 2.16.7`, Swapchains 2×`2064x2208` |
 | Spielstart `-Runtime vdxr` | `logs\m5-fear-20260725-005345`: Runtime VDXR, Bridge verbunden, `ipc_frame` importiert |
-| SteamVR-Schritte unter VDXR | unterbleiben — keine `steamvr-theater-guard.log`, `steamvr.vrsettings` unverändert |
+| SteamVR-Theater-Hilfen | separate Skripte entfernt; `play.ps1` stellt den Einzelwert sicher und startet bei tatsächlich laufendem SteamVR höchstens 20 s einen integrierten Wächter für `valve.steam.desktopgame.21090` |
 
 VDXR liefert mit `2688x2880` je Auge eine deutlich höhere Swapchain-Auflösung
 als SteamVR. Das Spielbild bleibt davon unberührt: Es kommt weiterhin als
 1024x768-Textur über die Bridge und wird im Host hochskaliert.
 
+Der fremde SteamVR-Lauf in `user_logs2` vom 31.07.2026 grenzte eine weitere
+Qualitätsregression eindeutig ein: Swapchains `2244x2352`, aber sowohl erster
+als auch späterer D3D9-Reset `requested=640x480` und anschließend
+`source=640x480 transport=640x480`. Die VR-Bridge ersetzt deshalb nur diese
+VGA-Fallbackklasse dynamisch durch den letzten bereits verifizierten Modus oder
+die aktuelle Desktopauflösung. Beliebige gewählte HD-Modi bleiben unverändert;
+die Auswahlfunktion ist für x86 und x64 automatisiert geprüft.
+
+Der VDXR-Lauf `fearvr-20260731-074801` bestätigt den korrigierten Pfad mit
+`requested=640x480 resolved=2560x1440`, anschließendem Spiel-Reset auf
+`1920x1440`, `transport=1440x1080` und aktivem GPU-HUD. Dabei zeigte der
+Sichttest noch zu dünne Pickup-Texte. Der abgeleitete `HUDSwap`-Datensatz nutzt
+deshalb 26 Pixel und voll deckende Weiß-/Gelbtöne. Die Kontur wird im
+GPU-Kompositor nun aus vier bilinearen Maskenabgriffen ungefähr zwei
+Quellpixel breit erzeugt; nach der 0,75-fachen Transport-Skalierung bleibt sie
+damit sicher sichtbar. Die Release-Prüfung validiert den Datensatz für beide
+Architekturen.
+
 Umgeschaltet wird über `-Runtime`, das `XR_RUNTIME_JSON` nur für den
 Hostprozess setzt. Die systemweite Runtime-Einstellung wird nicht verändert
 (AD-018).
 
-## 17. Weitergebbares Paket, geprüft am 25.07.2026
+## 17. Weitergebbares Overlay
 
-`tools\make-release.ps1` erzeugt unter `dist\` Ordner und ZIP (rund 1,7 MB,
-ZIP 0,52 MB). Enthalten sind nur eigene Binaries, Skripte und Doku.
+`tools\make-release.ps1` erzeugt unter `dist\` einen Ordner und ein ZIP, deren
+Inhalt direkt in den Ordner mit `FEAR.exe` entpackt wird.
 
-| Prüfung | Ergebnis |
+| Prüfung | Erwartetes Ergebnis |
 |---|---|
-| Lizenzgegenprobe im Paketskript | bricht bei proprietärem Dateinamen **und** bei dem bekannten Hash des Public-Tools-Moduls ab |
-| `install.ps1` ohne Parameter | findet Retail über die Steam-Bibliotheken, verifiziert Version und SHA-256 |
-| Public-Tools-Erkennung | über den Hash des unveränderten VC7.1-`GameClient.dll` |
-| Paketintegrität | `install.ps1` prüft jede Datei gegen `release-manifest.json` |
-| Installation | 7 Module gestaged, Desktop-Verknüpfung erzeugt, Retail unverändert |
-| Start aus der Installation | Bridge verbunden, `ipc_frame` importiert, VDXR aktiv |
-| Deinstallation | entfernt alles außer `userdata`; Retail unverändert |
+| Archivwurzel | `FEARVR\`, Standardstarter und SteamVR-Starter; kein zusätzlicher Paketordner |
+| Öffentlicher Modus | keine Retail- oder Public-Tools-Datei, Manifest `redistributable=true` |
+| Privater Modus | sieben Laufzeitmodule plus Body-Assets, Manifest `redistributable=false` und Warnhinweis |
+| Paketintegrität | `prepare-overlay.ps1` prüft ausgelieferte Dateien gegen `release-manifest.json` |
+| Erststart öffentlich | Public-Tools-Erkennung über den Hash des unveränderten VC7.1-`GameClient.dll` |
+| SteamVR | Starter setzt für den Hostprozess Valves OpenXR-Manifest; systemweite Runtime bleibt unverändert |
+| Update | neues ZIP über denselben Ordner; `FEARVR\userdata` bleibt erhalten |
+| Entfernung | `FEARVR\` und beide Starter löschen; keine Retail-Datei muss repariert werden |
 
 ### Fehlschlag beim ersten Paketstand
 

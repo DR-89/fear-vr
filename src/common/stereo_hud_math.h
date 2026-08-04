@@ -25,8 +25,12 @@ inline bool IsSafePostWorldCoverage(std::uint64_t changedPixels,
     // Sparse HUD elements can be lifted into stereo. Large deltas are usually
     // fullscreen effects (for example Slow-Mo) and must stay out of the HUD
     // compositor, otherwise their mono filter gets warped into both eyes.
+    //
+    // Retail text and subtitles stay below three percent in measured gameplay.
+    // A more generous limit used to admit moving world fragments (15--18
+    // percent) as HUD and briefly paste them into both eyes.
     return totalPixels != 0 && changedPixels != 0 &&
-           changedPixels * 100u <= totalPixels * 20u;
+           changedPixels * 100u <= totalPixels * 3u;
 }
 
 inline bool IsFlatPanelCoverage(std::uint64_t changedPixels,
@@ -35,21 +39,18 @@ inline bool IsFlatPanelCoverage(std::uint64_t changedPixels,
            changedPixels * 100u > totalPixels * 81u;
 }
 
-// Das HUD wird als Ganzes zur Bildmitte hin gestaucht, damit die Randblöcke
-// im Headset im bequemen Sichtfeld liegen.
+// Das alte Retail-HUD wurde als Ganzes auf 80 Prozent gestaucht, damit seine
+// Randblöcke ins bequeme Sichtfeld rücken. Seit Leben, Rüstung, Munition und
+// Inventar auf dem Wrist-HUD liegen, bleiben im Post-World-Pfad vor allem
+// dünne Texteinblendungen. Deren 5:4-Rückabtastung ließ bei Point-Sampling
+// einzelne Glyphenpixel aus und machte Hinweise sowie Untertitel unscharf.
 //
-// Frühere Fassungen verschoben stattdessen einzelne Zonen um feste Beträge —
-// links oben um 1/8 Breite, links unten um 1/32, rechts um 1/10, die Mitte gar
-// nicht, dazu ein Zeilensprung bei 3/5 Höhe. Jedes HUD-Element, das eine
-// dieser Grenzen kreuzte, wurde dadurch zerschnitten: eine Hälfte wanderte,
-// die andere blieb stehen. Betroffen waren unter anderem die mittigen
-// Aktivierungshinweise, die genau über der Grenze bei 3/8 Breite liegen.
-//
-// Eine gleichmäßige Skalierung um den Bildmittelpunkt hat diesen Fehler
-// grundsätzlich nicht: Sie ist stetig und monoton, benachbarte Quellpixel
-// bleiben also immer benachbart.
-constexpr std::uint32_t kStereoHudShrinkNumerator = 5;
-constexpr std::uint32_t kStereoHudShrinkDenominator = 4;
+// Deshalb gilt jetzt eine exakte 1:1-Abbildung. Sie erhält jeden Pixel der
+// 1080p-Retail-Schrift; VR-Statusblöcke brauchen hier nicht mehr verschoben
+// zu werden. Menü und ESC-Ansicht laufen weiterhin als eigener Flat-Panel-
+// Pfad und werden von dieser Abbildung nicht berührt.
+constexpr std::uint32_t kStereoHudShrinkNumerator = 1;
+constexpr std::uint32_t kStereoHudShrinkDenominator = 1;
 
 // Rechnet eine Ausgabekoordinate auf die Quellkoordinate zurück. Liegt die
 // Quelle außerhalb des Bildes, kommt `extent` als "hier ist kein HUD" zurück —

@@ -33,6 +33,29 @@ float ClampAxis(float value) noexcept {
     return std::clamp(value, -1.0F, 1.0F);
 }
 
+std::string PathText(XrInstance instance, XrPath path) {
+    if (path == XR_NULL_PATH) {
+        return "<none>";
+    }
+    std::uint32_t size = 0;
+    const XrResult countResult =
+        xrPathToString(instance, path, 0, &size, nullptr);
+    if (XR_FAILED(countResult) || size == 0) {
+        return "<path-error:" +
+               std::to_string(static_cast<std::int32_t>(countResult)) +
+               '>';
+    }
+    std::vector<char> text(size);
+    const XrResult valueResult = xrPathToString(
+        instance, path, size, &size, text.data());
+    if (XR_FAILED(valueResult)) {
+        return "<path-error:" +
+               std::to_string(static_cast<std::int32_t>(valueResult)) +
+               '>';
+    }
+    return std::string(text.data());
+}
+
 } // namespace
 
 XrInput::XrInput(XrInputLogFunction log) : log_(std::move(log)) {}
@@ -41,11 +64,13 @@ XrInput::~XrInput() {
     Destroy();
 }
 
-void XrInput::Initialize(XrInstance instance) {
+void XrInput::Initialize(
+    XrInstance instance, bool genericControllerEnabled) {
     if (instance == XR_NULL_HANDLE || actionSet_ != XR_NULL_HANDLE) {
         throw std::runtime_error("Invalid OpenXR input initialization.");
     }
     instance_ = instance;
+    genericControllerEnabled_ = genericControllerEnabled;
     if (XR_FAILED(xrStringToPath(
             instance_, "/user/hand/left",
             &handPath_[FEARVR_HAND_LEFT])) ||
@@ -159,14 +184,17 @@ void XrInput::Initialize(XrInstance instance) {
                     index.data(),
                     static_cast<std::uint32_t>(index.size()));
 
-    const std::array<XrActionSuggestedBinding, 15> motionController{{
+    const std::array<XrActionSuggestedBinding, 18> motionController{{
         bind(moveAction_, path("/user/hand/left/input/thumbstick")),
         bind(turnAction_, path("/user/hand/right/input/thumbstick")),
         bind(triggerAction_, path("/user/hand/left/input/trigger/value")),
         bind(triggerAction_, path("/user/hand/right/input/trigger/value")),
+        bind(squeezeAction_, path("/user/hand/left/input/squeeze/click")),
+        bind(squeezeAction_, path("/user/hand/right/input/squeeze/click")),
         bind(primaryAction_, path("/user/hand/left/input/trackpad/click")),
         bind(primaryAction_, path("/user/hand/right/input/trackpad/click")),
         bind(menuAction_, path("/user/hand/left/input/menu/click")),
+        bind(menuAction_, path("/user/hand/right/input/menu/click")),
         bind(stickClickAction_,
              path("/user/hand/left/input/thumbstick/click")),
         bind(stickClickAction_,
@@ -183,14 +211,17 @@ void XrInput::Initialize(XrInstance instance) {
         motionController.data(),
         static_cast<std::uint32_t>(motionController.size()));
 
-    const std::array<XrActionSuggestedBinding, 13> vive{{
+    const std::array<XrActionSuggestedBinding, 16> vive{{
         bind(moveAction_, path("/user/hand/left/input/trackpad")),
         bind(turnAction_, path("/user/hand/right/input/trackpad")),
         bind(triggerAction_, path("/user/hand/left/input/trigger/value")),
         bind(triggerAction_, path("/user/hand/right/input/trigger/value")),
+        bind(squeezeAction_, path("/user/hand/left/input/squeeze/click")),
+        bind(squeezeAction_, path("/user/hand/right/input/squeeze/click")),
         bind(primaryAction_, path("/user/hand/left/input/trackpad/click")),
         bind(primaryAction_, path("/user/hand/right/input/trackpad/click")),
         bind(menuAction_, path("/user/hand/left/input/menu/click")),
+        bind(menuAction_, path("/user/hand/right/input/menu/click")),
         bind(aimPoseAction_, path("/user/hand/left/input/aim/pose")),
         bind(aimPoseAction_, path("/user/hand/right/input/aim/pose")),
         bind(gripPoseAction_, path("/user/hand/left/input/grip/pose")),
@@ -217,6 +248,49 @@ void XrInput::Initialize(XrInstance instance) {
     SuggestBindings("/interaction_profiles/khr/simple_controller",
                     simple.data(),
                     static_cast<std::uint32_t>(simple.size()));
+
+    if (genericControllerEnabled_) {
+        const std::array<XrActionSuggestedBinding, 18> generic{{
+            bind(moveAction_, path("/user/hand/left/input/thumbstick")),
+            bind(turnAction_, path("/user/hand/right/input/thumbstick")),
+            bind(triggerAction_,
+                 path("/user/hand/left/input/trigger/value")),
+            bind(triggerAction_,
+                 path("/user/hand/right/input/trigger/value")),
+            bind(squeezeAction_,
+                 path("/user/hand/left/input/squeeze/value")),
+            bind(squeezeAction_,
+                 path("/user/hand/right/input/squeeze/value")),
+            bind(primaryAction_,
+                 path("/user/hand/left/input/primary/click")),
+            bind(primaryAction_,
+                 path("/user/hand/right/input/primary/click")),
+            bind(secondaryAction_,
+                 path("/user/hand/left/input/secondary/click")),
+            bind(secondaryAction_,
+                 path("/user/hand/right/input/secondary/click")),
+            bind(stickClickAction_,
+                 path("/user/hand/left/input/thumbstick/click")),
+            bind(stickClickAction_,
+                 path("/user/hand/right/input/thumbstick/click")),
+            bind(aimPoseAction_,
+                 path("/user/hand/left/input/aim/pose")),
+            bind(aimPoseAction_,
+                 path("/user/hand/right/input/aim/pose")),
+            bind(gripPoseAction_,
+                 path("/user/hand/left/input/grip/pose")),
+            bind(gripPoseAction_,
+                 path("/user/hand/right/input/grip/pose")),
+            bind(hapticAction_,
+                 path("/user/hand/left/output/haptic")),
+            bind(hapticAction_,
+                 path("/user/hand/right/output/haptic")),
+        }};
+        SuggestBindings(
+            "/interaction_profiles/khr/generic_controller",
+            generic.data(),
+            static_cast<std::uint32_t>(generic.size()));
+    }
 
     log_("INFO", "input_actions_created",
          "Gameplay action set and controller bindings are ready.");
@@ -307,8 +381,61 @@ void XrInput::Attach(XrSession session) {
     }
     attached_ = true;
     syncFailureLogged_ = false;
+    interactionProfilesDirty_ = true;
+    interactionProfilesLogged_ = false;
     log_("INFO", "input_actions_attached",
          "Gameplay action set attached to OpenXR session.");
+}
+
+void XrInput::MarkInteractionProfileChanged() noexcept {
+    interactionProfilesDirty_ = true;
+}
+
+void XrInput::LogInteractionProfiles(XrSession session) noexcept {
+    if (!attached_ || !interactionProfilesDirty_ ||
+        session == XR_NULL_HANDLE) {
+        return;
+    }
+    interactionProfilesDirty_ = false;
+    try {
+        for (std::uint32_t hand = 0;
+             hand < FEARVR_HAND_COUNT; ++hand) {
+            XrInteractionProfileState state{
+                XR_TYPE_INTERACTION_PROFILE_STATE};
+            const XrResult result = xrGetCurrentInteractionProfile(
+                session, handPath_[hand], &state);
+            if (XR_FAILED(result)) {
+                log_(
+                    "WARN", "input_interaction_profile_failed",
+                    std::string("hand=") +
+                        (hand == FEARVR_HAND_LEFT ? "left" : "right") +
+                        " result=" +
+                        std::to_string(
+                            static_cast<std::int32_t>(result)));
+                interactionProfilesDirty_ = true;
+                continue;
+            }
+            if (interactionProfilesLogged_ &&
+                state.interactionProfile ==
+                    lastInteractionProfile_[hand]) {
+                continue;
+            }
+            lastInteractionProfile_[hand] = state.interactionProfile;
+            log_(
+                state.interactionProfile == XR_NULL_PATH
+                    ? "WARN"
+                    : "INFO",
+                "input_interaction_profile",
+                std::string("hand=") +
+                    (hand == FEARVR_HAND_LEFT ? "left" : "right") +
+                    " profile=" +
+                    PathText(instance_, state.interactionProfile));
+        }
+        interactionProfilesLogged_ = true;
+    } catch (...) {
+        log_("WARN", "input_interaction_profile_failed",
+             "Interaction profile diagnostics could not be formatted.");
+    }
 }
 
 bool XrInput::ReadVector2(
@@ -445,6 +572,7 @@ bool XrInput::Sync(
         return false;
     }
     syncFailureLogged_ = false;
+    LogInteractionProfiles(session);
     output.flags |= FEARVR_IF_FOCUSED;
 
     if (ReadVector2(session, moveAction_,
@@ -641,6 +769,10 @@ void XrInput::ResetSession() noexcept {
     lastAimPoseValidHands_ = 0;
     lastGripPoseValidHands_ = 0;
     activeSampleLogCounter_ = 0;
+    lastInteractionProfile_[FEARVR_HAND_LEFT] = XR_NULL_PATH;
+    lastInteractionProfile_[FEARVR_HAND_RIGHT] = XR_NULL_PATH;
+    interactionProfilesDirty_ = true;
+    interactionProfilesLogged_ = false;
 }
 
 void XrInput::Destroy() noexcept {

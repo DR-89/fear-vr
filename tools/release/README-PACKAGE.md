@@ -1,213 +1,109 @@
-# F.E.A.R. VR
+# F.E.A.R. VR – Overlay release
 
-VR mod for the single-player base version of **F.E.A.R. 1.08**
-(LithTech Jupiter EX, Direct3D 9). Native stereo rendering, headtracking and
-OpenXR motion controls.
+This archive is installed by extracting it **directly over an existing legal
+F.E.A.R. 1.08 installation**. It adds a `FEARVR` folder, two launchers and
+F.E.A.R. VR's own `dinput8.dll` and `d3d9.dll`; it does not replace `FEAR.exe`
+or any retail archive. The DirectInput proxy fixes the original game's
+accumulating HID slowdown. The D3D9 proxy activates the low-latency
+asynchronous frame transport before the game creates its renderer.
 
-## Requirements
+If the game folder already contains a third-party `d3d9.dll`, preserve it
+before extracting the archive. The development installer chains such a wrapper
+as `d3d9.fearvr-upstream.dll`, but a plain ZIP extraction cannot back up a file
+that it overwrites.
 
-1. **F.E.A.R. 1.08**, legally installed. The Steam Ultimate Shooter Edition
-   (1.08.282.0) and its HDTextures4FEAR/XP v2.0.2 patched executable are
-   recognized; GOG and retail-disc copies of 1.08 install and launch as well,
-   but are untested. An unknown build is reported
-   with its SHA-256 and installation continues — every byte signature this mod
-   uses lives in `GameOrig.dll` from the Public Tools, not in `FEAR.exe`.
-   Versions below 1.08 are rejected.
-2. **F.E.A.R. Public Tools 1.08.** The official installer
-   `fear_publictools_108.exe` ships with the Ultimate Shooter Edition under
-   `extras\`.
-3. A headset with **SteamVR** or **Virtual Desktop**. Both runtimes are
-   confirmed.
-4. Windows 10/11, 64-bit.
+## Install and play
 
-### Note on installing the Public Tools
+1. Extract the archive into the folder that contains `FEAR.exe`.
+2. Start the headset runtime.
+3. Double-click `Start F.E.A.R. VR.cmd`.
 
-The installer reads
-`HKLM\SOFTWARE\WOW6432Node\Monolith Productions\FEAR\1.00.0000\Patch` and
-expects the value **8**, while Steam sets **10**. Set it to 8 for the
-installation and back to 10 afterwards — without that step the installer
-rejects the Steam edition.
+To force Valve's runtime, use
+`Start F.E.A.R. VR - SteamVR.cmd`. The regular launcher uses the system's
+active OpenXR runtime. Both launchers run the same 64-bit OpenXR host; SteamVR
+is an OpenXR runtime and therefore does not require a separate renderer build.
 
-```powershell
-$key = 'HKLM:\SOFTWARE\WOW6432Node\Monolith Productions\FEAR\1.00.0000'
-Set-ItemProperty $key -Name Patch -Value 8      # before installing
-Set-ItemProperty $key -Name Patch -Value 10     # after installing
-```
+The overlay keeps logs below `FEARVR\`. Saves, profiles and configuration use
+the writable per-user directory
+`%LOCALAPPDATA%\F.E.A.R. VR\userdata`; older data from `FEARVR\userdata` is
+copied there once without overwriting newer files. This allows the retail game
+to persist display settings even when Steam is installed below Program Files.
+Updating is the same operation: extract the newer archive over the same game
+folder.
+The launcher retries a Steam app hand-off that produced no `FEAR.exe` and
+then falls back to the verified executable directly while Steam remains
+running. It only reports a successful start after the matching VR bridge has
+loaded.
+Startup diagnostics are written as `launcher-*.log` beside the host and proxy
+logs for that run.
 
-These five modules are proprietary and must not ship with this package. They
-are copied from **your own** Public Tools installation during setup:
+## Public and private archives
 
-`GameClient.dll`, `GameServer.dll`, `ClientFx.fxd`, `FEAR.dep`,
-`FEARMod.Arch00s`
+The normal release contains only redistributable F.E.A.R.-VR files. On its
+first start it finds the owner's local **F.E.A.R. Public Tools 1.08**
+installation and copies the five required runtime modules into `FEARVR`.
+It checks registry entries and common folders on every local drive, including
+`C:\Program Files (x86)\Sierra\FEAR Public Tools`. If nothing valid is found,
+the visible launcher explicitly asks for the installation folder and verifies
+the selected Public Tools 1.08 files before continuing.
 
-## Installation
-
-Double-click **`Install.cmd`** in this folder. That is all — the window stays
-open at the end so the result stays readable.
-
-Equivalent from a shell, if you prefer typing:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\install.ps1
-```
-
-The default target is `%USERPROFILE%\FearVR`. The game folder and the Public
-Tools are detected automatically and verified by their hashes. If a path
-cannot be found, the installer shows examples and asks for it.
-
-> **Do not install below `%LOCALAPPDATA%`.** The engine then fails to load its
-> archive configuration and aborts with "Failed to initialize client - unable
-> to load game resources". The installer rejects such targets.
-
-Options:
+If they are installed at a custom location:
 
 ```powershell
-tools\install.ps1 -InstallDir "D:\Games\FearVR"
-tools\install.ps1 -RetailRoot "D:\SteamLibrary\steamapps\common\FEAR Ultimate Shooter Edition"
-tools\install.ps1 -PublicToolsGame "C:\Program Files (x86)\Monolith Productions\FEAR Public Tools"
-tools\install.ps1 -LaunchMode direct  # start FEAR.exe without Steam (GOG, disc)
-tools\install.ps1 -NoShortcut       # no desktop shortcut
-tools\install.ps1 -NonInteractive   # never prompt; fail instead
+.\Start F.E.A.R. VR.cmd -PublicToolsGame "D:\FEAR Public Tools\Dev\Runtime\Game"
 ```
 
-`Install.cmd` passes any extra arguments straight through, so
-`Install.cmd -InstallDir "D:\Games\FearVR"` works the same way.
+The official installer `fear_publictools_108.exe` is included with the Steam
+Ultimate Shooter Edition under `extras\`. Its EULA does not grant permission
+to redistribute the proprietary runtime modules.
 
-A copy under `steamapps\common` is launched through
-`steam.exe -applaunch 21090`; any other copy is started directly with the
-same arguments. `-LaunchMode` overrides that choice.
-
-`-PublicToolsGame` accepts either the installation folder or its
-`Dev\Runtime\Game` subfolder. Quote any path that contains spaces.
-
-## Updating
-
-Double-click `Install.cmd` in the new package. There is nothing to uninstall
-first.
-
-An existing installation is detected, the paths and launch mode from last
-time are reused, the modules are replaced, and modules a newer package no
-longer uses are removed. **Saved games and profiles stay.** Close the game
-first — while `FEAR.exe` runs, its modules are locked and the installer
-refuses to continue.
-
-`-Clean` wipes the install folder except `userdata` before staging again.
-
-## Playing
-
-Desktop shortcut **F.E.A.R. VR**, or:
+A developer can create an immediately playable personal archive from a local
+Public Tools installation:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\play.ps1
+pwsh -File tools\make-release.ps1 -PrivateBundle
 ```
 
-Options:
+That private archive contains the proprietary modules, generated body assets
+and the local x64 `d3dx10_43.dll` legacy DirectX redistributable required by
+SteamVR's `vrmonitor.exe` on systems with an incomplete Steam prerequisite
+installation. The DLL is exposed only through the SteamVR child-process path;
+no file is copied into Windows or SteamVR. The archive is marked
+`NOT FOR REDISTRIBUTION` and must not be published.
+
+## Runtime selection
 
 ```powershell
-tools\play.ps1 -Runtime vdxr      # force Virtual Desktop
-tools\play.ps1 -Runtime steamvr   # force SteamVR
-tools\play.ps1 -Translation       # limited HMD translation (opt-in)
-tools\play.ps1 -NoHeadBob         # force head bob off (already off by default)
-tools\play.ps1 -NoStereoHud       # troubleshooting only
+.\Start F.E.A.R. VR.cmd -Runtime steamvr
+.\Start F.E.A.R. VR.cmd -Runtime vdxr
+.\Start F.E.A.R. VR.cmd -Runtime "D:\Runtime\manifest.json"
 ```
 
-`-Runtime` sets `XR_RUNTIME_JSON` for the host process only. The system-wide
-runtime setting is never changed.
-
-A Steam copy needs the Steam client running, because F.E.A.R. officially
-starts through `steam.exe -applaunch 21090`. GOG and disc copies do not need
-Steam at all. Either way this is independent of which VR runtime renders;
-SteamVR itself does not have to run when using Virtual Desktop.
+Runtime selection is process-local through `XR_RUNTIME_JSON`; no global OpenXR
+setting is changed.
 
 ## Controls
 
-| Input | Action |
-|---|---|
-| left stick | move |
-| left grip | sprint — or, with the hand on the weapon, hold it two-handed |
-| left stick click | use medkit |
-| left trigger | slow-mo |
-| right stick left/right | turn |
-| right stick up/down | jump / crouch (from 80 % deflection) |
-| right stick click | melee attack in 3D / re-anchor panel in 2D |
-| right grip | use |
-| right trigger | fire |
-| A | weapon switch |
-| B | short: reload — held: throw grenade |
-| X | flashlight |
-| Y | pause menu |
-| tilt left hand sideways | lean around corners (only with *Physical lean: OFF*) |
-| physically lean your head | move viewpoint and visible body together, stopped by walls (*Physical lean: ON*) |
-| thrust either free hand forward | weapon/off-hand strike |
-| jump, then thrust either free hand | jump kick (never injects a jump) |
-| sprint forward, crouch physically or with stick, then thrust | slide kick |
-| grab on a ladder, pull down | climb up (set *Ladder climbing: HANDS*) |
+- Right trigger fires the right-hand pistol.
+- With a second pistol equipped, left trigger fires the left-hand pistol and
+  X toggles slow motion. Otherwise X controls the selected light.
+- Grip supports a two-handed weapon at its original foregrip location.
+- The wrist HUD appears above the support wrist when its inner side is viewed.
+- Lowering the headset crouches physically when `Physical duck` is enabled;
+  stick crouch always remains available.
+- VR options, including light placement, handedness and physical duck, are under
+  `ESC > VR SETTINGS`.
 
-Keyboard: **F8** stereo on/off, **F9** re-anchor 2D panel, **F10** world-locked comfort
-screen, **F11** developer body-piece diagnostic.
+Mouse, keyboard and gamepad remain usable in parallel.
 
-Mouse, keyboard and gamepad remain usable in parallel. The VR options live in
-the ESC menu under **VR SETTINGS**, including
-`Controls: RIGHT-HANDED / LEFT-HANDED`, which mirrors the whole layout, and
-`Ladder climbing: HANDS / CLASSIC`, which decides whether ladders are climbed
-by grabbing the rungs or with the stick as in the original game.
-`Melee: GESTURES / CLASSIC` enables or disables all motion melee. Fresh
-configurations default to `GESTURES`.
-`Show arms: ON / OFF` switches between the original Retail arms and the VR
-mask. It defaults to `OFF`; hands, torso and legs remain visible. The choice
-is saved as `ShowArms` in `fearvr.ini`.
+## Removal
 
-The four moves can also be disabled independently in `fearvr.ini` under
-`[VR]`: `MeleeWeaponStrike`, `MeleeOffHandStrike`, `MeleeJumpKick` and
-`MeleeSlideKick` (`1` = enabled, the default; `0` = disabled).
-
-The left system/menu button cannot be bound: SteamVR grabs it for its own
-system menu.
-
-## Uninstall
-
-Double-click **`Uninstall.cmd`**. It first lists what would be removed and
-only deletes after you confirm with **Y**.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1          # dry run
-powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -Apply   # remove
-```
-
-**Saved games are kept.** They live in `<InstallDir>\userdata` and are only
-removed with `-IncludeUserData`.
-
-The retail installation is never written to at any point. A Steam file
-verification is not needed; as far as Steam is concerned the installation is
-unmodified.
-
-## Known limits
-
-- The classic D3D9 path still needs one CPU readback per eye and frame
-  (`FEARVR_BF_CPU_FALLBACK` in the log). F.E.A.R. creates a plain
-  `IDirect3DDevice9`, and D3D9 can only share surfaces between processes from
-  a D3D9Ex device — so this is the one remaining copy. The zero-copy
-  `DirectShared` path exists and engages as soon as the device is an Ex
-  device.
-- The stereo HUD compositor, by contrast, **no longer reads back**: the pixel
-  comparison runs as a `ps_2_0` shader on the GPU, and the coverage heuristic
-  that separates the HUD from fullscreen effects reads a few kilobytes one
-  frame late instead of a full frame. That removed one of three readbacks and
-  all per-pixel CPU work. `-fearvr-no-gpu-hud` forces the old CPU compositor
-  back for troubleshooting.
-- HMD translation has no world collision and therefore stays opt-in.
-- The version-dependent hooks check byte signatures in the Public Tools
-  modules of **F.E.A.R. 1.08**. If one does not match, that hook stays
-  disabled and the game keeps running flat.
-- The weapon jump when climbing stairs is not fully understood yet.
-- "Motion-controlled aiming" is backed by the aim ray and the hit point; a
-  general "6DoF weapon" is not claimed.
+Delete the added `dinput8.dll`, `d3d9.dll`, `FEARVR` folder and the two
+`Start F.E.A.R. VR*.cmd` launchers. Original retail files are not replaced, so
+a Steam file verification is unnecessary.
 
 ## License
 
-Our own parts are under the **MIT license** (see `LICENSE`). For the
-dependencies see `THIRD_PARTY_NOTICES.md`.
-
-This package contains **no** retail files, no proprietary SDK sources and no
-extracted assets. Running it requires your own, legally obtained F.E.A.R.
-installation and the official Public Tools installer.
+F.E.A.R.-VR's own source and binaries are under the MIT license; see
+`FEARVR\LICENSE` and `FEARVR\THIRD_PARTY_NOTICES.md`. F.E.A.R. and the Public
+Tools remain subject to their owners' licenses.

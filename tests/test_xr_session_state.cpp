@@ -1,5 +1,6 @@
 #include <cstdio>
 
+#include "reference_space_recenter.h"
 #include "xr_session_state.h"
 
 namespace {
@@ -55,6 +56,36 @@ int main() {
     transition = state.OnStateChanged(XrLifecycleState::Exiting);
     CHECK(transition.action == XrLifecycleAction::ExitHost);
     CHECK(!transition.sessionRunning);
+
+    fearvr::ReferenceSpaceRecenterState origin;
+    CHECK(!fearvr::CommitReferenceSpaceRecenterIfReady(
+        origin, 100, true));
+    fearvr::ScheduleReferenceSpaceRecenter(origin, 500);
+    CHECK(origin.pending);
+    CHECK(!fearvr::CommitReferenceSpaceRecenterIfReady(
+        origin, 499, true));
+    CHECK(!fearvr::CommitReferenceSpaceRecenterIfReady(
+        origin, 500, false));
+    CHECK(fearvr::CommitReferenceSpaceRecenterIfReady(
+        origin, 500, true));
+    CHECK(!origin.pending);
+    CHECK(origin.generation == 1);
+
+    // Several pending notifications collapse to the final future change.  A
+    // pose between them must not become the new body anchor.
+    fearvr::ScheduleReferenceSpaceRecenter(origin, 700);
+    fearvr::ScheduleReferenceSpaceRecenter(origin, 900);
+    CHECK(!fearvr::CommitReferenceSpaceRecenterIfReady(
+        origin, 700, true));
+    CHECK(fearvr::CommitReferenceSpaceRecenterIfReady(
+        origin, 900, true));
+    CHECK(origin.generation == 2);
+
+    origin.generation = UINT32_MAX;
+    fearvr::ScheduleReferenceSpaceRecenter(origin, 0);
+    CHECK(fearvr::CommitReferenceSpaceRecenterIfReady(
+        origin, 0, true));
+    CHECK(origin.generation == 1);
 
     if (failed == 0) {
         std::printf("test_xr_session_state: OK\n");

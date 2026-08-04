@@ -60,6 +60,33 @@ constexpr float kLeanMaxRollRadians = 1.75F;
 // roll is numerically meaningless. A hand hanging at the side is rejected here.
 constexpr float kLeanMinLevelness = 0.5F;
 
+// Touch and Index controllers expose dedicated secondary buttons. Vive Wands
+// and classic WMR controllers expose menu buttons instead. Keep the physical
+// OpenXR inputs separate and merge them only at the game-semantic boundary.
+constexpr std::uint32_t kLeftPauseButtonMask =
+    FEARVR_IB_LEFT_SECONDARY | FEARVR_IB_LEFT_MENU;
+constexpr std::uint32_t kRightSecondaryButtonMask =
+    FEARVR_IB_RIGHT_SECONDARY | FEARVR_IB_RIGHT_MENU;
+
+inline bool ControllerButtonDown(
+    const FearVrInputState& input, std::uint32_t handMask,
+    std::uint32_t buttonMask) noexcept {
+    return (input.activeHands & handMask) != 0 &&
+           (input.buttons & buttonMask) != 0;
+}
+
+inline bool LeftPauseButtonDown(
+    const FearVrInputState& input) noexcept {
+    return ControllerButtonDown(
+        input, FEARVR_HAND_MASK_LEFT, kLeftPauseButtonMask);
+}
+
+inline bool RightSecondaryButtonDown(
+    const FearVrInputState& input) noexcept {
+    return ControllerButtonDown(
+        input, FEARVR_HAND_MASK_RIGHT, kRightSecondaryButtonMask);
+}
+
 // -1 leans right, +1 leans left, 0 does not lean.
 inline int LeftHandLeanDirection(
     const FearVrInputState& input) noexcept {
@@ -172,8 +199,8 @@ inline FearVrCommandValue MapControllerCommand(
         return {1.0F, verticalStick >= kVerticalStickThreshold};
     case FEARVR_CMD_DUCK:
         return {1.0F, verticalStick <= -kVerticalStickThreshold};
-    // Nachladen und Granate teilen sich die rechte Sekundaertaste: kurz laedt
-    // nach, gehalten wirft. Beides entsteht deshalb als Puls im GameClient.
+    // Nachladen und Granate teilen sich die rechte Sekundaer- bzw. Menütaste:
+    // kurz lädt nach, gehalten wirft. Beides entsteht als Puls im GameClient.
     case FEARVR_CMD_RELOAD:
     case FEARVR_CMD_THROW_GRENADE:
         return {0.0F, false};
@@ -204,10 +231,7 @@ inline FearVrCommandValue MapControllerCommand(
             1.0F,
             !twoHandedGrip && LeftHandLeanDirection(input) < 0};
     case FEARVR_CMD_MENU:
-        return {
-            1.0F,
-            leftActive &&
-                (input.buttons & FEARVR_IB_LEFT_SECONDARY) != 0};
+        return {1.0F, LeftPauseButtonDown(input)};
     default:
         return {0.0F, false};
     }

@@ -157,6 +157,8 @@ $artifactCandidates = [ordered]@{
         "build\x86\src\gameclient_loader\$Configuration\GameClient.dll"
     'fearvr-d3d9.dll (Bridge, x86)' =
         "build\x86\src\proxy32\$Configuration\fearvr-d3d9.dll"
+    'dinput8.dll (HID-Fix, x86)' =
+        "build\x86\src\dinput8_proxy\$Configuration\dinput8.dll"
     'fearvr-launcher.exe (x86)' =
         "build\x86\src\launcher\$Configuration\fearvr-launcher.exe"
     'fearvr-host.exe (x64)' =

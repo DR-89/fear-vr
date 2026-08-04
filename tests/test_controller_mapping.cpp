@@ -119,6 +119,24 @@ int main() {
     assert(fearvr::MapControllerCommand(
                input, fearvr::FEARVR_CMD_MENU)
                .active);
+    assert(fearvr::LeftPauseButtonDown(input));
+    assert(fearvr::RightSecondaryButtonDown(input));
+
+    // Vive Wands and classic WMR controllers use their menu buttons as the
+    // cross-device pause and secondary actions.
+    input.buttons =
+        FEARVR_IB_LEFT_MENU | FEARVR_IB_RIGHT_MENU;
+    assert(fearvr::MapControllerCommand(
+               input, fearvr::FEARVR_CMD_MENU)
+               .active);
+    assert(fearvr::LeftPauseButtonDown(input));
+    assert(fearvr::RightSecondaryButtonDown(input));
+    input.buttons =
+        FEARVR_IB_RIGHT_PRIMARY |
+        FEARVR_IB_RIGHT_SECONDARY |
+        FEARVR_IB_LEFT_PRIMARY |
+        FEARVR_IB_LEFT_SECONDARY |
+        FEARVR_IB_LEFT_STICK;
     // X ist jetzt allein der Taschenlampenschalter. Zeitlupe folgt dem linken
     // Trigger und darf durch X nicht mehr als Spielkommando aktiviert werden.
     input.trigger[FEARVR_HAND_LEFT] = 0.54F;

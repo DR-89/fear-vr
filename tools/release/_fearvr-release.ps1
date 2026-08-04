@@ -39,10 +39,10 @@ $script:FearVrRelease = [ordered]@{
         'FEARMod.Arch00s' = 'FEARMod.Arch00s'
     }
 
-    # Eigene Module, die das Paket mitbringt.
+    # Eigene Module, die im Overlay bereits am endgültigen Ort liegen.
     BundledModules = [ordered]@{
-        'GameClient.dll'  = 'bin\x86\GameClient.dll'
-        'fearvr-d3d9.dll' = 'bin\x86\fearvr-d3d9.dll'
+        'GameClient.dll'  = 'game-modules\GameClient.dll'
+        'fearvr-d3d9.dll' = 'game-modules\fearvr-d3d9.dll'
     }
 
     SteamVrManifest =
@@ -63,6 +63,30 @@ function Get-FileSha256([string]$Path) {
     } finally {
         $sha256.Dispose()
         $stream.Dispose()
+    }
+}
+
+# The native bridge logs hexadecimal session IDs without leading zeroes while
+# the PowerShell launcher formats them as fixed-width 64-bit values. Compare
+# the numeric value so 0x08DE... and 0x8DE... identify the same launch.
+function Test-FearVrProxySessionHeader(
+    [string]$Header,
+    [uint64]$ExpectedSessionId
+) {
+    if ([string]::IsNullOrWhiteSpace($Header)) { return $false }
+
+    try {
+        $record = $Header | ConvertFrom-Json
+        $message = [string]$record.message
+        $match = [regex]::Match(
+            $message, '(?:^|\s)session=0x([0-9A-Fa-f]+)(?:\s|$)')
+        if (-not $match.Success) { return $false }
+
+        $actualSessionId =
+            [Convert]::ToUInt64($match.Groups[1].Value, 16)
+        return $actualSessionId -eq $ExpectedSessionId
+    } catch {
+        return $false
     }
 }
 
@@ -290,6 +314,33 @@ function Get-SteamExecutable {
     return $null
 }
 
+# Liefert die typischen Installationswurzeln auf allen angegebenen Laufwerken.
+# Sierra ist der offizielle Standardpfad älterer Public-Tools-Installer und
+# muss deshalb ausdrücklich enthalten sein, nicht nur Monolith Productions.
+function Get-PublicToolsDefaultPaths([string[]]$DriveRoots) {
+    if ($null -eq $DriveRoots -or $DriveRoots.Count -eq 0) {
+        $DriveRoots = @(Get-LocalDriveRoots)
+    }
+    $roots = New-Object Collections.Generic.List[string]
+    $folders = @(
+        'Sierra\FEAR Public Tools',
+        'Sierra\F.E.A.R. Public Tools',
+        'Sierra Entertainment\FEAR Public Tools',
+        'Monolith Productions\FEAR Public Tools',
+        'FEAR Public Tools',
+        'F.E.A.R. Public Tools'
+    )
+    $parents = @('Program Files (x86)', 'Program Files', 'Games', '')
+    foreach ($drive in $DriveRoots) {
+        foreach ($parent in $parents) {
+            foreach ($folder in $folders) {
+                $roots.Add([IO.Path]::Combine($drive + '\', $parent, $folder))
+            }
+        }
+    }
+    return $roots
+}
+
 # Sucht ein Public-Tools-Runtime-Verzeichnis und verifiziert es über den
 # Hash des unveränderten VC7.1-GameClient.dll. Der Installer der Public Tools
 # lässt den Zielordner frei wählen, deshalb werden neben den Standardorten
@@ -299,29 +350,57 @@ function Find-PublicToolsGame {
     foreach ($location in (Get-RegistryInstallLocations '*Public Tools*')) {
         $roots.Add($location)
     }
-    $folders = @(
-        'Monolith Productions\FEAR Public Tools',
-        'FEAR Public Tools',
-        'F.E.A.R. Public Tools'
-    )
-    $parents = @('Program Files (x86)', 'Program Files', 'Games', '')
-    foreach ($drive in (Get-LocalDriveRoots)) {
-        foreach ($parent in $parents) {
-            foreach ($folder in $folders) {
-                $roots.Add([IO.Path]::Combine($drive + '\', $parent, $folder))
-            }
-        }
+    foreach ($location in (Get-PublicToolsDefaultPaths)) {
+        $roots.Add($location)
     }
     foreach ($root in $roots) {
         if ([string]::IsNullOrWhiteSpace($root)) { continue }
         # Ein Nutzer, der den Pfad selbst angibt, zeigt mal auf die
         # Installationswurzel und mal direkt auf Dev\Runtime\Game.
-        foreach ($suffix in @('Dev\Runtime\Game', '')) {
+        foreach ($suffix in @('Dev\Runtime\Game', 'Runtime\Game', 'Game', '')) {
             $game = if ($suffix) { Join-Path $root $suffix } else { $root }
             if (Test-PublicToolsGame $game) { return $game }
         }
     }
     return $null
+}
+
+# Fragt bei erfolgloser automatischer Suche ausdrücklich nach einem Pfad. Der
+# Nutzer darf die Installationswurzel oder direkt Dev\Runtime\Game eingeben;
+# akzeptiert wird erst ein Verzeichnis mit der originalen 1.08-GameClient.dll.
+function Request-PublicToolsGame([string]$InstallerPath) {
+    Write-Host ''
+    Write-Host 'F.E.A.R. Public Tools 1.08 wurden nicht automatisch gefunden.' `
+        -ForegroundColor Yellow
+    Write-Host 'Geprüft wurden Registry-Einträge und Standardpfade auf allen Laufwerken,'
+    Write-Host 'einschließlich:'
+    Write-Host '  C:\Program Files (x86)\Sierra\FEAR Public Tools'
+    if (-not [string]::IsNullOrWhiteSpace($InstallerPath) -and
+        (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
+        Write-Host "Mitgelieferter offizieller Installer: $InstallerPath"
+    }
+    Write-Host ''
+    Write-Host (
+        'Gib die Public-Tools-Installationswurzel oder direkt ' +
+        'Dev\Runtime\Game an.')
+    Write-Host 'Eine leere Eingabe bricht ab.'
+
+    for (;;) {
+        $entered = Read-Host 'Pfad zu F.E.A.R. Public Tools 1.08'
+        if ([string]::IsNullOrWhiteSpace($entered)) {
+            return $null
+        }
+        $resolved = Resolve-PublicToolsGame $entered
+        if (Test-PublicToolsGame $resolved) {
+            Write-Host "Public Tools bestätigt: $resolved" `
+                -ForegroundColor Green
+            return $resolved
+        }
+        Write-Host (
+            'Dort wurde keine unveränderte Public-Tools-1.08-' +
+            'GameClient.dll gefunden. Bitte anderen Pfad eingeben.') `
+            -ForegroundColor Red
+    }
 }
 
 # Nimmt eine Nutzereingabe entgegen — Installationswurzel oder direkt das

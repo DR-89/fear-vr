@@ -75,10 +75,12 @@ Folgende Punkte funktionieren:
 - Lehnen über die Neigung der linken Hand fühlt sich angenehm an; Richtung und
   Schwelle passen (bestätigt am 25.07.2026).
 
-## Neu: Stereo-HUD mischt auf der GPU
+## Stereo-HUD mischt auf der GPU
 
-Gebaut, **noch nicht im Spiel getestet** — und von allem Neuen der Teil mit dem
-grössten Risiko, weil er in das D3D9-Gerät des Spiels zeichnet.
+In VDXR und SteamVR im Spiel bestätigt. Der aktuelle Pickup-Text-Fix rendert
+`HUDSwap` mit 26 voll deckenden Pixeln und legt aus der GPU-Maske eine
+geschlossene, ungefähr zwei Quellpixel breite dunkle Kontur darum. Damit bleibt
+der Text auch nach dem 0,75-fachen Transport auf 1080 Pixel Höhe lesbar.
 
 Vorher pro Bild: drei `GetRenderTargetData` über den Bus und drei volle
 Durchläufe über alle Pixel (Deckungsgrad zählen, zweimal komponieren). Jetzt
@@ -705,8 +707,11 @@ wird dabei `XR_RUNTIME_JSON` nur für den Hostprozess. Die systemweite
 Einstellung unter `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` wird
 bewusst nicht angefasst.
 
-Die SteamVR-Sonderbehandlung (`autoShowGameTheater`, Theaterwächter) läuft
-nur noch, wenn die effektive Runtime als SteamVR erkannt wird.
+Die SteamVR-Sonderbehandlung ist direkt in `play.ps1` integriert. Der
+Einzelwert `autoShowGameTheater` wird bei Steam-Installationen geprüft; der
+höchstens 20 Sekunden laufende Wächter startet nur, wenn SteamVR tatsächlich
+aktiv ist. Das gilt auch bei VDXR als OpenXR-Runtime, falls SteamVR parallel
+geöffnet wurde.
 
 Steam bleibt als **Store** nötig (`-applaunch 21090`); SteamVR selbst nicht.
 

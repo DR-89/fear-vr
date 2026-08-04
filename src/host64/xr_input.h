@@ -22,8 +22,11 @@ public:
     XrInput(const XrInput&) = delete;
     XrInput& operator=(const XrInput&) = delete;
 
-    void Initialize(XrInstance instance);
+    void Initialize(XrInstance instance,
+                    bool genericControllerEnabled);
     void Attach(XrSession session);
+    void MarkInteractionProfileChanged() noexcept;
+    void LogInteractionProfiles(XrSession session) noexcept;
     void ResetSession() noexcept;
 
     bool Sync(XrSession session, XrSpace baseSpace, bool focused,
@@ -79,6 +82,11 @@ private:
     std::uint32_t lastAimPoseValidHands_{0};
     std::uint32_t lastGripPoseValidHands_{0};
     std::uint32_t activeSampleLogCounter_{0};
+    XrPath lastInteractionProfile_[FEARVR_HAND_COUNT]{
+        XR_NULL_PATH, XR_NULL_PATH};
+    bool genericControllerEnabled_{false};
+    bool interactionProfilesDirty_{true};
+    bool interactionProfilesLogged_{false};
     bool attached_{false};
     bool syncFailureLogged_{false};
 };

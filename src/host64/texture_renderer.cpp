@@ -1,5 +1,6 @@
 #include "texture_renderer.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <stdexcept>
@@ -116,6 +117,35 @@ void TextureRenderer::Draw(ID3D11DeviceContext* context,
     viewport.Height = height;
     viewport.MinDepth = 0.0F;
     viewport.MaxDepth = 1.0F;
+    DrawViewport(context, renderTarget, source, viewport);
+}
+
+void TextureRenderer::DrawAspectFit(
+    ID3D11DeviceContext* context, ID3D11RenderTargetView* renderTarget,
+    ID3D11ShaderResourceView* source, float targetWidth, float targetHeight,
+    float sourceWidth, float sourceHeight) {
+    constexpr std::array<float, 4> black{0.0F, 0.0F, 0.0F, 1.0F};
+    context->ClearRenderTargetView(renderTarget, black.data());
+
+    if (targetWidth <= 0.0F || targetHeight <= 0.0F ||
+        sourceWidth <= 0.0F || sourceHeight <= 0.0F) {
+        return;
+    }
+    const float scale = (std::min)(targetWidth / sourceWidth,
+                                   targetHeight / sourceHeight);
+    D3D11_VIEWPORT viewport{};
+    viewport.Width = sourceWidth * scale;
+    viewport.Height = sourceHeight * scale;
+    viewport.TopLeftX = (targetWidth - viewport.Width) * 0.5F;
+    viewport.TopLeftY = (targetHeight - viewport.Height) * 0.5F;
+    viewport.MinDepth = 0.0F;
+    viewport.MaxDepth = 1.0F;
+    DrawViewport(context, renderTarget, source, viewport);
+}
+
+void TextureRenderer::DrawViewport(
+    ID3D11DeviceContext* context, ID3D11RenderTargetView* renderTarget,
+    ID3D11ShaderResourceView* source, const D3D11_VIEWPORT& viewport) {
     context->RSSetViewports(1, &viewport);
     context->OMSetRenderTargets(1, &renderTarget, nullptr);
     context->IASetInputLayout(nullptr);

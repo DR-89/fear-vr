@@ -240,7 +240,10 @@ function Write-AsciiString16 {
 }
 
 function Write-PlayerBodyMaterial {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [string]$DiffuseTexture = 'fearvr\player_body_d.dds'
+    )
 
     $stream = [IO.File]::Open(
         $Path, [IO.FileMode]::Create, [IO.FileAccess]::Write,
@@ -255,10 +258,15 @@ function Write-PlayerBodyMaterial {
                 'Shaders\skeletal\Solid\specular_alphatest.fx'
             $writer.Write([UInt32]8)
 
-            # Integer material parameter.
+            # Alpha-Test-Koerpermaterialien des Retail-Spiels (beispielsweise
+            # alice_bod_after_alphatest.Mat00) verwenden SurfaceFlags=0.
+            # Der Wert 2 stammt aus player_new.Mat00 mit dem undurchsichtigen
+            # specular.fx und macht den kombinierten PlayerBody beim Wechsel
+            # auf specular_alphatest.fx auf manchen Retail-Renderpfaden
+            # vollstaendig unsichtbar.
             $writer.Write([UInt32]4)
             Write-AsciiString16 $writer 'SurfaceFlags'
-            $writer.Write([UInt32]2)
+            $writer.Write([UInt32]0)
 
             foreach ($floatParameter in @(
                 @{ Name = 'DefaultWidth'; Value = 100.0 },
@@ -271,7 +279,7 @@ function Write-PlayerBodyMaterial {
             }
 
             foreach ($textureParameter in @(
-                @{ Name = 'tDiffuseMap'; Value = 'fearvr\player_body_d.dds' },
+                @{ Name = 'tDiffuseMap'; Value = $DiffuseTexture },
                 @{ Name = 'tEmissiveMap'; Value = 'Tex\Engineering\black.dds' },
                 @{ Name = 'tSpecularMap'; Value = 'chars\skins\player_new_s.dds' },
                 @{ Name = 'tNormalMap'; Value = 'chars\skins\player_new_n.dds' }
@@ -407,7 +415,6 @@ if ($handRoots.Count -lt 12) {
         "Expected separate player hand meshes, found $($handRoots.Count). " +
         'No body override was generated.')
 }
-
 $armMask = [bool[]]::new($width * $height)
 $handMask = [bool[]]::new($width * $height)
 $armTriangleCount = 0
@@ -472,36 +479,196 @@ if ($transparentPixelCount -lt 40000 -or
         'No body override was generated.')
 }
 
-$blocksWide = [int]($width / 4)
 # Retails Solid-Shader ignoriert den Alpha-Kanal; die Quelldatei enthält dort
 # deshalb großflächig Nullwerte. Der Alpha-Test-Override braucht eine explizite
-# Grundlage: zunächst jedes DXT3-Pixel vollständig sichtbar machen, danach
-# ausschließlich die Arm-Inseln ausstanzen.
-$blockCount = [int](($width / 4) * ($height / 4))
-for ($block = 0; $block -lt $blockCount; ++$block) {
-    $alphaStart = 128 + $block * 16
-    for ($alphaByte = 0; $alphaByte -lt 8; ++$alphaByte) {
-        $textureBytes[$alphaStart + $alphaByte] = 0xFF
+# Grundlage in jeder Mip-Stufe: zunächst jedes DXT3-Pixel vollständig
+# sichtbar machen, danach die Arm-Inseln ausstanzen. Nur Mip 0 zu ändern
+# reicht nicht — die originalen kleineren Mips sind fast vollständig
+# transparent und lassen beim Umschalten des Samplers den ganzen PlayerBody
+# verschwinden. Der Kopf bekommt eine zweite, in allen Mips vollständig
+# transparente Textur, weil er Materialslot 1 benutzt.
+$hiddenTextureBytes = [byte[]]$textureBytes.Clone()
+$mipCount = [BitConverter]::ToInt32($textureBytes, 28)
+if ($mipCount -lt 1 -or $mipCount -gt 16) {
+    throw "Unsupported DDS mip count: $mipCount."
+}
+
+$mipLevels = [Collections.Generic.List[object]]::new()
+$mipOffset = 128
+$mipWidth = $width
+$mipHeight = $height
+for ($level = 0; $level -lt $mipCount; ++$level) {
+    $mipBlocksWide = [int][Math]::Max(
+        1, [Math]::Ceiling($mipWidth / 4.0))
+    $mipBlocksHigh = [int][Math]::Max(
+        1, [Math]::Ceiling($mipHeight / 4.0))
+    $mipBytes = $mipBlocksWide * $mipBlocksHigh * 16
+    if ($mipOffset + $mipBytes -gt $textureBytes.Length) {
+        throw "DDS mip $level exceeds the source texture."
+    }
+    $mipLevels.Add([pscustomobject]@{
+        Level = $level
+        Offset = $mipOffset
+        Width = $mipWidth
+        Height = $mipHeight
+        BlocksWide = $mipBlocksWide
+        BlocksHigh = $mipBlocksHigh
+    })
+    for ($block = 0; $block -lt $mipBlocksWide * $mipBlocksHigh;
+        ++$block) {
+        $alphaStart = $mipOffset + $block * 16
+        for ($alphaByte = 0; $alphaByte -lt 8; ++$alphaByte) {
+            $textureBytes[$alphaStart + $alphaByte] = 0xFF
+            $hiddenTextureBytes[$alphaStart + $alphaByte] = 0x00
+        }
+    }
+    $mipOffset += $mipBytes
+    $mipWidth = [int][Math]::Max(1, [Math]::Floor($mipWidth / 2.0))
+    $mipHeight = [int][Math]::Max(1, [Math]::Floor($mipHeight / 2.0))
+}
+if ($mipOffset -ne $textureBytes.Length) {
+    throw (
+        "DDS mip directory ends at $mipOffset, " +
+        "file length is $($textureBytes.Length).")
+}
+
+# Summed-area table der hochaufgelösten Armmaske. Damit bekommt jede kleinere
+# Mip-Stufe den gefilterten Deckungsgrad ihres Quellbereichs, ohne dass
+# Arm-Pixel in Hand-/Körperbereiche ausbluten. Mip 0 bleibt eine harte
+# 0/15-Maske; kleinere Mips dürfen DXT3-Zwischenwerte enthalten.
+$integralStride = $width + 1
+$armIntegral = [int[]]::new(($width + 1) * ($height + 1))
+for ($sourceY = 0; $sourceY -lt $height; ++$sourceY) {
+    $rowArmPixels = 0
+    for ($sourceX = 0; $sourceX -lt $width; ++$sourceX) {
+        if ($dilatedArmMask[$sourceY * $width + $sourceX]) {
+            ++$rowArmPixels
+        }
+        $armIntegral[
+            ($sourceY + 1) * $integralStride + $sourceX + 1
+        ] = $armIntegral[
+            $sourceY * $integralStride + $sourceX + 1
+        ] + $rowArmPixels
     }
 }
 
-for ($maskPixel = 0; $maskPixel -lt $dilatedArmMask.Length; ++$maskPixel) {
-    if (-not $dilatedArmMask[$maskPixel]) {
-        continue
+$mipAlphaSummary = [Collections.Generic.List[string]]::new()
+foreach ($mip in $mipLevels) {
+    $transparentAlphaPixels = 0
+    $opaqueAlphaPixels = 0
+    $intermediateAlphaPixels = 0
+    $alphaTestVisiblePixels = 0
+    for ($y = 0; $y -lt $mip.Height; ++$y) {
+        for ($x = 0; $x -lt $mip.Width; ++$x) {
+            if ($mip.Level -eq 0) {
+                $alpha = if ($dilatedArmMask[$y * $width + $x]) {
+                    0
+                }
+                else {
+                    15
+                }
+            }
+            else {
+                $sourceLeft = [int][Math]::Floor(
+                    $x * $width / [double]$mip.Width)
+                $sourceRight = [int][Math]::Floor(
+                    ($x + 1) * $width / [double]$mip.Width)
+                $sourceTop = [int][Math]::Floor(
+                    $y * $height / [double]$mip.Height)
+                $sourceBottom = [int][Math]::Floor(
+                    ($y + 1) * $height / [double]$mip.Height)
+                $sourceRight = [Math]::Max(
+                    $sourceLeft + 1, $sourceRight)
+                $sourceBottom = [Math]::Max(
+                    $sourceTop + 1, $sourceBottom)
+                $armPixels =
+                    $armIntegral[
+                        $sourceBottom * $integralStride + $sourceRight
+                    ] -
+                    $armIntegral[
+                        $sourceTop * $integralStride + $sourceRight
+                    ] -
+                    $armIntegral[
+                        $sourceBottom * $integralStride + $sourceLeft
+                    ] +
+                    $armIntegral[
+                        $sourceTop * $integralStride + $sourceLeft
+                    ]
+                $samplePixels =
+                    ($sourceRight - $sourceLeft) *
+                    ($sourceBottom - $sourceTop)
+                $opaqueFraction =
+                    ($samplePixels - $armPixels) / [double]$samplePixels
+                $alpha = [int][Math]::Floor(
+                    15.0 * $opaqueFraction + 0.5)
+            }
+
+            $block = [int](
+                ($y -shr 2) * $mip.BlocksWide + ($x -shr 2))
+            $pixel = [int](($y -band 3) * 4 + ($x -band 3))
+            $alphaOffset =
+                $mip.Offset + $block * 16 + ($pixel -shr 1)
+            if (($pixel -band 1) -eq 0) {
+                $textureBytes[$alphaOffset] =
+                    ($textureBytes[$alphaOffset] -band 0xF0) -bor $alpha
+            }
+            else {
+                $textureBytes[$alphaOffset] =
+                    ($textureBytes[$alphaOffset] -band 0x0F) -bor
+                    ($alpha -shl 4)
+            }
+
+            $writtenByte = $textureBytes[$alphaOffset]
+            $writtenAlpha = if (($pixel -band 1) -eq 0) {
+                $writtenByte -band 0x0F
+            }
+            else {
+                ($writtenByte -shr 4) -band 0x0F
+            }
+            if ($writtenAlpha -ne $alpha) {
+                throw (
+                    "Generated DXT3 mip $($mip.Level) alpha mismatch at " +
+                    "${x},${y}: expected $alpha, found $writtenAlpha.")
+            }
+            if ($alpha -eq 0) {
+                ++$transparentAlphaPixels
+            }
+            elseif ($alpha -eq 15) {
+                ++$opaqueAlphaPixels
+            }
+            else {
+                ++$intermediateAlphaPixels
+            }
+            # specular_alphatest.fx uses AlphaRef=96 and Greater. A DXT3
+            # nibble expands in steps of 17, so alpha >= 6 survives.
+            if ($alpha -ge 6) {
+                ++$alphaTestVisiblePixels
+            }
+        }
     }
-    $x = $maskPixel % $width
-    $y = [int][Math]::Floor($maskPixel / $width)
-    $block = [int](($y -shr 2) * $blocksWide + ($x -shr 2))
-    $pixel = [int](($y -band 3) * 4 + ($x -band 3))
-    $alphaOffset = 128 + $block * 16 + ($pixel -shr 1)
-    if (($pixel -band 1) -eq 0) {
-        $textureBytes[$alphaOffset] =
-            $textureBytes[$alphaOffset] -band 0xF0
+    $mipPixelCount = $mip.Width * $mip.Height
+    if ($mip.Level -eq 0 -and
+        ($transparentAlphaPixels -ne $transparentPixelCount -or
+         $opaqueAlphaPixels -ne
+            $mipPixelCount - $transparentPixelCount -or
+         $intermediateAlphaPixels -ne 0)) {
+        throw (
+            'Generated DXT3 body base alpha totals are inconsistent: ' +
+            "$transparentAlphaPixels transparent, " +
+            "$opaqueAlphaPixels opaque, " +
+            "$intermediateAlphaPixels intermediate.")
     }
-    else {
-        $textureBytes[$alphaOffset] =
-            $textureBytes[$alphaOffset] -band 0x0F
+    if ($alphaTestVisiblePixels -lt
+        [int][Math]::Floor($mipPixelCount * 0.70)) {
+        throw (
+            "Generated DXT3 mip $($mip.Level) would hide too much of the " +
+            "player atlas: only $alphaTestVisiblePixels of $mipPixelCount " +
+            'pixels survive AlphaRef=96.')
     }
+    $mipAlphaSummary.Add(
+        "$($mip.Width)x$($mip.Height):" +
+        "$transparentAlphaPixels/$intermediateAlphaPixels/" +
+        "$opaqueAlphaPixels")
 }
 
 $textureDirectory = Join-Path $DestinationGame 'fearvr'
@@ -509,9 +676,14 @@ New-Item -ItemType Directory -Force -Path $textureDirectory |
     Out-Null
 
 $destinationTexture = Join-Path $textureDirectory 'player_body_d.dds'
+$hiddenTexture = Join-Path $textureDirectory 'player_hidden_d.dds'
 $destinationMaterial = Join-Path $textureDirectory 'player_body.Mat00'
+$hiddenMaterial = Join-Path $textureDirectory 'player_hidden.Mat00'
 [IO.File]::WriteAllBytes($destinationTexture, $textureBytes)
+[IO.File]::WriteAllBytes($hiddenTexture, $hiddenTextureBytes)
 Write-PlayerBodyMaterial $destinationMaterial
+Write-PlayerBodyMaterial `
+    $hiddenMaterial 'fearvr\player_hidden_d.dds'
 
 # Die erste Fassung verliess sich auf das Ueberschreiben des Retail-Pfads.
 # Die Archiv-Suchreihenfolge kann dann trotzdem das Originalmaterial liefern.
@@ -521,5 +693,6 @@ if (Test-Path -LiteralPath $legacyMaterial -PathType Leaf) {
 }
 
 Write-Host (
-    '  [OK] VR body material: torso/legs/hands visible, ' +
-    "$transparentPixelCount arm pixels transparent")
+    '  [OK] VR body material: head and arms hidden, ' +
+    "torso/legs/hands visible; $transparentPixelCount arm pixels transparent; " +
+    "$mipCount alpha mips rebuilt")

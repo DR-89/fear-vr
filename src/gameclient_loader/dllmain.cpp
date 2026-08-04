@@ -6,6 +6,7 @@
 #endif
 #include <Windows.h>
 
+#include "fear_hid_fix.h"
 #include "stereo_hook.h"
 
 extern "C" int FearVrGameClientCompatData = 0;
@@ -43,12 +44,22 @@ BOOL CALLBACK LoadBridge(PINIT_ONCE once, PVOID parameter,
     (void)once;
     (void)parameter;
     (void)context;
-    wchar_t path[MAX_PATH]{};
-    if (!ModuleSiblingPath(L"fearvr-d3d9.dll", path)) {
-        return TRUE;
+    // A root-level d3d9 proxy is loaded before Retail creates its device and
+    // is therefore the preferred bridge. Reuse it instead of loading a second
+    // copy under the archcfg module name.
+    HMODULE earlyBridge = GetModuleHandleW(L"d3d9.dll");
+    if (earlyBridge != nullptr &&
+        GetProcAddress(
+            earlyBridge, "FearVr_InstallIatHook") != nullptr) {
+        g_bridge = earlyBridge;
+    } else {
+        wchar_t path[MAX_PATH]{};
+        if (!ModuleSiblingPath(L"fearvr-d3d9.dll", path)) {
+            return TRUE;
+        }
+        g_bridge = LoadLibraryExW(
+            path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     }
-    g_bridge = LoadLibraryExW(
-        path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (g_bridge != nullptr) {
         using InstallFunction = BOOL(__cdecl*)();
         const auto install = reinterpret_cast<InstallFunction>(
@@ -115,6 +126,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(instance);
+        // Fallback for custom launch layouts that cannot place the early
+        // dinput8 proxy beside FEAR.exe. The proxy normally applies this
+        // before DirectInput initialization; repeating the guarded operation
+        // here is safe and prevents later device reinitialization paths.
+        fearvr::ApplyFear108HidFix();
     }
     return TRUE;
 }

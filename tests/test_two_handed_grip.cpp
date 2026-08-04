@@ -103,6 +103,18 @@ int main() {
     assert(!fearvr::SolveSecondaryGripPivot(
         {}, {}, {}, std::numeric_limits<float>::quiet_NaN()).valid);
 
+    // Only a fore-end attachment that points toward and remains close to the
+    // measured muzzle may be cached. Reload poses below the weapon or beyond
+    // its barrel caused later support grabs to pitch the gun downward.
+    assert(fearvr::IsPlausibleSecondaryGripGeometry(
+        {30.0F, 2.0F, 1.0F}, {55.0F, 0.0F, 0.0F}, 8.0F));
+    assert(!fearvr::IsPlausibleSecondaryGripGeometry(
+        {2.0F, -35.0F, 1.0F}, {55.0F, 0.0F, 0.0F}, 8.0F));
+    assert(!fearvr::IsPlausibleSecondaryGripGeometry(
+        {70.0F, 0.0F, 0.0F}, {55.0F, 0.0F, 0.0F}, 8.0F));
+    assert(!fearvr::IsPlausibleSecondaryGripGeometry(
+        {30.0F, 0.0F, 0.0F}, {}, 8.0F));
+
     // Der Lenkwinkel: bis zur weichen Grenze eins zu eins, darueber gedaempft
     // weiterlaufend statt an einer Wand stehenzubleiben.
     assert(fearvr::SoftLimitedSteerAngle(0.0F) == 0.0F);

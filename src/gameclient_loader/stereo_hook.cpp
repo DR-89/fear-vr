@@ -676,10 +676,16 @@ struct TwoHandedGripState {
     // Transform liefert den waffenspezifischen Originalgriff.
     LTRigidTransform animatedRightSocket;
     LTRigidTransform animatedLeftSocket;
+    // A valid attachment is retained across grip releases for this exact
+    // Retail weapon. Recapturing on every squeeze could sample a reload or
+    // weapon-switch animation and turn that transient lowered hand into the
+    // permanent weapon axis.
+    const void* geometryWeapon{nullptr};
     bool geometryValid{false};
     bool placementValid{false};
     bool animatedRightSocketValid{false};
     bool animatedLeftSocketValid{false};
+    bool rejectedGeometryLogged{false};
 };
 TwoHandedGripState g_twoHandedGrip;
 ArmIkTuning g_armIkTuning{};
@@ -12248,15 +12254,30 @@ bool ClampTwoHandedTargetDirection(
     return target.MagSqr() > 0.0001F;
 }
 
+void ReleaseTwoHandedGrip(bool preserveGeometry = true) noexcept {
+    g_twoHandedGripActive = false;
+    if (!preserveGeometry) {
+        g_twoHandedGrip = TwoHandedGripState{};
+        return;
+    }
+    g_twoHandedGrip.placementValid = false;
+    g_twoHandedGrip.animatedRightSocketValid = false;
+    g_twoHandedGrip.animatedLeftSocketValid = false;
+}
+
 void UpdateTwoHandedGrip() noexcept {
+    const void* const weapon = g_weaponAim.retailWeapon;
+    if (g_twoHandedGrip.geometryWeapon != weapon) {
+        ReleaseTwoHandedGrip(false);
+        g_twoHandedGrip.geometryWeapon = weapon;
+    }
     const bool usable =
-        g_twoHandedGripEnabled && g_weaponAim.valid &&
+        weapon != nullptr && g_twoHandedGripEnabled && g_weaponAim.valid &&
         g_weaponAim.gripValid && g_weaponAim.leftGripValid &&
         !DualPistolsVrActive();
     if (g_twoHandedGripActive) {
         if (!usable || ShouldReleaseTwoHandedGrip(g_currentInput)) {
-            g_twoHandedGripActive = false;
-            g_twoHandedGrip = TwoHandedGripState{};
+            ReleaseTwoHandedGrip();
         }
         return;
     }
@@ -12265,14 +12286,21 @@ void UpdateTwoHandedGrip() noexcept {
     }
 
     g_twoHandedGripActive = true;
-    // Die sichtbare Hand darf nicht an der zufaelligen Controllerstelle
-    // einrasten. Die naechste unveraenderte Player-Body-Auswertung liefert
-    // stattdessen Retails original animierten linken Griff relativ zum
-    // rechten Waffenhand-Socket.
-    g_twoHandedGrip.placementValid = false;
-    g_twoHandedGrip.geometryValid = false;
-    g_twoHandedGrip.animatedRightSocketValid = false;
-    g_twoHandedGrip.animatedLeftSocketValid = false;
+    if (g_twoHandedGrip.geometryValid &&
+        g_twoHandedGrip.geometryWeapon == weapon) {
+        g_twoHandedGrip.placementValid = true;
+        g_twoHandedGrip.animatedRightSocketValid = false;
+        g_twoHandedGrip.animatedLeftSocketValid = false;
+    } else {
+        // Die sichtbare Hand darf nicht an der zufaelligen Controllerstelle
+        // einrasten. Die naechste unveraenderte Player-Body-Auswertung liefert
+        // stattdessen Retails original animierten linken Griff relativ zum
+        // rechten Waffenhand-Socket.
+        g_twoHandedGrip.placementValid = false;
+        g_twoHandedGrip.geometryValid = false;
+        g_twoHandedGrip.animatedRightSocketValid = false;
+        g_twoHandedGrip.animatedLeftSocketValid = false;
+    }
 
     if (InterlockedCompareExchange(
             &g_twoHandedGripActiveLogged, 1, 0) == 0) {
@@ -12302,8 +12330,7 @@ void ApplyTwoHandedAimSupport() noexcept {
         // A collapsed hand line has no stable rigid solution. Release the
         // secondary attachment rather than reverting to right-origin motion
         // and dragging the visible support hand.
-        g_twoHandedGripActive = false;
-        g_twoHandedGrip = TwoHandedGripState{};
+        ReleaseTwoHandedGrip();
         return;
     }
     LTVector predictedSupport =
@@ -13102,6 +13129,49 @@ bool CaptureOriginalTwoHandSocket(
         return false;
     }
 
+    // On the first update after a weapon switch the muzzle geometry still
+    // belongs to the prior Retail object. Wait one frame rather than checking
+    // a new animated hand against an unrelated barrel.
+    if (!g_weaponAim.muzzleLocalValid ||
+        g_weaponAim.muzzleWeapon != g_weaponAim.retailWeapon) {
+        g_twoHandedGrip.animatedRightSocketValid = false;
+        g_twoHandedGrip.animatedLeftSocketValid = false;
+        return false;
+    }
+    {
+        const TrackingVector supportGeometry{
+            gripOffset.x, gripOffset.y, gripOffset.z};
+        const TrackingVector muzzleGeometry{
+            g_weaponAim.muzzleOffsetInWeapon.x,
+            g_weaponAim.muzzleOffsetInWeapon.y,
+            g_weaponAim.muzzleOffsetInWeapon.z};
+        constexpr float kBeyondMuzzleToleranceUnits =
+            0.08F * kGameUnitsPerMeter;
+        if (!IsPlausibleSecondaryGripGeometry(
+                supportGeometry, muzzleGeometry,
+                kBeyondMuzzleToleranceUnits)) {
+            g_twoHandedGrip.animatedRightSocketValid = false;
+            g_twoHandedGrip.animatedLeftSocketValid = false;
+            if (!g_twoHandedGrip.rejectedGeometryLogged) {
+                char message[224]{};
+                std::snprintf(
+                    message, sizeof(message),
+                    "Rejected transient Retail support pose: grip offset "
+                    "(%.1f, %.1f, %.1f), muzzle offset (%.1f, %.1f, %.1f).",
+                    static_cast<double>(gripOffset.x),
+                    static_cast<double>(gripOffset.y),
+                    static_cast<double>(gripOffset.z),
+                    static_cast<double>(g_weaponAim.muzzleOffsetInWeapon.x),
+                    static_cast<double>(g_weaponAim.muzzleOffsetInWeapon.y),
+                    static_cast<double>(g_weaponAim.muzzleOffsetInWeapon.z));
+                Report(
+                    "WARN", "two_handed_transient_grip_rejected", message);
+                g_twoHandedGrip.rejectedGeometryLogged = true;
+            }
+            return false;
+        }
+    }
+
     g_twoHandedGrip.grabOffsetInWeapon = gripOffset;
     g_twoHandedGrip.grabRotationInWeapon =
         rightInverse * animatedLeft.m_rRot;
@@ -13111,11 +13181,12 @@ bool CaptureOriginalTwoHandSocket(
     g_twoHandedGrip.geometryValid =
         gripOffset.MagSqr() > minimumSeparation * minimumSeparation;
     if (!g_twoHandedGrip.geometryValid) {
-        g_twoHandedGripActive = false;
-        g_twoHandedGrip = TwoHandedGripState{};
+        ReleaseTwoHandedGrip(false);
         return false;
     }
     g_twoHandedGrip.placementValid = true;
+    g_twoHandedGrip.geometryWeapon = g_weaponAim.retailWeapon;
+    g_twoHandedGrip.rejectedGeometryLogged = false;
 
     char message[192]{};
     std::snprintf(
@@ -14729,8 +14800,7 @@ void PollControllerInput() noexcept {
     if (g_twoHandedGripActive &&
         input.squeeze[FEARVR_HAND_LEFT] <
             kTwoHandReleaseSqueeze) {
-        g_twoHandedGripActive = false;
-        g_twoHandedGrip = TwoHandedGripState{};
+        ReleaseTwoHandedGrip();
     }
     if (input.activeHands != g_lastActiveHands) {
         char message[96]{};
@@ -15050,8 +15120,7 @@ void ResetDevMenuGameplayInput() noexcept {
     ResetMeleeActions(g_meleeActions);
     g_climbAxis = 0.0F;
     g_climbActive = false;
-    g_twoHandedGripActive = false;
-    g_twoHandedGrip = TwoHandedGripState{};
+    ReleaseTwoHandedGrip();
     for (bool& active : g_injectedCommandActive) {
         active = false;
     }

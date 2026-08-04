@@ -44,6 +44,11 @@ constexpr float kTwoHandMinSteerSeparationMeters = 0.12F;
 // Waffe stehenbleibt oder zurueckspringt.
 constexpr float kTwoHandSoftSteerRadians = 0.96F;  // rund 55 Grad
 constexpr float kTwoHandMaxSteerRadians = 1.57F;   // rund 90 Grad
+// A Retail reload/weapon-switch animation can move the animated off-hand far
+// below or even beyond the muzzle. Such a transient pose must never become the
+// rigid support attachment. The real fore-end points broadly toward the muzzle
+// and ends no more than a small model-space tolerance beyond it.
+constexpr float kTwoHandGripMinimumMuzzleAlignment = 0.35F;
 
 // Position of the left grip in the right hand's aim frame.
 struct TwoHandedSupportOffset {
@@ -57,6 +62,39 @@ struct TwoHandedPivotTranslation {
     TrackingVector correction;
     bool valid{false};
 };
+
+inline bool IsPlausibleSecondaryGripGeometry(
+    const TrackingVector& supportOffset,
+    const TrackingVector& muzzleOffset,
+    float beyondMuzzleTolerance) noexcept {
+    if (!IsFinite(supportOffset) || !IsFinite(muzzleOffset) ||
+        !std::isfinite(beyondMuzzleTolerance) ||
+        beyondMuzzleTolerance < 0.0F) {
+        return false;
+    }
+    const float supportLengthSquared =
+        supportOffset.x * supportOffset.x +
+        supportOffset.y * supportOffset.y +
+        supportOffset.z * supportOffset.z;
+    const float muzzleLengthSquared =
+        muzzleOffset.x * muzzleOffset.x +
+        muzzleOffset.y * muzzleOffset.y +
+        muzzleOffset.z * muzzleOffset.z;
+    if (!(supportLengthSquared > 0.0F) ||
+        !(muzzleLengthSquared > 0.0F)) {
+        return false;
+    }
+    const float supportLength = std::sqrt(supportLengthSquared);
+    const float muzzleLength = std::sqrt(muzzleLengthSquared);
+    const float dot =
+        supportOffset.x * muzzleOffset.x +
+        supportOffset.y * muzzleOffset.y +
+        supportOffset.z * muzzleOffset.z;
+    const float alignment = dot / (supportLength * muzzleLength);
+    return std::isfinite(alignment) &&
+           alignment >= kTwoHandGripMinimumMuzzleAlignment &&
+           supportLength <= muzzleLength + beyondMuzzleTolerance;
+}
 
 // Translate a rigid two-grab object so its stored secondary attachment lands
 // on the tracked secondary hand. Rotation is solved separately; once that

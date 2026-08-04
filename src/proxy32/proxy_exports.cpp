@@ -141,6 +141,14 @@ extern "C" void FearVr_SetFovScalePercent(std::uint32_t percent) {
     fearvr::SetFovScalePercent(percent);
 }
 
+extern "C" std::uint32_t FearVr_GetRenderScalePercent() {
+    return fearvr::GetRenderScalePercent();
+}
+
+extern "C" void FearVr_SetRenderScalePercent(std::uint32_t percent) {
+    fearvr::SetRenderScalePercent(percent);
+}
+
 extern "C" BOOL FearVr_IsTranslationEnabled() {
     return fearvr::IsTranslationEnabled();
 }
@@ -184,6 +192,14 @@ extern "C" void FearVr_RegisterStereoToggleCallback(
 
 extern "C" BOOL FearVr_GetRenderRequest(FearVrRenderRequest* request) {
     return fearvr::GetRenderRequest(request);
+}
+
+extern "C" BOOL FearVr_WaitForNewRenderRequest(
+    std::uint64_t previousFrameId,
+    std::uint32_t timeoutMilliseconds,
+    FearVrRenderRequest* request) {
+    return fearvr::WaitForNewRenderRequest(
+        previousFrameId, timeoutMilliseconds, request);
 }
 
 extern "C" BOOL FearVr_GetInputState(FearVrInputState* input) {

@@ -54,6 +54,7 @@ public:
         FearVrGameCameraSample& camera) const noexcept;
     [[nodiscard]] bool LatestGameCamera(
         FearVrGameCameraSample& camera) const noexcept;
+    [[nodiscard]] std::uint64_t LatestGeneration() const noexcept;
 
     // Liefert die seit dem letzten Aufruf gesammelten Copyzeiten und setzt
     // die Zähler zurück.
@@ -89,6 +90,7 @@ private:
     HANDLE mapping_{nullptr};
     HANDLE frameReadyEvent_{nullptr};
     HANDLE slotConsumedEvent_{nullptr};
+    HANDLE renderRequestEvent_{nullptr};
     HANDLE gameProcessHandle_{nullptr};
     DWORD gameProcessId_{0};
     FearVrSharedHeader* shared_{nullptr};
@@ -103,6 +105,7 @@ private:
     std::uint64_t lastGameHeartbeat_{0};
     std::uint64_t latestFrameId_{0};
     FearVrGameCameraSample latestImageCamera_{};
+    std::uint64_t latestGeneration_{0};
     std::uint64_t lastHapticRequestId_{0};
     std::uint64_t consumedFrames_{0};
     BridgeCopyStats copyStats_{};

@@ -34,16 +34,21 @@ implementiert und wird in x86 und x64 getestet.
 
 ## 3. Vorgehen (§7)
 
-1. **Recenter:** beim Aktivieren aktuelle HMD-Pose als neutralen lokalen
-   Ursprung speichern; F9 erhöht `recenterGeneration` und setzt sie neu.
+1. **Referenzraum:** `LOCAL_FLOOR` bevorzugen, `STAGE` und anschließend
+   `LOCAL` als Fallback. Beim Aktivieren horizontale HMD-Position und Yaw als
+   neutralen Ursprung speichern; F9 erhöht `recenterGeneration`, verändert
+   aber eine verfügbare Fußboden-/Augenhöhenkalibrierung nicht.
 2. **Relative Headpose** berechnen — nicht die absolute Tracking-Space-Pose
    direkt in die Welt schreiben.
 3. **Körper-Yaw** und **Head-Yaw** getrennt halten.
 4. **IPD** aus den beiden `xrLocateViews`-Posen übernehmen, **nicht** fest auf
    64 mm setzen.
-5. **Translation** standardmäßig deaktiviert; opt-in lokal auf 25 cm vom
-   Recenter-Punkt begrenzt. Eine echte Kollisionsabfrage gegen Wände bleibt
-   vor einer allgemeinen Aktivierung erforderlich.
+5. **Translation** standardmäßig deaktiviert; opt-in 1:1 relativ zum
+   Recenter-Punkt, mit 2-m-Sprungschutz und Kollisionsabfrage gegen Wände.
+   Das sichtbare Körpermodell folgt horizontal, die Retail-Kollisionskapsel
+   bleibt am Lokomotionsursprung. Wandkollision skaliert nur X/Z; die
+   kalibrierte vertikale Bewegung bleibt unabhängig und hält mindestens
+   25 cm Abstand zum gemeldeten Boden.
 6. **Roll** der Spielkamera nur aus dem HMD, nicht aus Weapon Sway/Camera Shake.
 
 ## 4. Projektion / FOV

@@ -19,7 +19,7 @@ F.E.A.R. 1.08** (`FEAR.exe`, LithTech Jupiter EX, Direct3D 9).
 > hiding only the arms by default, and the
 > ESC menu includes a native VR settings page. The classic D3D9 path still
 > uses a flagged CPU compatibility fallback; translation remains opt-in
-> without world collision. Details: `docs/TESTING.md`.
+> with view collision and visible-body alignment. Details: `docs/TESTING.md`.
 
 ## Demo
 
@@ -192,15 +192,19 @@ something is built but not yet verified in-game, it's noted.
   automatically after loading; F8 toggles at any time.
 - **Relative headtracking.** HMD rotation rotates the game camera relative
   to the neutral horizontal direction; physical pitch and roll are always
-  preserved. The 3D world has no manual recenter; its stable camera basis is
-  initialized automatically from a fully tracked pose and rebuilt when the
-  OpenXR runtime changes its `LOCAL` tracking origin.
+  preserved. F9 or `Recenter VR origin` resets horizontal position and yaw;
+  floor-relative eye height remains independently calibrated. The stable
+  camera basis is initialized only from a fully tracked pose and rebuilt when
+  the OpenXR runtime changes its reference-space origin.
 - **No silent VGA VR mode.** User-selected render resolutions at 1024×720 and
   above remain untouched. If Retail nevertheless requests its 640×480/800×600
   fallback, VR uses the last verified render mode or the current desktop mode;
   no machine-specific resolution is hard-coded.
-- **Optional HMD translation** up to 25 cm (`-Translation`). Without world
-  collision, deliberately opt-in.
+- **Optional room-scale HMD translation** (`-Translation`). Physical movement
+  is applied 1:1, collision-limited against world geometry and guarded against
+  tracking jumps beyond 2 m. The visible body follows the permitted horizontal
+  offset while Retail's gameplay capsule stays at the locomotion origin. The
+  host prefers `LOCAL_FLOOR`, then `STAGE`, then `LOCAL`.
 - **Support-wrist status HUD.** Looking directly at the inside of the support
   wrist opens a compact technical line display for health, armor, total ammo,
   frag grenades, proximity mines, remote charges, medkits and air. It renders
@@ -217,7 +221,7 @@ something is built but not yet verified in-game, it's noted.
   the mission briefing appear as a world-locked 2.4 × 1.8 m panel at 2 m
   distance. Detection is based on the retail game state
   `CInterfaceMgr::m_eGameState`, not pixel heuristics. Right stick click, F9
-  and `Recenter 2D panel` re-anchor the panel to the current gaze direction.
+  and `Recenter VR origin` re-anchor the panel to the current gaze direction.
 - **Comfort screen (F10).** World-locked rendering for camera shakes and
   cutscenes, so forced camera movement doesn't pull at the head.
 - **Quiet camera.** Weapon bob and camera recoil are disabled; head bob is off
@@ -291,15 +295,30 @@ something is built but not yet verified in-game, it's noted.
 
 ### Menu and Settings
 
-- **Native VR settings page** in the ESC menu ("VR SETTINGS"), usable with
-  the controller: Stereo rendering, Stereo HUD, Weapon weight
-  (none/light/medium/heavy), Turn speed, Red aim guide, Controller vibration,
-  Flashlight mount (left hand/head/weapon),
-  Controls (right/left-handed), Ladder climbing (hands or classic), Physical
-  lean, Physical duck, Melee (gestures or classic), Show arms, FOV scale,
-  Recenter 2D panel, Reset VR defaults.
-- **Persistence in `fearvr.ini`**, including settings not exposed in the menu:
-  HMD translation, head bob, comfort screen and four individual melee moves.
+- **Categorized native VR settings** in the ESC menu ("VR Settings"), usable
+  with keyboard, mouse, or controller. Six submenus cover Display & HUD,
+  Movement & Comfort, Controls, Weapons, Melee, and Advanced settings. B/Back
+  returns to the category list before leaving VR settings.
+- **Floating live-tuning panel during gameplay.** Hold both grip buttons and
+  press B to place the panel in front of your current view. Its Recoil, Weight,
+  Collide, Weapon, IK, Move, Melee, and VR tabs expose the settings that are
+  safe and useful to change during play. Point at a tab or row and press trigger or
+  A; the right stick navigates rows and switches tabs. B closes the panel.
+  Changes apply immediately and save to `fearvr.ini`; controller gameplay
+  commands are captured while it is open. The VR tab can change stereo world
+  render scale live from 100% through 200% without changing the desktop
+  resolution.
+- **Live arm IK and left-hand alignment.** The IK tab has Elbows and Left Hand
+  pages. Elbow outward/down/back pole components and straight-arm stability
+  can be tuned while the full arms are visible. The off-hand uses the OpenXR
+  grip pose consistently and adds controller-local right/up/forward plus
+  pitch/yaw/roll calibration. Fine steps are 5%, 0.5 cm and 5 degrees.
+  Values persist under `[VR]` as `IkElbow*` and
+  `IkLeftHand*`; Reset All IK restores the anatomical defaults.
+- **All normal VR preferences are editable in game** and persist immediately
+  to `fearvr.ini`, including HMD translation, head bob, comfort screen,
+  flashlight mount, physical leaning and ducking, all four individual melee
+  gestures, and simulated weapon weight.
 - **Body visibility switch** saved as `ShowArms` (`0` by default). The
   generated Alpha-Test material hides only upper and lower arms; hands, torso
   and legs remain visible, while the head is hidden through its separate
@@ -314,8 +333,36 @@ something is built but not yet verified in-game, it's noted.
   `PositionalFollow`, `RotationalFollow`, and `CatchUpStrength`. Unknown
   models explicitly use the `[VR]` defaults. `WeaponWeightDiagnostics=1`
   emits rate-limited raw/filter error and velocity telemetry.
+  The Weapons category is split into Handling & appearance, Simulated weight,
+  and Recoil pages. Advanced contains diagnostics and the global defaults reset.
+- **Per-weapon weight and recoil profiles** can be tuned from the native menu
+  or floating tool panel. Recoil, Weight, and Weapon tabs show the equipped
+  weapon in their header. Choose Current or Default, then adjust weight,
+  positional follow, rotational follow, catch-up, recoil strength (up to
+  500%), muzzle rise, and recovery through safe presets. Exact values remain
+  available in `fearvr.ini` under `[VR]`, `[WeaponWeight.<model-name>]`, or
+  `[WeaponRecoil.<model-name>]`. Weapons without overrides use the `[VR]`
+  defaults. Recoil remains active when simulated weight is off; per-weapon
+  weight still scales the kick when enabled. Empty trigger pulls do not recoil.
+  `WeaponWeightDiagnostics=1` emits rate-limited raw/filter error and velocity
+  telemetry, including the current recoil offsets.
   Recommended ranges are `0.10-4.00`, `2.0-40.0`, `2.0-40.0`, and
   `0.0-4.0`, respectively.
+- **Per-weapon world-collision boxes** use the measured grip-to-muzzle length
+  and nine stable longitudinal probes across an adjustable width and height. A
+  solid hit resolves the rendered weapon, muzzle, and attached hands along the
+  contacted level-polygon normal without moving the physical controller.
+  Object-only/AABB hits are deliberately excluded so invisible Retail helper
+  volumes cannot move the weapon. The Collide tab selects Current or Default
+  and tunes length, width, height, and forward offset. Its wireframe box is
+  green when clear and red while obstructed;
+  collision and visualization have independent switches. Overrides persist under
+  `[WeaponCollision.<model-name>]`.
+- **Rigid two-hand weapon handling.** Grabbing with the support hand stores
+  the exact Retail-animated weapon-local attachment. The dominant hand supplies roll, the
+  hand-to-hand line supplies direction, and translation keeps the support
+  grip pinned to the left controller. Moving the dominant hand therefore
+  rotates around the support hand instead of dragging its visible model.
 
 ### Operation
 
@@ -513,6 +560,12 @@ runtime renders. SteamVR itself does not need to run under VDXR.
 
 Touch/Index bindings: left stick moves, left grip sprints — or, with that hand placed on
 the weapon, holds it as a second hand; left stick click uses a medkit.
+Movement is body-relative by default, so looking around does not steer a held
+movement direction. `Move direction: Head` opts into steering forward from
+the HMD's current horizontal facing direction. The locomotion stick uses a
+circular deadzone plus a smoothly released forward corridor: small sideways
+thumb drift stays forward, while deliberate diagonals preserve direction and
+speed.
 Right stick turns; at 80% deflection it jumps up and crouches down, stick
 click performs a melee attack in the 3D world and re-anchors the panel in 2D.
 A switches weapons, B reloads (short press) or
@@ -540,15 +593,15 @@ keyboard and gamepad remain usable in parallel. Details:
 `docs/OPENXR-INPUT.md`.
 
 In first-person view, hands, torso, legs and weapon remain visible; only upper
-and lower arms are hidden by default. `Show arms: ON / OFF` in the VR menu
+and lower arms are hidden by default. `Show arms: On / Off` in the VR menu
 switches immediately between the original Retail material and the VR arm mask.
 
 The M5 launch enables the stereo overlay and support-wrist status HUD by
 default.
 Options:
 
-- `-Translation`: limited HMD translation up to 25 cm, without world
-  collision;
+- `-Translation`: 1:1 room-scale HMD translation with world collision and a
+  2 m tracking-jump guard;
 - Head bob is off by default; `HeadBob=1` in `fearvr.ini` enables only the
   camera movement while the weapon stays steady for stable aiming;
 - `-NoHeadBob`: forces head bob off, even if the INI enables it;
@@ -557,20 +610,30 @@ Options:
 Keys in-game:
 
 - F8: toggle native stereo world rendering on/off;
-- F9: re-anchor menus and other 2D panels; no function in the 3D world;
+- F9: recenter the 3D tracking origin; in flat views it also re-anchors the
+  menu or 2D panel;
 - F10: toggle world-locked comfort screen for camera shakes and cutscenes;
 - F11: developer diagnostic that isolates player body pieces one by one.
 
-The ESC menu in M5 contains the English-labeled entry "VR SETTINGS" directly
-after "Options". The page is deliberately short and single-page: Stereo
-rendering, Stereo HUD, Turn speed, Red aim guide, Controller vibration,
-flashlight mount, right/left-handed controls, ladder climbing, physical lean,
-gesture/classic melee, Show arms, FOV scale, Recenter 2D panel, Reset VR
-defaults and BACK. HMD translation, head bob, comfort screen and the four
-individual melee switches remain configurable in `fearvr.ini`
-without cluttering the native menu. Selection is saved to
-`stage/userdata-m5/fearvr.ini`. Stick navigates, A or trigger confirms and B
-goes back.
+The ESC menu in M5 contains the English-labeled entry "VR Settings" directly
+after "Options". Six short native submenus cover Display & HUD, Movement &
+  Comfort, Controls, Weapons, Melee and Advanced settings without overflowing
+  the Retail frame. This includes HMD translation, head bob, comfort screen,
+  flashlight mount, physical lean and duck, individual melee switches and
+  simulated weapon-weight profiles with None/Light/Medium/Heavy presets.
+Changes are applied immediately and saved to `fearvr.ini`. Stick navigates,
+A or trigger confirms, and B returns to the category list before leaving VR
+settings.
+
+For faster testing without pausing, hold both grips and press B during gameplay
+to open the world-space live-tuning panel. The right-controller ray selects a
+tab or row, trigger or A confirms/changes it, right-stick left/right switches
+tabs, right-stick up/down selects rows, and B closes it. The Move tab shows the
+movement direction and active eye height. Use `MOVE DIRECTION: BODY` to look
+around without steering. Stand or sit in the intended neutral posture and
+choose `SET HEIGHT FROM HMD`; select the height row to return to automatic
+session calibration. The explicit value persists as `EyeHeightMeters` in
+`fearvr.ini`.
 
 ## Uninstall
 
@@ -619,8 +682,10 @@ it sees SteamVR running.
   reads a few kilobytes one frame late instead of a full frame. That removed
   one of three readbacks and all per-pixel CPU work. `-fearvr-no-gpu-hud`
   forces the old CPU compositor back.
-- HMD translation has no world collision and therefore remains opt-in
-  (`-Translation`).
+- Room-scale HMD translation is collision-limited and remains opt-in
+  (`-Translation`). Retail's gameplay collision capsule does not physically
+  follow room movement; the visible body does, and the view ray prevents
+  crossing nearby solid geometry.
 - The version-dependent hooks verify byte signatures, image size and timestamp
   of the **F.E.A.R. 1.08** Public Tools modules. The early HID fix performs the
   same full validation on its two small `FEAR.exe` regions. On a mismatch the

@@ -27,6 +27,13 @@ add_test(
   NAME locomotion_reprojection COMMAND test_locomotion_reprojection
 )
 
+add_executable(test_arm_ik test_arm_ik.cpp)
+target_link_libraries(test_arm_ik PRIVATE fearvr-common fearvr-warnings)
+if(MSVC)
+  target_compile_options(test_arm_ik PRIVATE /UNDEBUG)
+endif()
+add_test(NAME arm_ik COMMAND test_arm_ik)
+
 add_executable(test_stereo_hud_math test_stereo_hud_math.cpp)
 target_link_libraries(
   test_stereo_hud_math PRIVATE fearvr-common fearvr-warnings
@@ -67,6 +74,24 @@ if(MSVC)
   target_compile_options(test_weapon_weight PRIVATE /UNDEBUG)
 endif()
 add_test(NAME weapon_weight COMMAND test_weapon_weight)
+
+add_executable(test_weapon_recoil test_weapon_recoil.cpp)
+target_link_libraries(
+  test_weapon_recoil PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_weapon_recoil PRIVATE /UNDEBUG)
+endif()
+add_test(NAME weapon_recoil COMMAND test_weapon_recoil)
+
+add_executable(test_weapon_collision test_weapon_collision.cpp)
+target_link_libraries(
+  test_weapon_collision PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_weapon_collision PRIVATE /UNDEBUG)
+endif()
+add_test(NAME weapon_collision COMMAND test_weapon_collision)
 
 add_executable(test_melee_thrust test_melee_thrust.cpp)
 target_link_libraries(
@@ -135,6 +160,33 @@ add_test(
     -File
     ${CMAKE_CURRENT_SOURCE_DIR}/test_release_launcher_session.ps1
 )
+
+add_executable(test_vr_menu_model test_vr_menu_model.cpp)
+target_link_libraries(
+  test_vr_menu_model PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_vr_menu_model PRIVATE /UNDEBUG)
+endif()
+add_test(NAME vr_menu_model COMMAND test_vr_menu_model)
+
+add_executable(test_dev_menu_model test_dev_menu_model.cpp)
+target_link_libraries(
+  test_dev_menu_model PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_dev_menu_model PRIVATE /UNDEBUG)
+endif()
+add_test(NAME dev_menu_model COMMAND test_dev_menu_model)
+
+add_executable(test_render_scale test_render_scale.cpp)
+target_link_libraries(
+  test_render_scale PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_render_scale PRIVATE /UNDEBUG)
+endif()
+add_test(NAME render_scale COMMAND test_render_scale)
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND TARGET fearvr-proxy)
   # Isolierter M2-Producer: Der echte System-Import bleibt d3d9.lib; erst

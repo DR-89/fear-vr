@@ -69,6 +69,62 @@ int main() {
         return Fail("deadzone normalization is incorrect");
     }
 
+    const fearvr::InputVector2 radialDiagonal =
+        fearvr::ApplyRadialInputDeadzone(0.3F, 0.8F, 0.2F);
+    const float sourceRatio = 0.3F / 0.8F;
+    if (!(radialDiagonal.x > 0.0F) ||
+        !(radialDiagonal.y > radialDiagonal.x) ||
+        !Near(radialDiagonal.x / radialDiagonal.y, sourceRatio)) {
+        return Fail("radial deadzone must preserve diagonal direction");
+    }
+    const fearvr::InputVector2 radialFull =
+        fearvr::ApplyRadialInputDeadzone(1.0F, 1.0F, 0.2F);
+    if (!Near(
+            std::sqrt(radialFull.x * radialFull.x +
+                      radialFull.y * radialFull.y),
+            1.0F)) {
+        return Fail("radial deadzone must normalize full diagonals");
+    }
+    const fearvr::InputVector2 radialCenter =
+        fearvr::ApplyRadialInputDeadzone(0.1F, 0.1F, 0.2F);
+    if (radialCenter.x != 0.0F || radialCenter.y != 0.0F) {
+        return Fail("radial deadzone must neutralize the center circle");
+    }
+
+    const fearvr::InputVector2 assistedForward =
+        fearvr::ApplyForwardAxisAssist(0.15F, 0.90F);
+    const float assistedForwardMagnitude = std::sqrt(
+        assistedForward.x * assistedForward.x +
+        assistedForward.y * assistedForward.y);
+    if (!Near(assistedForward.x, 0.0F) ||
+        !Near(
+            assistedForwardMagnitude,
+            std::sqrt(0.15F * 0.15F + 0.90F * 0.90F))) {
+        return Fail(
+            "minor lateral thumb drift must resolve to magnitude-preserving forward");
+    }
+    const fearvr::InputVector2 assistedTransition =
+        fearvr::ApplyForwardAxisAssist(0.36F, 0.90F);
+    if (!(assistedTransition.x > 0.0F) ||
+        !(assistedTransition.x < 0.36F) ||
+        !Near(
+            std::sqrt(
+                assistedTransition.x * assistedTransition.x +
+                assistedTransition.y * assistedTransition.y),
+            std::sqrt(0.36F * 0.36F + 0.90F * 0.90F))) {
+        return Fail("forward assist must release smoothly without changing speed");
+    }
+    const fearvr::InputVector2 deliberateDiagonal =
+        fearvr::ApplyForwardAxisAssist(0.60F, 0.80F);
+    const fearvr::InputVector2 deliberateStrafe =
+        fearvr::ApplyForwardAxisAssist(-0.80F, 0.0F);
+    if (!Near(deliberateDiagonal.x, 0.60F) ||
+        !Near(deliberateDiagonal.y, 0.80F) ||
+        !Near(deliberateStrafe.x, -0.80F) ||
+        !Near(deliberateStrafe.y, 0.0F)) {
+        return Fail("deliberate diagonals and strafing must remain unchanged");
+    }
+
     // A roll about the pose's own forward axis must come back signed, with
     // positive meaning the top of the hand is tipped to the user's left.
     FearVrPose upright{};

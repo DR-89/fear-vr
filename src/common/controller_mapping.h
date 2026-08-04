@@ -14,8 +14,12 @@ enum FearVrGameCommand : std::uint32_t {
     FEARVR_CMD_STRAFE_LEFT = 3,
     FEARVR_CMD_STRAFE_RIGHT = 4,
     FEARVR_CMD_STRAFE_AXIS = 5,
+    FEARVR_CMD_PITCH_POS = 7,
+    FEARVR_CMD_PITCH_NEG = 8,
     FEARVR_CMD_YAW_POS = 9,
     FEARVR_CMD_YAW_NEG = 10,
+    FEARVR_CMD_PITCH_AXIS = 11,
+    FEARVR_CMD_YAW_AXIS = 12,
     FEARVR_CMD_MENU = 13,
     FEARVR_CMD_DUCK = 14,
     FEARVR_CMD_JUMP = 15,
@@ -23,6 +27,7 @@ enum FearVrGameCommand : std::uint32_t {
     FEARVR_CMD_FIRING = 17,
     FEARVR_CMD_LEAN_LEFT = 20,
     FEARVR_CMD_LEAN_RIGHT = 21,
+    FEARVR_CMD_PITCH_ACCEL = 22,
     FEARVR_CMD_YAW_ACCEL = 23,
     // Der Nahkampf von F.E.A.R. ist der Tritt, und der haengt an der
     // Sekundaerattacke: `CPlayerBodyMgr::UpdateActionProperties` leitet
@@ -44,6 +49,22 @@ enum FearVrGameCommand : std::uint32_t {
     FEARVR_CMD_RELOAD = 88,
     FEARVR_CMD_SLOWMO = 106
 };
+
+// In native VR the headset exclusively owns pitch and roll. Retail's default
+// mouse axes are PITCH_AXIS/YAW_AXIS; gamepad and keyboard pitch variants are
+// included as well so no legacy device can leave a persistent vertical view
+// offset underneath the HMD pose. Yaw acceleration and digital yaw remain
+// available for VR smooth-turn/controller input.
+inline bool IsLegacyVrPitchCommand(std::uint32_t command) noexcept {
+    return command == FEARVR_CMD_PITCH_POS ||
+           command == FEARVR_CMD_PITCH_NEG ||
+           command == FEARVR_CMD_PITCH_AXIS ||
+           command == FEARVR_CMD_PITCH_ACCEL;
+}
+
+inline bool IsLegacyVrMouseYawCommand(std::uint32_t command) noexcept {
+    return command == FEARVR_CMD_YAW_AXIS;
+}
 
 struct FearVrCommandValue {
     float value;
@@ -129,14 +150,11 @@ inline FearVrCommandValue MapControllerCommand(
         (input.activeHands & FEARVR_HAND_MASK_LEFT) != 0;
     const bool rightActive =
         (input.activeHands & FEARVR_HAND_MASK_RIGHT) != 0;
-    const float moveX =
+    const InputVector2 move =
         leftActive
-            ? ApplyInputDeadzone(input.moveX, kStickDeadzone)
-            : 0.0F;
-    const float moveY =
-        leftActive
-            ? ApplyInputDeadzone(input.moveY, kStickDeadzone)
-            : 0.0F;
+            ? ApplyRadialInputDeadzone(
+                  input.moveX, input.moveY, kStickDeadzone)
+            : InputVector2{};
     const float turnX =
         rightActive
             ? ApplyInputDeadzone(input.turnX, kStickDeadzone)
@@ -148,9 +166,9 @@ inline FearVrCommandValue MapControllerCommand(
 
     switch (command) {
     case FEARVR_CMD_FORWARD_AXIS:
-        return {moveY, moveY != 0.0F};
+        return {move.y, move.y != 0.0F};
     case FEARVR_CMD_STRAFE_AXIS:
-        return {moveX, moveX != 0.0F};
+        return {move.x, move.x != 0.0F};
     case FEARVR_CMD_YAW_ACCEL:
         return {turnX, turnX != 0.0F};
     case FEARVR_CMD_YAW_POS:
@@ -158,13 +176,13 @@ inline FearVrCommandValue MapControllerCommand(
     case FEARVR_CMD_YAW_NEG:
         return {1.0F, turnX < 0.0F};
     case FEARVR_CMD_FORWARD:
-        return {1.0F, moveY > 0.0F};
+        return {1.0F, move.y > 0.0F};
     case FEARVR_CMD_REVERSE:
-        return {1.0F, moveY < 0.0F};
+        return {1.0F, move.y < 0.0F};
     case FEARVR_CMD_STRAFE_LEFT:
-        return {1.0F, moveX < 0.0F};
+        return {1.0F, move.x < 0.0F};
     case FEARVR_CMD_STRAFE_RIGHT:
-        return {1.0F, moveX > 0.0F};
+        return {1.0F, move.x > 0.0F};
     case FEARVR_CMD_FIRING:
         return {
             1.0F,

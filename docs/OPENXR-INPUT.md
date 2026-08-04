@@ -102,6 +102,45 @@ Tastatur erreichbar; der manuelle Stick-Klick-Nahkampf wird durch die bereits
 vorhandene Waffenhand-/Off-Hand-Geste ersetzt. Maus, Tastatur und Gamepad
 bleiben parallel aktiv.
 
+### Bewegungsrichtung und Stick-Kennlinie
+
+Fortbewegung folgt standardmäßig Retails körperrelativer Richtung, damit
+freies Umschauen eine gehaltene Bewegungsrichtung nicht verändert. `Move
+direction: Head / Body` im Menü **Movement & Comfort** kann stattdessen die
+horizontale HMD-Richtung aktivieren. Kopfneigung und -rollen werden dabei
+verworfen: Nach oben sehen darf die Geschwindigkeit nicht verringern, und ein
+geneigter Kopf darf keine Seitwärtsbewegung erzeugen. Gespeichert wird die
+Auswahl als `HeadRelativeMovement` in `fearvr.ini`.
+
+Nach der radialen Totzone haelt ein weich auslaufender Vorwaertskorridor
+kleine seitliche Daumenabweichungen auf der Vorwaertsachse. Bewusste
+Diagonalen und Seitwaertsbewegung bleiben unveraendert; diagonales Laufen wird
+nicht schneller als gerades Laufen.
+
+Die 22-Prozent-Totzone des Bewegungssticks ist radial. Sie verändert nur den
+Radius, nicht den Winkel des Stickvektors, und begrenzt volle Diagonalen auf
+Einheitslänge. Dadurch ziehen kleine diagonale Eingaben nicht mehr zu den
+Hauptachsen und diagonales Laufen wird nicht schneller als gerades Laufen.
+Der Drehstick bleibt eine eindimensionale Retail-Drehachse mit eigener
+Totzone; Sprung und Ducken werten weiterhin den unveränderten vertikalen
+Stickweg ab 80 Prozent aus.
+
+### Raumskalige HMD-Translation (`HMD translation`, Standard aus)
+
+Mit `HMD translation: On` beziehungsweise `-Translation` wird die Bewegung
+des HMD relativ zum Recenter-Ursprung 1:1 auf Blickpunkt, Hände, Waffe,
+Mündung und Schussursprung übertragen. Normale Bewegung im Spielbereich wird
+nicht mehr auf den früheren 25-cm-Leanbereich gekürzt; lediglich ein 2-m-Limit
+verwirft unplausible Tracking-Sprünge. Derselbe Weltstrahl wie beim physischen
+Lehnen begrenzt den Versatz vor Wänden.
+
+Dieser Modus hat Vorrang vor `Physical lean`: `LeanScale` verstärkt
+Raumbewegung nicht. Das sichtbare Körpermodell folgt dem erlaubten
+horizontalen Versatz über seinen Skelettwurzelknoten. Retails Spielerobjekt
+und Kollisionskapsel bleiben am normalen Bewegungsursprung, weil ein Verschieben
+des HOBJECT während `RenderCamera` die Sichtbarkeitslisten des Motors
+beschädigen kann.
+
 ### Physisches Lehnen (`Physical lean`, Standard an)
 
 F.E.A.R.s eigenes Lehnen ist ausschließlich eine Drehung: `CLeanMgr` berechnet
@@ -110,9 +149,9 @@ einen Winkel, den `CPlayerCamera` als Rollen auf die Kamera legt
 Der Blickpunkt bleibt dabei exakt in der Spielerposition — um eine Ecke sehen
 kann man damit nicht, es kippt nur das Bild.
 
-Deshalb bewegt jetzt der physische Kopfversatz aus dem Headtracking den
-Blickpunkt mit. Das ist dieselbe Größe, die bisher nur mit `-Translation`
-verfügbar war, nur wird sie an der Weltgeometrie begrenzt: Ein Strahl von der
+Wenn die raumskalige HMD-Translation aus ist, bewegt der physische Kopfversatz
+aus dem Headtracking den Blickpunkt mit. Er bleibt auf 25 cm begrenzt und wird
+an der Weltgeometrie geprüft: Ein Strahl von der
 Spielerkameraposition entlang des gewünschten Versatzes misst die freie
 Strecke, und `src/common/lean_collision.h` macht daraus den Anteil, der übrig
 bleibt (12 Einheiten Sicherheitsabstand zur Fläche). Enger werden gilt sofort,
@@ -144,10 +183,10 @@ weltbegrenzte physische Lean-Versatz.
 Solange physisches Lehnen aktiv ist, entfällt Retails Kameraneigung über die
 linke Handneigung (`COMMAND_ID_LEAN_LEFT`/`_RIGHT` werden dann nicht mehr
 injiziert). Beides zusammen kippte das Bild zusätzlich zu einer Bewegung, die
-der Spieler ohnehin selbst macht. Mit `Physical lean: OFF` ist die Handneigung
+der Spieler ohnehin selbst macht. Mit `Physical lean: Off` ist die Handneigung
 unverändert da.
 
-Umschaltbar im VR-Menü unter `Physical lean: ON / OFF`, gespeichert als
+Umschaltbar im VR-Menü unter `Physical lean: On / Off`, gespeichert als
 `PhysicalLean` in `fearvr.ini`.
 
 ### Physisches Ducken (`Physical duck`, Standard an)
@@ -161,7 +200,7 @@ Betriebsarten unveraendert nutzbar. Umschaltbar im VR-Menue, gespeichert als
 ### Klettern an Leitern (abschaltbar, Standard aus)
 
 Umschaltbar im VR-Menü unter `Ladder climbing: HANDS / CLASSIC`, gespeichert
-als `Climbing` in `fearvr.ini`. Standard ist `CLASSIC`, also die
+als `Climbing` in `fearvr.ini`. Standard ist `Classic`, also die
 Retail-Steuerung über den Stick. An einer Leiter
 greift dann ein Grabknopf die Sprosse, und die Bewegung dieser Hand **pro
 Bild** treibt das Klettern: Ziehen nach unten klettert aufwärts, beim
@@ -299,19 +338,23 @@ normale Schläge funktionieren dann weiterhin sofort, Kicks bleiben aus.
 
 Maus, Tastatur und vorhandenes Gamepad bleiben parallel nutzbar.
 
-### 2D-Panel-Recenter
+### VR-Origin-Recenter
 
-Die 3D-Welt besitzt bewusst keinen manuellen Headtracking-Recenter mehr. Ihre
-stabile Kamerabasis wird beim Betreten automatisch initialisiert. In Menüs,
-Ladebildern, Briefings und anderen 2D-Ansichten verankern F9, rechter
-Stick-Klick und `Recenter 2D panel` das raumfeste Panel neu an der aktuellen
-Blickrichtung. Derselbe Stickklick fordert in der 3D-Welt stattdessen Retails
-Sekundärangriff an; der aktuelle Bewegungszustand wählt normalen Schlag, Jump
-Kick oder Slide Kick.
+Die stabile Kamerabasis wird beim Betreten automatisch initialisiert. Der Host
+bevorzugt `LOCAL_FLOOR`, danach `STAGE` und nutzt `LOCAL` als kompatiblen
+Fallback. F9 und `Recenter VR origin` speichern die horizontale HMD-Position
+und den aktuellen Yaw als neuen Ursprung; Pitch, Roll und die getrennte
+Fußboden-/Augenhöhenkalibrierung bleiben physisch. Controllerkalibrierung,
+Waffengewicht, Rückstoß und Kollisionsfilter werden gleichzeitig auf diese
+Basis zurückgesetzt. In Menüs, Ladebildern, Briefings und anderen 2D-Ansichten
+wird zusätzlich das raumfeste Panel an der aktuellen Blickrichtung verankert.
+Rechter Stick-Klick rezentriert weiterhin nur ein sichtbares 2D-Panel; in der
+3D-Welt bleibt er Retails Sekundärangriff, damit keine Gameplay-Aktion verloren
+geht.
 
 ### Linkshänderbelegung
 
-`Controls: RIGHT-HANDED / LEFT-HANDED` im VR-Menü spiegelt die komplette
+`Controls: Right-handed / Left-handed` im VR-Menü spiegelt die komplette
 Belegung: Waffe, Feuern, Benutzen und Waffenwechsel wandern in die linke Hand,
 Bewegung, Taschenlampe, Lehnen, Zeitlupe und Pause in die rechte.
 
@@ -403,22 +446,32 @@ Rennen und Lehnen sind für die Dauer des Griffs gelöst, sonst liefen beide
 dauerhaft mit, sobald man beidhaendig zielt. Zum Sprinten die Stützhand also
 abnehmen.
 
-**Wirkung auf das Zielen.** Die Linie zwischen beiden Händen übernimmt die
-Feuerachse anteilig, gewichtet nach Waffenlänge — eine Pistole bleibt allein an
-der rechten Hand, ein Gewehr liegt in beiden. Als Länge dient der gemessene
-Abstand zwischen Waffenursprung und Mündungssockel (`muzzleOffsetInWeapon`,
-derselbe Wert, aus dem auch die Mündungskorrektur entsteht); er ist der
-einzige Waffenkennwert, den wir ohne Retail-Waffendatenbank verlässlich haben.
-Die Rampe läuft von 0 bei 0,20 m auf 0,75 ab 0,35 m (`TwoHandedAimBlend`).
+**Wirkung auf das Zielen.** Beim Zugreifen wird der tatsächliche linke
+Griffpunkt im lokalen Waffenraum gespeichert. Danach löst jeder Frame die
+Waffe als starre Verbindung zwischen beiden getrackten Griffen:
 
-Gedreht wird über die kürzeste Drehung zwischen alter und neuer Vorwärtsachse.
-Damit bleibt die Neigung der rechten Hand erhalten — die Waffe kippt in der
-Hand, statt sich um die eigene Achse zu verdrehen. Zwei Sicherungen begrenzen
-das: unter 0,12 m Handabstand ist die Linie nur noch Trackingrauschen. Und der
-Lenkwinkel wird weich gedämpft (`SoftLimitedSteerAngle`): bis 55° folgt die
-Waffe eins zu eins, darüber wächst der Winkel nur noch gedämpft weiter und
-läuft asymptotisch gegen 90°, ohne sie je zu erreichen. Die Steigung am
-Übergang ist 1, der Verlauf also knickfrei.
+1. Die rechte Hand liefert die Basisausrichtung einschließlich Roll.
+2. Die kürzeste Drehung richtet den gespeicherten lokalen Stützvektor auf die
+   aktuelle Linie zwischen beiden Händen.
+3. Nach der Drehung wird die Waffenposition so korrigiert, dass der lokale
+   Stützgriff exakt auf der linken Grip-Pose liegt.
+
+Damit ist die linke Hand der räumliche Drehpunkt: Bewegt sich die rechte Hand
+bei ruhiger Stützhand, schwenkt die Waffe um links, statt das sichtbare linke
+Handmodell um einen dauerhaft rechten Waffenursprung zu ziehen. Da der lokale
+Griffpunkt im ersten Frame aus genau den aktuellen Posen gemessen wird, ist die
+erste Lösung identisch zur bestehenden Waffenpose und braucht keine
+Einblendrampe.
+
+Die Waffe wird dabei nie skaliert. Ändert der Spieler den Abstand zwischen den
+Controllern gegenüber dem gespeicherten Griffabstand, bleibt die Stützhand
+exakt; die rechte sichtbare Waffenhand darf entlang der starren Waffe von der
+physischen rechten Hand abweichen, bis der Abstand wieder passt. Zwei
+Sicherungen begrenzen unbrauchbare Posen: Unter 0,12 m Handabstand ist die Linie
+nur noch Trackingrauschen. Der Lenkwinkel wird außerdem weich gedämpft
+(`SoftLimitedSteerAngle`): bis 55° folgt die Waffe eins zu eins, darüber wächst
+der Winkel nur noch gedämpft weiter und läuft asymptotisch gegen 90°, ohne sie
+je zu erreichen. Die Steigung am Übergang ist 1, der Verlauf also knickfrei.
 
 Zwei Fehler dieser Begrenzung sind im echten Lauf aufgefallen:
 
@@ -445,12 +498,14 @@ unserem Hand-Node-Override werden Retails animierte `RightHand`- und
 `LeftHand`-Sockets gelesen. Ihr relativer Transform ist der originale,
 waffenspezifische Griffpunkt und wird anschließend mit der VR-bewegten Waffe
 mitgeführt. Dadurch sitzen Handfläche und Handrotation beispielsweise bei
-Shotgun, SMG und Gewehr wieder an dem vom Spiel vorgesehenen Vordergriff. Die
-physische Stützhand steuert weiterhin die Feuerachse und wird nur für die
-Darstellung vom animierten Griff entkoppelt.
+Shotgun, SMG und Gewehr wieder an dem vom Spiel vorgesehenen Vordergriff. Der
+starre Zwei-Anker-Solver verschiebt die Waffe so, dass genau dieser Retail-Griff
+an der physischen Stützhand liegt; die Weltkollision verschiebt beide
+Griffziele gemeinsam und erhält die Zweihandbedingung.
 
 Abschaltbar über `TwoHandGrip=0` in `fearvr.ini`.
-`tests/test_two_handed_grip.cpp` deckt Erkennung, Hysterese und Gewichtung ab.
+`tests/test_two_handed_grip.cpp` deckt Erkennung, Hysterese, Winkelbegrenzung
+und die starre Pivot-Translation ab.
 
 ### Lehnen über die Handneigung
 
@@ -489,59 +544,112 @@ erkannt.
 
 ## VR-Einstellungen im Pausenmenü
 
-`VR SETTINGS` wird in der verifizierten Retail-1.08-Klasse
+`VR Settings` wird in der verifizierten Retail-1.08-Klasse
 `CMenuSystem` direkt nach „Optionen“ ergänzt. Die Seite verwendet dieselbe
 native Menüliste und ist deshalb mit Tastatur und VR-Controller bedienbar:
 Stick navigiert, A oder Trigger bestätigt, B geht zurück.
 
-Die Seite verwendet den von Retail dynamisch bemessenen Rahmen und scrollt so,
-dass die aktuelle Auswahl beim Wechsel zwischen den sichtbaren Zeilengruppen
-im Rahmen bleibt:
+Die native Liste bildet eine kurze Kategorieübersicht mit sechs Unterseiten.
+Jede Unterseite bleibt klein genug für den nativen 320px-Rahmen. `Back`
+beziehungsweise Controller-B kehrt von einer Unterseite zuerst zur
+Kategorieübersicht zurück und verlässt `VR Settings` erst von dort. Werte
+werden sofort angewendet und in `stage/userdata-m5/fearvr.ini` gespeichert.
+Numerische Einstellungen verwenden sichere Presets; exakte Zwischenwerte
+können weiterhin direkt in der INI gesetzt werden.
 
-1. Stereo rendering
-2. Stereo HUD
-3. Weapon weight: NONE / LIGHT / MEDIUM / HEAVY
-4. Red aim guide
-5. Controller vibration
-6. Flashlight mount: LEFT HAND / HEAD / WEAPON
-7. Controls: RIGHT-HANDED / LEFT-HANDED
-8. Ladder climbing: HANDS / CLASSIC
-9. Physical lean: ON / OFF
-10. Physical duck: ON / OFF
-11. Melee: GESTURES / CLASSIC
-12. Show arms: ON / OFF
-13. FOV scale: 100% / 110% / 120% / 130%
-14. Turn speed
-15. Recenter 2D panel
-16. Reset VR defaults
-17. BACK
+1. **Display & HUD:** Stereo rendering, Stereo HUD, FOV scale.
+2. **Movement & Comfort:** HMD translation, head bob, comfort screen,
+   movement direction, smooth-turn speed, physical leaning and lean strength.
+3. **Controls:** handedness, controller vibration, ladder climbing,
+   flashlight mount, physical duck and Recenter VR origin.
+4. **Weapons:** three nested pages keep the list bounded: Handling & appearance
+   contains red aim guide, show arms and two-handed grip; Simulated weight
+   contains None/Light/Medium/Heavy presets plus the per-weapon profile
+   controls; Recoil contains its independent toggle, overall strength, muzzle
+   rise and recovery speed.
+5. **Melee:** master toggle and individual weapon strike, off-hand strike,
+   jump kick and slide kick toggles.
+6. **Advanced:** weapon diagnostics and Reset VR defaults.
+
+Weapon recoil defaults on independently of simulated weapon weight. Every shot
+confirmed by Retail adds a short backward kick and muzzle rise; strength,
+muzzle-rise and recovery presets are applied immediately; overall strength
+extends to 500%. Values are persisted as
+`WeaponRecoilStrength`, `WeaponRecoilMuzzleRise` and `WeaponRecoilRecovery` in
+the `[VR]` section. The recoil uses the same successful fire-vector call as
+controller vibration, so an empty or otherwise rejected trigger pull does not
+move the weapon.
+
+### Floating live tuning
+
+During gameplay, holding both grip buttons and pressing B opens a world-space
+developer panel at the current view. The verified right-hand weapon ray is also
+used for panel hit testing: point at a tab or row and press trigger or A to
+select, toggle or cycle it. Right-stick left/right switches tabs and up/down
+moves the row selection when a ray hit is unavailable; B closes the panel.
+
+The panel has eight bounded tabs:
+
+1. **Recoil:** enabled, Default/Current profile target, strength, muzzle rise
+   and recovery.
+2. **Weight:** enabled, Default/Current profile target, weight,
+   position/rotation follow and catch-up.
+3. **Collide:** world collision, visible collision box, Default/Current
+   profile target, box length, width, height and forward offset.
+4. **Weapon:** aim guide, arm visibility and two-handed grip.
+5. **IK:** two live pages. Elbows exposes arm visibility, body-relative
+   outward/down/back pole components, continuity through straight-arm poses,
+   and an IK reset. Left Hand exposes controller-local right/up/forward offsets
+   plus pitch/yaw/roll correction.
+   Each activation advances elbow components by 5 percent, hand translation
+   by 0.5 cm, or hand rotation by 5 degrees, with safe-range wraparound.
+6. **Move:** HMD translation, Body/Head movement direction, head bob, physical
+   lean/strength, turn speed, hand climbing, current eye-height mode and `Set
+   height from HMD`. The explicit floor-to-eye value persists as
+   `EyeHeightMeters`; activating the height row restores automatic per-session
+   calibration.
+7. **Melee:** master gesture switch and each individual strike/kick.
+8. **VR:** stereo HUD, FOV scale, handedness, haptics, weapon diagnostics and
+   live stereo render scale (100/125/150/175/200 percent).
+
+Changes take effect immediately and use the same `SaveVrSettings` path as the
+native menu, including per-weapon weight, recoil, and collision profiles. A
+render-scale change recreates the off-screen eye resources on the next frame
+while leaving the Retail backbuffer unchanged. Stereo disable, comfort
+screen, panel recenter and Reset Defaults remain pause-menu-only because they
+would hide the live panel or are too easy to trigger accidentally. Controller
+gameplay injection, gesture pulses and climbing are suppressed while the panel
+is open and remain suppressed until the opening/closing controls are released.
+The Recoil, Weight, Collide, and Weapon tab headers show the equipped model.
+Current recoil overrides are stored under `[WeaponRecoil.<model-name>]` and
+collision overrides under `[WeaponCollision.<model-name>]`; a weapon with no
+override continues to use its global `[VR]` values. The collision wireframe is
+also shown automatically while the Collide tab is open. Green means clear,
+red means a probe is obstructed, and blue means visualization is active while
+world collision is disabled.
+
+The visible left hand now uses the OpenXR grip pose for both position and
+rotation. Earlier builds mixed grip position with the independently calibrated
+aim-pose rotation, which could twist the Retail hand away from the physical
+controller. IK values persist in `[VR]` as `IkElbow*` and `IkLeftHand*` keys;
+the hand offsets are applied in controller-local space and therefore follow
+the controller naturally while it rotates.
+
+`Show arms` ist standardmäßig `Off`: Nur Ober- und Unterarme werden über ein
+lokal erzeugtes Alpha-Test-Material ausgeblendet; Hände, Torso und Beine
+bleiben sichtbar. `On` setzt sofort das unveränderte Retail-Material ein.
+Die Auswahl wird als `ShowArms` gespeichert.
 
 Die vier Gewichtsstufen skalieren das konfigurierte Waffenprofil mit `0`,
 `0,5`, `1` oder `2`. Die Auswahl wird als `WeaponWeightPreset` gespeichert;
 eine vorhandene Konfiguration mit `WeaponWeightEnabled=1` und ohne Preset wird
-aus Kompatibilitätsgründen als `MEDIUM` geladen.
-
-`Show arms` ist standardmäßig `OFF` und verwendet ein lokal erzeugtes
-Alpha-Test-Material, das nur Ober- und Unterarme ausblendet. Hände, Torso und
-Beine bleiben sichtbar; der Kopf wird über seinen separaten Materialslot
-verborgen. `ON` setzt das unveränderte Retail-Material ein. Die Auswahl wird
-als `ShowArms` gespeichert. Die Maske wird für alle elf DXT3-Mipmaps erzeugt,
-damit Hände und Körper auch beim Wechsel auf kleinere Texturstufen sichtbar
-bleiben.
+aus Kompatibilitätsgründen als `Medium` geladen.
 
 `FOV scale` erweitert das symmetrische Sichtfeld in Tangentenraum und wirkt
 gleichzeitig auf Retails Stereokamera und die an OpenXR übermittelte
 Projektionsschicht. Dadurch bleiben Bild und Headset-Projektion deckungsgleich.
 `130%` ist der VR-Standard; die Auswahl wird als `FovScale`
 gespeichert.
-
-Die vier einzelnen Nahkampfaktionen gehören in `fearvr.ini` statt als vier
-weitere Zeilen auf die native Seite.
-
-HMD-Translation, Head-Bob und Komfortbildschirm bleiben als Einstellungen
-erhalten und werden weiterhin aus `fearvr.ini` gelesen und dorthin
-geschrieben, stehen aber nicht auf der sichtbaren Seite. Ein zweistufiges Menü
-wurde verworfen.
 
 Die Taschenlampe ist ein eigener Spot-Projektor ohne Batterieverbrauch und
 über X schaltbar. `Flashlight mount` wählt zwischen linker Hand, Kopf und
@@ -606,7 +714,7 @@ visuellen Iteration im Headset erneut abgenommen.
 
 ### Warum die Auswahl gesprungen ist
 
-Jeder Umschalter besteht aus zwei Controls (`… : ON` und `… : OFF`), von denen
+Jeder Umschalter besteht aus zwei Controls (`… : On` und `… : Off`), von denen
 immer eines versteckt ist. Das ist für die Navigation unkritisch, weil
 `CLTGUICtrl::IsEnabled()` als `m_bEnabled && IsVisible()` definiert ist und
 `CLTGUIListCtrl::NextSelection` unsichtbare Einträge damit korrekt überspringt.
@@ -618,24 +726,16 @@ aller Controls aufsummiert — **ohne** `IsVisible()` zu prüfen.
 Beide Rechnungen widersprechen sich, sobald versteckte Geschwister-Controls
 dazwischenliegen, und `m_nFirstShown` wird falsch gesetzt.
 
-Die verkürzte VR-Seite passt vollständig in den nativen Rahmen. Der
-Listenanfang wird deshalb bei 0 festgehalten, solange die Seite aktiv ist —
-und zwar in jedem Client-Update, weil Tastatur, Maus und Controller alle
-direkt über `NextSelection` navigieren und nicht über den eigenen Hook.
+Jede Kategorieunterseite passt vollständig in den nativen Rahmen. Der
+Listenanfang wird deshalb bei 0 festgehalten, solange irgendeine VR-Seite
+aktiv ist — und zwar in jedem Client-Update, weil Tastatur, Maus und Controller
+alle direkt über `NextSelection` navigieren und nicht über den eigenen Hook.
 
-Änderungen werden sofort angewendet und in `stage/userdata-m5/fearvr.ini`
-gespeichert.
-
-Zusätzlich in `fearvr.ini`, ohne Menüeintrag:
-
-- `MeleeWeaponStrike=1` — Stoß der Waffenhand.
-- `MeleeOffHandStrike=1` — Off-Hand Strike.
-- `MeleeJumpKick=1` — Jump Kick auf einem vorhandenen Spielersprung.
-- `MeleeSlideKick=1` — bewachter Slide-Kick-Sequencer.
-
-`MeleeGestures=1` ist der vom Menüeintrag `Melee: GESTURES / CLASSIC`
-gespeicherte Master-Schalter. Neue und bestehende Konfigurationen ohne diese
-Schlüssel verwenden `1`; jede Aktion kann mit `0` einzeln abgeschaltet werden.
+`MeleeGestures=1` ist der Master-Schalter. `MeleeWeaponStrike`,
+`MeleeOffHandStrike`, `MeleeJumpKick` und `MeleeSlideKick` bleiben getrennte
+persistierte Werte, sind nun aber ebenfalls auf der Melee-Unterseite
+erreichbar. Untergeordnete Schalter werden ausgeblendet, wenn der
+Master-Schalter auf `Classic` steht.
 
 - `ShowArms=0` — vom Menü gespeicherter Schalter; `0` ist der Standard und
   verwendet die VR-Armmaske, `1` das vollständig sichtbare Retail-Material.

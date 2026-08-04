@@ -1,11 +1,17 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
 #include "protocol.h"
 
 namespace fearvr {
+
+struct InputVector2 {
+    float x{0.0F};
+    float y{0.0F};
+};
 
 inline bool IsInputStateUsable(
     const FearVrInputState& state, bool sampleFresh) noexcept {
@@ -162,6 +168,70 @@ inline float ApplyInputDeadzone(
         (std::fabs(value) - deadzone) / (1.0F - deadzone);
     const float clamped = magnitude > 1.0F ? 1.0F : magnitude;
     return value < 0.0F ? -clamped : clamped;
+}
+
+// A thumbstick is a circular control. Applying the deadzone independently to
+// X and Y bends diagonal input toward the cardinal axes and permits a full
+// diagonal to have sqrt(2) times the cardinal magnitude. Preserve the stick
+// angle, remap only its radius, and clamp the final vector to the unit circle.
+inline InputVector2 ApplyRadialInputDeadzone(
+    float x, float y, float deadzone) noexcept {
+    if (!std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(deadzone) || deadzone < 0.0F ||
+        deadzone >= 1.0F) {
+        return {};
+    }
+    const float magnitudeSquared = x * x + y * y;
+    if (!std::isfinite(magnitudeSquared) ||
+        magnitudeSquared <= deadzone * deadzone ||
+        magnitudeSquared < 1.0e-8F) {
+        return {};
+    }
+    const float magnitude = std::sqrt(magnitudeSquared);
+    const float clampedMagnitude = (std::min)(magnitude, 1.0F);
+    const float remappedMagnitude =
+        (clampedMagnitude - deadzone) / (1.0F - deadzone);
+    const float scale = remappedMagnitude / magnitude;
+    return {x * scale, y * scale};
+}
+
+// Real thumbs rarely hold a physical stick on the exact twelve-o'clock line.
+// Preserve deliberate diagonals, but create a small, smoothly released
+// forward/back corridor so ordinary lateral thumb drift does not make the
+// player weave. Magnitude is preserved throughout the assisted region.
+inline InputVector2 ApplyForwardAxisAssist(
+    float x, float y, float lockRatio = 0.25F,
+    float releaseRatio = 0.55F) noexcept {
+    if (!std::isfinite(x) || !std::isfinite(y) ||
+        !std::isfinite(lockRatio) || !std::isfinite(releaseRatio) ||
+        lockRatio < 0.0F || releaseRatio <= lockRatio) {
+        return {};
+    }
+    const float absoluteY = std::fabs(y);
+    if (absoluteY < 1.0e-6F) {
+        return {x, y};
+    }
+    const float ratio = std::fabs(x) / absoluteY;
+    if (ratio >= releaseRatio) {
+        return {x, y};
+    }
+    const float magnitude = std::sqrt(x * x + y * y);
+    if (!std::isfinite(magnitude) || magnitude < 1.0e-6F) {
+        return {};
+    }
+    float lateralScale = 0.0F;
+    if (ratio > lockRatio) {
+        const float t = std::clamp(
+            (ratio - lockRatio) / (releaseRatio - lockRatio),
+            0.0F, 1.0F);
+        lateralScale = t * t * (3.0F - 2.0F * t);
+    }
+    const float assistedX = x * lateralScale;
+    const float assistedYMagnitude = std::sqrt((std::max)(
+        0.0F, magnitude * magnitude - assistedX * assistedX));
+    return {
+        assistedX,
+        std::copysign(assistedYMagnitude, y)};
 }
 
 } // namespace fearvr

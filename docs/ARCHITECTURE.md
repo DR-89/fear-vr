@@ -224,8 +224,14 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   Korrekte positionelle Nachprojektion benötigt einen zum Bild gehörenden
   Tiefenpuffer; bis dahin wird Stick-Latenz durch frischere Bildübertragung
   statt durch tiefenlose Layer-Translation reduziert.
-  Translation besitzt noch keine Weltkollision und bleibt deshalb
-  standardmäßig aus.
+  Opt-in-Raumbewegung bleibt 1:1 bis zu einem 2-m-Sprungschutz,
+  wird einmal pro Bild gegen die Welt begrenzt und verschiebt den sichtbaren
+  Skelettwurzelknoten horizontal mit. F9 und das VR-Menü setzen Position, Yaw
+  sowie alle trackingabhängigen Hand-/Waffenfilter gemeinsam zurück.
+  Retails eigentliches Spieler-HOBJECT und seine Kollisionskapsel bleiben am
+  Lokomotionsursprung: Ein Verschieben während `RenderCamera` beschädigte die
+  Sichtbarkeitslisten. Der Kamerastrahl verhindert Wanddurchtritt, ersetzt
+  aber keine vollständig mitlaufende Gameplay-Kapsel.
 - **Rückfallpfad:** Bei 250 ms ohne frische Pose wird Mono verwendet; die erste
   wieder gültige Pose wird neu zentriert. F8 stellt den originalen
   Kamera-Renderpfad wieder her.
@@ -350,6 +356,23 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   übernommen werden, weil ihre ursprünglich ungenutzten Alpha-Werte Körper und
   Hände beim Alpha-Test verwerfen würden. Das Material übernimmt
   `SurfaceFlags=0` von Retails funktionierenden Alpha-Test-Körpermaterialien.
+- **Arm-IK:** Ober- und Unterarm verwenden einen analytischen Zwei-Knochen-
+  Solver mit gemessenen Retail-Knochenlaengen. Ein koerperrelativer Polvektor
+  fuehrt beide Ellenbogen nach aussen, unten und leicht hinter den Brustkorb;
+  die zuletzt gueltige Beugehemisphaere bleibt an gestreckten oder zum
+  Polvektor parallelen Posen erhalten. Der Hand-Socket wird anschliessend
+  weiterhin exakt auf die OpenXR-Grip-Pose gesetzt.
+- **Live-Kalibrierung:** Das schwebende IK-Menue kann die gemeinsamen
+  koerperrelativen Polkomponenten und den linken Handversatz zur Laufzeit
+  veraendern. Die linke sichtbare Hand verwendet fuer Position und Rotation
+  dieselbe OpenXR-Grip-Pose; ein lokaler Sechs-Achsen-Versatz wird erst danach
+  angewendet und veraendert weder Waffensteuerung noch Schussachse.
+- **Zweihand-Constraint:** Beim Greifen wird der linke Griffpunkt im lokalen
+  Waffenraum gespeichert. Die rechte Pose liefert Roll, die Verbindungslinie
+  beider Controller die Richtung; eine anschliessende Translation setzt den
+  gespeicherten Punkt exakt auf die linke Grip-Pose. Der Stützgriff ist damit
+  ein räumlicher Pivot statt eines an der rechten Waffenhand befestigten
+  Dekorationspunkts. Die Waffe bleibt starr und wird nicht skaliert.
 - **Bekannte Nachteile:** Knochen zu skalieren oder zu verschieben scheidet
   aus. Node-Control liefert nur einen `LTRigidTransform`, und ein Kollabieren
   der Armknochen erzeugt bei geskinnten Meshes einen sichtbaren Splitter vom
@@ -378,7 +401,7 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Getestete Optionen:** eigenes VR-Overlay, zweistufiges Menü mit
   `MORE SETTINGS >`, kleinere Fonthöhe über `SetFontHeight`, zusätzliches
   `Enable(false)` auf versteckten Controls.
-- **Gewählte Lösung:** ein englisch beschrifteter Eintrag `VR SETTINGS` direkt
+- **Gewählte Lösung:** ein englisch beschrifteter Eintrag `VR Settings` direkt
   hinter „Optionen“, als **eine** kompakte Seite mit elf Einträgen, die
   vollständig in den nativen Rahmen passt. Solange die Seite aktiv ist, wird
   der Listenanfang in jedem Client-Update auf 0 festgehalten — nicht nur im
@@ -395,6 +418,13 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 - **Rückfallpfad:** Bei Signaturabweichung wird kein Menü-Hook installiert; das
   ESC-Menü bleibt unverändert und alle Werte weiterhin über `fearvr.ini`
   einstellbar.
+- **Nachtrag 29.07.2026:** Die einzelne Seite wurde durch eine
+  Kategorieübersicht mit sechs kurzen Unterseiten ersetzt. Damit sind die
+  bisher nur in `fearvr.ini` erreichbaren Komfort- und Melee-Schalter sowie
+  sichere Presets für globale oder waffenspezifische Weight-Profile direkt im
+  Spiel einstellbar. Jede Unterseite passt weiterhin vollständig in den
+  nativen Rahmen; Root-/Back-Zustand und Presetwahl liegen als unabhängig
+  testbares Modell in `src/common/vr_menu_model.h`.
 - **Details:** `docs/OPENXR-INPUT.md`, `docs/TESTING.md` §11 und §14.
 
 ### AD-015 — Lehnen über die Rolllage der linken Hand
@@ -535,6 +565,84 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   Ziele unterhalb von `%LOCALAPPDATA%` mit einer erklaerenden Meldung ab.
 - **Offen:** Die Ursache im Retail-Binary ist nicht geklaert. Dokumentiert ist
   die gemessene Regel, keine Erklaerung.
+
+### AD-021 — OpenXR-Auftrag als Frame-Takt, neuestes fertiges Bild gewinnt
+
+- **Problem:** VDXR nahm weiterhin 90 Bilder pro Sekunde entgegen, während
+  schnelle Controllerbewegungen sichtbare Doppelbilder erzeugten. Der
+  Classic-D3D9-CPU/D3D9Ex-Pfad behielt bei einem belegten Ausgabeslot das
+  älteste fertige Bild am Kopf der Queue. FEAR renderte außerdem mehrere
+  Stereopaare mit derselben OpenXR-Auftrags-ID.
+- **Messung/Beleg:** Lauf `fearvr-20260731-063123` zeigte bei 90 XR-fps
+  45–87 als `reused` bezeichnete Einreichungen je 300 Frames und beim ersten
+  passenden Stereobild sieben Auftragsframes Alter. Der damalige Zähler
+  verglich allerdings nur `frameId` und vermischte dadurch eine neue
+  Texturgeneration mit derselben Pose mit einem wirklich wiederverwendeten
+  Bild.
+- **Getestete Optionen:** (a) ein festes 90-fps-Limit — verworfen, weil die
+  Runtime auch 72, 80 oder 120 Hz liefern kann und ein freilaufendes Limit
+  nicht phasengleich zu `xrWaitFrame` ist; (b) synchroner Readback in
+  `Present` — nur Diagnose, weil er den Spielthread blockiert; (c) den
+  neuesten OpenXR-Auftrag als Taktgeber verwenden und die ohnehin anfallende
+  Transferarbeit in dessen begrenztes Wartefenster legen.
+- **Gewählte Lösung:** Der Host signalisiert nach jedem vollständig
+  veröffentlichten Renderauftrag ein eigenes Auto-Reset-Event. Will FEAR
+  dieselbe Auftrags-ID erneut rendern, wartet die Bridge höchstens 20 ms.
+  Während dieses begrenzten Fensters werden fertige D3D9-Stagingkopien
+  gelesen, nach D3D9Ex hochgeladen und abgeschlossene Slots freigegeben.
+  Mehrere fertige Capture-Einträge werden auf den neuesten reduziert; bei
+  belegtem Ausgabering wird das Bild verworfen statt später veraltet
+  ausgeliefert. Doppelte Stereo-Auftrags-IDs werden nicht erneut gecaptured.
+- **Messung:** Im stabilen Stereoteil von
+  `fearvr-20260731-065041` liefen XR und importierte Spielbilder beide mit
+  89,1–90,1 fps. Echte Wiederverwendung lag typischerweise bei 0–3 von
+  300 Frames, das mittlere Auftragsalter bei einem und das Maximum meist bei
+  ein bis zwei Frames. Nach der Startphase gab es keine neuen
+  Queue-/Slot-Drops; vereinzelte begrenzte Pacing-Timeouts traten nur bei
+  Runtime-/EndFrame-Einbrüchen auf.
+- **Bekannte Nachteile:** Der Classic-D3D9-Kompatibilitätspfad benötigt
+  weiterhin einen GPU-zu-CPU-Readback. Seine Arbeit liegt nun im
+  Frame-Pacing-Fenster, ist aber nicht kostenlos. 2D-Startmenüs vor dem
+  ersten nativen Stereoframe bleiben bewusst freilaufend.
+- **Rückfallpfad:** `-fearvr-no-xr-frame-pacing` lässt FEAR für einen
+  A/B-Test wieder mehrere Renderdurchläufe pro OpenXR-Auftrag ausführen.
+  Jeder Wait ist auch ohne diesen Schalter hart begrenzt; bei Hostverlust
+  rendert FEAR mit dem letzten Auftrag weiter und kann nicht zyklisch auf den
+  Host warten.
+
+### AD-022 — Stereo supersampling without changing the Retail display mode
+
+- **Problem:** The VDXR run `fearvr-20260731-065041` used 3072×3264 OpenXR
+  swapchains per eye, but the imported game images were only 1280×1024.
+  Jupiter EX rejected a manually configured 2560×1440 Retail mode and reset
+  it to 640×480.
+- **Source evidence/tested option:** The earlier attempt to force the entire
+  Retail backbuffer to a 1920×1080 window in `CreateDevice`/`Reset` broke the
+  flat-menu projection and was removed by `9fd783e`. Increasing only the
+  OpenXR swapchain resolution cannot create additional scene detail.
+- **Selected probe:** `-fearvr-render-scale 100..200` scales only the render
+  targets used by the two native stereo world passes. Before each eye, the
+  bridge saves render target 0, the depth-stencil surface, and the viewport;
+  selects a matching larger off-screen target; then restores every saved
+  state. With MSAA, the eye first renders into an equivalently multisampled
+  target and resolves into the sampleable single-sample capture texture.
+  Menus, videos, and the Retail window retain their original backbuffer.
+- **Failure path:** If an off-screen target cannot be created or activated,
+  the existing backbuffer capture remains active and a structured log event
+  records the HRESULT. Failed or interrupted eye renders also restore D3D9
+  state and cannot publish an incomplete stereo pair.
+- **Viewport correction:** Jupiter resets the viewport and scissor rectangle
+  to the cached Retail dimensions from inside `RenderCamera`. The bridge
+  intercepts those calls and scales them only when render-target 0 is the
+  active supersampled eye surface. It restores both values after the eye;
+  internal post-processing targets, menus, and transfer devices are not
+  modified.
+- **Known cost/open measurement:** The Classic D3D9 path still reads through
+  the CPU; 150 percent linear scaling produces 2.25 times as many pixels.
+  Live testing must also establish whether Jupiter's internal post-processing
+  targets follow the active target size or remain at the Retail resolution.
+- **Rollback:** `-RenderScale 100` or `-fearvr-render-scale 100` uses the
+  original rendering path.
 
 ## 3. Noch zu dokumentieren (Pflicht laut §17)
 

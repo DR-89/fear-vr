@@ -23,6 +23,8 @@ BOOL IsStereoAvailable() noexcept;
 BOOL IsStereoEnabled() noexcept;
 void SetStereoEnabled(BOOL enabled) noexcept;
 void SetFovScalePercent(std::uint32_t percent) noexcept;
+std::uint32_t GetRenderScalePercent() noexcept;
+void SetRenderScalePercent(std::uint32_t percent) noexcept;
 BOOL IsTranslationEnabled() noexcept;
 void SetTranslationEnabled(BOOL enabled) noexcept;
 BOOL IsStereoHudEnabled() noexcept;
@@ -35,6 +37,10 @@ BOOL IsFlatPanelActive() noexcept;
 void RegisterStereoToggleCallback(
     StereoToggleCallback callback) noexcept;
 BOOL GetRenderRequest(FearVrRenderRequest* request) noexcept;
+BOOL WaitForNewRenderRequest(
+    std::uint64_t previousFrameId,
+    std::uint32_t timeoutMilliseconds,
+    FearVrRenderRequest* request) noexcept;
 BOOL GetInputState(FearVrInputState* input) noexcept;
 BOOL SubmitHapticRequest(const FearVrHapticRequest* request) noexcept;
 void BeginEye(std::uint32_t eye) noexcept;

@@ -24,7 +24,9 @@
 #include <MinHook.h>
 
 #include "camera_collision.h"
+#include "arm_ik.h"
 #include "controller_mapping.h"
+#include "dev_menu_model.h"
 #include "head_tracking_math.h"
 #include "input_state.h"
 #include "lean_collision.h"
@@ -38,7 +40,10 @@
 #include "two_handed_grip.h"
 #include "two_handed_jump_camera.h"
 #include "vr_menu_scroll.h"
+#include "weapon_collision.h"
+#include "weapon_recoil.h"
 #include "weapon_weight.h"
+#include "vr_menu_model.h"
 
 namespace fearvr {
 namespace {
@@ -48,6 +53,9 @@ using IsStereoAvailableFunction = BOOL(__cdecl*)();
 using IsStereoEnabledFunction = BOOL(__cdecl*)();
 using SetStereoEnabledFunction = void(__cdecl*)(BOOL);
 using SetFovScalePercentFunction =
+    void(__cdecl*)(std::uint32_t);
+using GetRenderScalePercentFunction = std::uint32_t(__cdecl*)();
+using SetRenderScalePercentFunction =
     void(__cdecl*)(std::uint32_t);
 using GetBooleanOptionFunction = BOOL(__cdecl*)();
 using SetBooleanOptionFunction = void(__cdecl*)(BOOL);
@@ -59,6 +67,9 @@ using RegisterStereoToggleFunction =
     void(__cdecl*)(StereoToggleCallback);
 using GetRenderRequestFunction =
     BOOL(__cdecl*)(FearVrRenderRequest*);
+using WaitForNewRenderRequestFunction =
+    BOOL(__cdecl*)(
+        std::uint64_t, std::uint32_t, FearVrRenderRequest*);
 using GetInputStateFunction =
     BOOL(__cdecl*)(FearVrInputState*);
 using SubmitHapticRequestFunction =
@@ -86,6 +97,8 @@ using RetailSetWeaponTransformFunction =
     void(__thiscall*)(void*, const LTTransform&);
 using RetailSetWeaponVisibleFunction =
     void(__thiscall*)(void*, bool, bool);
+using RetailStartMuzzleFlashFunction =
+    void(__thiscall*)(void*);
 using RetailGetFireVectorsFunction =
     bool(__thiscall*)(
         const void*, LTVector&, LTVector&, LTVector&, LTVector&);
@@ -128,6 +141,8 @@ IsStereoAvailableFunction g_isStereoAvailable = nullptr;
 IsStereoEnabledFunction g_isStereoEnabled = nullptr;
 SetStereoEnabledFunction g_setStereoEnabled = nullptr;
 SetFovScalePercentFunction g_setFovScalePercent = nullptr;
+GetRenderScalePercentFunction g_getRenderScalePercent = nullptr;
+SetRenderScalePercentFunction g_setRenderScalePercent = nullptr;
 GetBooleanOptionFunction g_isTranslationEnabled = nullptr;
 SetBooleanOptionFunction g_setTranslationEnabled = nullptr;
 GetBooleanOptionFunction g_isStereoHudEnabled = nullptr;
@@ -139,6 +154,7 @@ RequestRecenterFunction g_requestRecenter = nullptr;
 IsFlatPanelActiveFunction g_isFlatPanelActive = nullptr;
 RegisterStereoToggleFunction g_registerStereoToggle = nullptr;
 GetRenderRequestFunction g_getRenderRequest = nullptr;
+WaitForNewRenderRequestFunction g_waitForNewRenderRequest = nullptr;
 GetInputStateFunction g_getInputState = nullptr;
 SubmitHapticRequestFunction g_submitHapticRequest = nullptr;
 BeginEyeFunction g_beginEye = nullptr;
@@ -155,6 +171,7 @@ void* g_retailGetBindingValueTarget = nullptr;
 RetailWeaponManagerUpdateFunction g_retailWeaponManagerUpdate = nullptr;
 RetailSetWeaponTransformFunction g_retailSetWeaponTransform = nullptr;
 RetailSetWeaponVisibleFunction g_retailSetWeaponVisible = nullptr;
+RetailStartMuzzleFlashFunction g_retailStartMuzzleFlash = nullptr;
 RetailGetFireVectorsFunction g_retailGetFireVectors = nullptr;
 RetailSetTrackedTargetFunction g_retailSetTrackedTarget = nullptr;
 ObjectFilterFn g_retailVectorObjectFilter = nullptr;
@@ -188,6 +205,7 @@ float g_activationReachOriginal = 0.0F;
 float g_pickupReachOriginal = 0.0F;
 volatile LONG g_pickupRayActiveLogged = 0;
 void* g_retailWeaponManagerUpdateTarget = nullptr;
+void* g_retailStartMuzzleFlashTarget = nullptr;
 void* g_retailGetFireVectorsTarget = nullptr;
 void* g_retailSetTrackedTargetTarget = nullptr;
 HOBJECT g_playerBodyObject = nullptr;
@@ -199,6 +217,8 @@ struct HandNodeControlState {
     LTVector forearmOffsetFromUpperArm;
     LTVector socketOffsetFromForearm;
     LTVector desiredElbowWorld;
+    LTVector bendDirectionWorld;
+    float elbowSideSign{0.0F};
     bool installed{false};
     bool upperArmInstalled{false};
     bool forearmInstalled{false};
@@ -206,6 +226,7 @@ struct HandNodeControlState {
     bool forearmOffsetFromUpperArmValid{false};
     bool socketOffsetFromForearmValid{false};
     bool desiredElbowValid{false};
+    bool bendDirectionValid{false};
 };
 HandNodeControlState g_rightHandControl;
 HandNodeControlState g_leftHandControl;
@@ -230,12 +251,16 @@ thread_local StereoRecoveryState g_stereoRecovery;
 struct HeadTrackingState {
     FearVrPose recenter{};
     FearVrPose currentCenter{};
+    float sessionEyeHeightMeters{0.0F};
+    float verticalTranslationMeters{0.0F};
     std::uint64_t lastFrameId{0};
     ULONGLONG lastFreshFrameTick{0};
     std::uint32_t recenterGeneration{0};
     LONG resetGeneration{0};
     bool centered{false};
     bool trackingLost{false};
+    bool floorSpace{false};
+    bool verticalTranslationOverride{false};
 };
 thread_local HeadTrackingState g_headTracking;
 volatile LONG g_firstHookCallLogged = 0;
@@ -258,6 +283,8 @@ volatile LONG g_twoHandedGripActiveLogged = 0;
 volatile LONG g_dualPistolsActiveLogged = 0;
 volatile LONG g_handPoseGapBridgedLogged = 0;
 volatile LONG g_weaponSocketSyncActiveLogged = 0;
+const void* g_retailVisibilityInitializedWeapon = nullptr;
+thread_local void* g_retailWeaponUpdateInProgress = nullptr;
 volatile LONG g_weaponCameraBaseSyncActiveLogged = 0;
 volatile LONG g_directionalCameraHeightBypassLogged = 0;
 volatile LONG g_twoHandedCameraHeightStabilizedLogged = 0;
@@ -307,6 +334,9 @@ volatile LONG g_vrMuzzleFlashCreatedLogged = 0;
 volatile LONG g_vrMuzzleFlashActiveLogged = 0;
 volatile LONG g_vrMuzzleFlashRenderedLogged = 0;
 void RenderVrMuzzleFlash(HLOCALOBJ camera) noexcept;
+ULONGLONG g_lastWeaponRecoilTick = 0;
+volatile LONG g_pendingWeaponRecoilShots = 0;
+volatile LONG g_weaponRecoilActiveLogged = 0;
 std::uint32_t g_lastMenuButtons = 0;
 bool g_lastMenuTriggerDown = false;
 bool g_menuAxisDown[4]{};
@@ -316,6 +346,68 @@ ULONGLONG g_menuActivationHoldUntil = 0;
 bool g_menuFocusKnown = false;
 bool g_menuFocusActive = false;
 bool g_escapeWasDown = false;
+constexpr std::size_t kDevMenuTabCount = 8;
+constexpr float kDevMenuDistanceMeters = 1.15F;
+constexpr float kDevMenuVerticalOffsetMeters = 0.08F;
+constexpr float kDevMenuWidthMeters = 0.64F;
+constexpr float kDevMenuHeightMeters = 0.66F;
+constexpr float kDevMenuHeaderMeters = 0.12F;
+constexpr float kDevMenuTitleMeters = 0.055F;
+constexpr float kDevMenuTabMeters = 0.055F;
+constexpr float kDevMenuRowMeters = 0.055F;
+enum class DevMenuTab : std::size_t {
+    recoil,
+    weight,
+    collision,
+    weapon,
+    ik,
+    movement,
+    melee,
+    vr,
+};
+constexpr std::array<const wchar_t*, kDevMenuTabCount> kDevMenuTabLabels{
+    L"RECOIL", L"WEIGHT", L"COLLIDE", L"WEAPON", L"IK", L"MOVE",
+    L"MELEE", L"VR"};
+constexpr std::array<std::size_t, kDevMenuTabCount> kDevMenuTabRowCounts{
+    5U, 6U, 7U, 3U, 7U, 9U, 5U, 6U};
+
+std::size_t DevMenuRowCount(DevMenuTab tab) noexcept {
+    const std::size_t index = static_cast<std::size_t>(tab);
+    return index < kDevMenuTabRowCounts.size()
+        ? kDevMenuTabRowCounts[index] : 0U;
+}
+struct DevMenuState {
+    bool open{false};
+    bool anchorValid{false};
+    bool suppressUntilRelease{false};
+    std::size_t selectedRow{0};
+    std::uint32_t lastButtons{0};
+    bool lastTriggerDown{false};
+    bool axisUpDown{false};
+    bool axisDownDown{false};
+    bool axisLeftDown{false};
+    bool axisRightDown{false};
+    ULONGLONG axisUpRepeatTick{0};
+    ULONGLONG axisDownRepeatTick{0};
+    ULONGLONG axisLeftRepeatTick{0};
+    ULONGLONG axisRightRepeatTick{0};
+    DevMenuTab selectedTab{DevMenuTab::recoil};
+    LTVector center;
+    LTVector right;
+    LTVector up;
+    LTVector normal;
+    LTVector pointerWorld;
+    bool pointerValid{false};
+    DevMenuHitRegion pointerRegion{DevMenuHitRegion::none};
+    std::size_t pointerIndex{0};
+};
+DevMenuState g_devMenu;
+constexpr std::size_t kDevMenuGlyphQuadCapacity = 6144;
+std::array<LT_POLYG4, kDevMenuGlyphQuadCapacity> g_devMenuGlyphQuads;
+
+bool DevMenuCapturesControllerInput() noexcept {
+    return g_devMenu.open || g_devMenu.suppressUntilRelease;
+}
 bool g_seenForwardAxisBinding = false;
 bool g_seenStrafeAxisBinding = false;
 bool g_controllerCommandActive[128]{};
@@ -551,6 +643,9 @@ bool g_physicalDuckActive = false;
 // beugen, um hinter einer Deckung hervorzusehen. Der gemessene Versatz bleibt
 // vorher auf 25 cm begrenzt, die Wirkung damit auf einen halben Meter.
 int g_leanScalePercent = 200;
+// Zero keeps a per-session automatic neutral height. A positive value is an
+// explicit floor-to-eye height captured by the floating developer menu.
+float g_configuredEyeHeightMeters = 0.0F;
 LeanCollisionState g_leanCollision;
 float g_leanTranslationScale = 1.0F;
 // Der Versatz, um den der Blickpunkt gegenueber dem Spielerkoerper steht.
@@ -570,11 +665,7 @@ bool g_climbWasGripping = false;
 bool g_climbOnLadder = false;
 bool g_climbActive = false;
 float g_climbAxis = 0.0F;
-// Rund 0,1 s bei 60 Bildern: kurz genug, um nicht traege zu wirken.
-constexpr float kTwoHandBlendRampPerFrame = 0.15F;
 struct TwoHandedGripState {
-    // Dreht die Handlinie auf die Waffenachse, wie sie beim Zugreifen stand.
-    LTRotation offset;
     // Griffpunkt und Handhaltung im Waffenraum. Damit klebt die sichtbare
     // linke Hand am original animierten Vordergriff der jeweiligen Waffe,
     // statt an der zufaelligen Controllerposition beim Zugreifen.
@@ -585,13 +676,19 @@ struct TwoHandedGripState {
     // Transform liefert den waffenspezifischen Originalgriff.
     LTRigidTransform animatedRightSocket;
     LTRigidTransform animatedLeftSocket;
-    float blendRamp{0.0F};
-    bool offsetValid{false};
+    // A valid attachment is retained across grip releases for this exact
+    // Retail weapon. Recapturing on every squeeze could sample a reload or
+    // weapon-switch animation and turn that transient lowered hand into the
+    // permanent weapon axis.
+    const void* geometryWeapon{nullptr};
+    bool geometryValid{false};
     bool placementValid{false};
     bool animatedRightSocketValid{false};
     bool animatedLeftSocketValid{false};
 };
 TwoHandedGripState g_twoHandedGrip;
+ArmIkTuning g_armIkTuning{};
+bool g_devMenuIkLeftHandPage = false;
 
 // Sichtbare Lage der linken Hand. Waehrend des Zweihandgriffs klebt sie am
 // waffenspezifischen Originalgriff aus Retails eigener Animation.
@@ -604,20 +701,25 @@ bool LeftHandOnWeapon() noexcept {
 }
 
 LTVector EffectiveLeftHandPosition() noexcept {
-    if (!LeftHandOnWeapon()) {
-        if (DualPistolsVrActive() &&
-            g_weaponAim.leftWeaponTransformValid) {
-            // Retail attaches the left weapon object directly to the
-            // LeftHand socket without an intermediate grip offset. Driving
-            // that socket from the final VR weapon transform therefore keeps
-            // the fingers on the actual pistol handle.
-            return g_weaponAim.leftWeaponTransform.m_vPos;
-        }
-        return g_weaponAim.leftGripTransform.m_vPos;
+    if (LeftHandOnWeapon()) {
+        return g_weaponAim.gripTransform.m_vPos +
+               g_weaponAim.fireTransform.m_rRot.RotateVector(
+                   g_twoHandedGrip.grabOffsetInWeapon);
     }
-    return g_weaponAim.gripTransform.m_vPos +
-           g_weaponAim.fireTransform.m_rRot.RotateVector(
-               g_twoHandedGrip.grabOffsetInWeapon);
+    if (DualPistolsVrActive() &&
+        g_weaponAim.leftWeaponTransformValid) {
+        // Retail attaches the left weapon object directly to the LeftHand
+        // socket. Keep hand and pistol in exactly the same frame.
+        return g_weaponAim.leftWeaponTransform.m_vPos;
+    }
+    const LTRotation baseRotation =
+        g_weaponAim.leftGripTransform.m_rRot;
+    const LTVector localOffset(
+        g_armIkTuning.leftHandRightMeters * kGameUnitsPerMeter,
+        g_armIkTuning.leftHandUpMeters * kGameUnitsPerMeter,
+        g_armIkTuning.leftHandForwardMeters * kGameUnitsPerMeter);
+    return g_weaponAim.leftGripTransform.m_vPos +
+           baseRotation.RotateVector(localOffset);
 }
 
 LTRotation EffectiveLeftHandRotation() noexcept {
@@ -649,8 +751,18 @@ LTRotation EffectiveLeftHandRotation() noexcept {
     const LTRotation forwardCorrection(
         LTVector(1.0F, 0.0F, 0.0F),
         kLeftHandForwardCorrection);
-    return g_weaponAim.leftGripTransform.m_rRot *
-           forwardCorrection;
+    const LTRotation baseRotation =
+        g_weaponAim.leftGripTransform.m_rRot * forwardCorrection;
+    constexpr float kDegreesToRadians =
+        3.14159265358979323846F / 180.0F;
+    LTRotation correction(
+        g_armIkTuning.leftHandPitchDegrees * kDegreesToRadians,
+        g_armIkTuning.leftHandYawDegrees * kDegreesToRadians,
+        g_armIkTuning.leftHandRollDegrees * kDegreesToRadians);
+    correction.Normalize();
+    LTRotation result = baseRotation * correction;
+    result.Normalize();
+    return result;
 }
 
 // Die Taschenlampe folgt sonst der Hand. Klebt die Hand an der Waffe, zeigt
@@ -665,6 +777,9 @@ LTRotation EffectiveFlashlightRotation() noexcept {
 // Linkshaenderbelegung: gespiegelt wird ausschliesslich der eingehende
 // Controllerzustand, nie eine einzelne Zuordnung.
 bool g_leftHandedBindings = false;
+// Keep locomotion independent from free HMD look by default. Head-relative
+// steering remains available as an explicit preference.
+bool g_headRelativeMovement = false;
 bool g_headBobEnabled = false;
 bool g_forceHeadBobDisabled = false;
 // Diagnoseschalter zum Eingrenzen des Absturzes an einer bestimmten
@@ -678,6 +793,7 @@ bool g_disableBodyPieceHiding = false;
 // genau einmal pro Frame, wie in Retail. Pruefschalter fuer die Frage, ob der
 // zweite Durchlauf mehr als nur Geometrie erneut ausloest.
 bool g_disableStereoRender = false;
+std::uint64_t g_lastStereoRenderRequestId = 0;
 // Laesst den Client-Input-Hook installiert, schreibt aber keine Kommandobits
 // mehr in Retails CBindMgr. Trennt "Schreibzugriff auf den Bind-Manager" von
 // "Hook auf die Bindungsabfrage und synthetische Tastendruecke".
@@ -707,6 +823,9 @@ int g_turnSpeedPreset = 1;
 constexpr std::array<std::uint32_t, 4> kFovScalePercents{
     100U, 110U, 120U, 130U};
 int g_fovScalePreset = 3;
+constexpr std::array<std::uint32_t, 5> kRenderScalePercents{
+    100U, 125U, 150U, 175U, 200U};
+std::uint32_t g_renderScalePercent = 100U;
 wchar_t g_vrSettingsPath[MAX_PATH]{};
 bool g_vrSettingsFilePresent = false;
 // Optional simulated weapon mass. Disabled is the compatibility default.
@@ -714,8 +833,50 @@ bool g_weaponWeightEnabled = false;
 WeaponWeightPreset g_weaponWeightPreset = WeaponWeightPreset::none;
 bool g_weaponWeightDiagnosticsEnabled = false;
 WeaponWeightProfile g_defaultWeaponWeightProfile{};
+bool g_weaponRecoilEnabled = true;
+WeaponRecoilProfile g_weaponRecoilProfile{};
+struct WeaponCollisionProfile {
+    float lengthScale{1.0F};
+    float widthMeters{0.10F};
+    float heightMeters{0.18F};
+    float forwardOffsetMeters{0.0F};
+};
+
+WeaponCollisionProfile SanitizeWeaponCollisionProfile(
+    WeaponCollisionProfile profile) noexcept {
+    const auto sane = [](float value, float fallback,
+                         float minimum, float maximum) noexcept {
+        return std::isfinite(value)
+            ? std::clamp(value, minimum, maximum) : fallback;
+    };
+    profile.lengthScale = sane(profile.lengthScale, 1.0F, 0.25F, 2.50F);
+    profile.widthMeters = sane(profile.widthMeters, 0.10F, 0.02F, 0.40F);
+    profile.heightMeters = sane(profile.heightMeters, 0.18F, 0.02F, 0.40F);
+    profile.forwardOffsetMeters = sane(
+        profile.forwardOffsetMeters, 0.0F, -0.30F, 0.30F);
+    return profile;
+}
+
+bool g_weaponCollisionEnabled = true;
+bool g_weaponCollisionDebugEnabled = true;
+WeaponCollisionProfile g_defaultWeaponCollisionProfile{};
+struct WeaponCollisionRuntimeState {
+    LTVector correction;
+    std::uint64_t lastUpdateNs{0};
+    std::uint64_t holdUntilNs{0};
+    bool haveUpdate{false};
+};
+
+void ResetWeaponCollisionRuntime(
+    WeaponCollisionRuntimeState& state) noexcept {
+    state = WeaponCollisionRuntimeState{};
+}
+
 struct WeightedWeaponInputState {
     WeaponWeightPairState filters;
+    WeaponRecoilState recoil;
+    WeaponCollisionRuntimeState collision;
+    WeaponRecoilOffset recoilOffset;
     FearVrPose aimPose{};
     FearVrPose gripPose{};
     WeaponWeightDiagnostics aimDiagnostics;
@@ -724,13 +885,19 @@ struct WeightedWeaponInputState {
     ULONGLONG lastAimValidTick{0};
     ULONGLONG lastGripValidTick{0};
     ULONGLONG lastDiagnosticTick{0};
+    ULONGLONG lastCollisionDiagnosticTick{0};
     const void* weapon{nullptr};
     LONG resetGeneration{-1};
     WeaponWeightProfile profile{};
+    WeaponRecoilProfile recoilProfile{};
+    WeaponCollisionProfile collisionProfile{};
     char profileName[96]{};
     bool aimValid{false};
     bool gripValid{false};
     bool enabledOnLastUpdate{false};
+    bool recoilProfileExplicit{false};
+    bool collisionProfileExplicit{false};
+    bool collisionObstructed{false};
 };
 thread_local WeightedWeaponInputState g_weightedWeaponInput;
 
@@ -758,33 +925,107 @@ std::size_t g_vrMenuFirstVisibleRow = 0;
 // assuming the default layout height. Eight is only the safe first-frame
 // fallback for the single-player pause menu.
 std::size_t g_vrMenuPageRows = 8;
+VrSettingsPage g_vrSettingsPage = VrSettingsPage::None;
+bool g_vrWeaponProfileEditsCurrent = true;
+bool g_vrRecoilProfileEditsCurrent = true;
+bool g_vrCollisionProfileEditsCurrent = true;
 int g_vrOriginalItemSpacing = 0;
 bool g_vrOriginalItemSpacingKnown = false;
+
+constexpr std::array<int, 7> kLeanScalePresets{
+    100, 150, 200, 250, 300, 350, 400};
+constexpr std::array<float, 8> kWeaponWeightPresets{
+    0.25F, 0.50F, 0.75F, 1.00F, 1.50F, 2.00F, 3.00F, 4.00F};
+constexpr std::array<float, 7> kWeaponPositionFollowPresets{
+    6.0F, 10.0F, 14.0F, 18.0F, 24.0F, 32.0F, 40.0F};
+constexpr std::array<float, 7> kWeaponRotationFollowPresets{
+    6.0F, 10.0F, 14.0F, 20.0F, 26.0F, 32.0F, 40.0F};
+constexpr std::array<float, 7> kWeaponCatchUpPresets{
+    0.0F, 0.5F, 1.0F, 1.5F, 2.0F, 3.0F, 4.0F};
+constexpr std::array<float, 6> kWeaponRecoilStrengthPresets{
+    0.50F, 1.00F, 1.50F, 2.00F, 3.00F, 5.00F};
+constexpr std::array<float, 6> kWeaponRecoilRisePresets{
+    0.00F, 0.50F, 1.00F, 1.50F, 2.00F, 3.00F};
+constexpr std::array<float, 6> kWeaponRecoilRecoveryPresets{
+    0.50F, 0.75F, 1.00F, 1.50F, 2.00F, 3.00F};
+constexpr std::array<float, 8> kWeaponCollisionLengthPresets{
+    0.50F, 0.75F, 1.00F, 1.25F, 1.50F, 1.75F, 2.00F, 2.50F};
+constexpr std::array<float, 8> kWeaponCollisionWidthPresets{
+    0.04F, 0.06F, 0.08F, 0.10F, 0.12F, 0.16F, 0.20F, 0.30F};
+constexpr std::array<float, 8> kWeaponCollisionHeightPresets{
+    0.06F, 0.08F, 0.10F, 0.14F, 0.18F, 0.22F, 0.28F, 0.36F};
+constexpr std::array<float, 9> kWeaponCollisionOffsetPresets{
+    -0.20F, -0.15F, -0.10F, -0.05F, 0.00F,
+     0.05F,  0.10F,  0.15F, 0.20F};
+constexpr float kIkElbowStep = 0.05F;
+constexpr float kIkHandPositionStepMeters = 0.005F;
+constexpr float kIkHandRotationStepDegrees = 5.0F;
+
 VrMenuControl g_vrMenuEntry;
 VrMenuControl g_vrMenuTitle;
+VrMenuControl g_vrMenuDisplayTitle;
+VrMenuControl g_vrMenuComfortTitle;
+VrMenuControl g_vrMenuControlsTitle;
+VrMenuControl g_vrMenuWeaponsTitle;
+VrMenuControl g_vrMenuWeaponHandlingTitle;
+VrMenuControl g_vrMenuWeaponWeightTitle;
+VrMenuControl g_vrMenuWeaponRecoilTitle;
+VrMenuControl g_vrMenuMeleeTitle;
+VrMenuControl g_vrMenuAdvancedTitle;
+VrMenuControl g_vrMenuOpenDisplay;
+VrMenuControl g_vrMenuOpenComfort;
+VrMenuControl g_vrMenuOpenControls;
+VrMenuControl g_vrMenuOpenWeapons;
+VrMenuControl g_vrMenuOpenWeaponHandling;
+VrMenuControl g_vrMenuOpenWeaponWeight;
+VrMenuControl g_vrMenuOpenWeaponRecoil;
+VrMenuControl g_vrMenuOpenMelee;
+VrMenuControl g_vrMenuOpenAdvanced;
 VrMenuToggle g_vrMenuStereo;
 VrMenuToggle g_vrMenuTranslation;
 VrMenuToggle g_vrMenuStereoHud;
 VrMenuToggle g_vrMenuHeadBob;
 VrMenuToggle g_vrMenuComfort;
-VrMenuControl g_vrMenuWeaponWeight[4];
+VrMenuControl g_vrMenuWeaponWeightPreset[4];
 VrMenuToggle g_vrMenuAimGuide;
 VrMenuToggle g_vrMenuHaptics;
 VrMenuControl g_vrMenuFlashlightMount[kFlashlightMountCount];
 // `enabled` zeigt die Rechtshaenderbelegung, `disabled` die gespiegelte.
 VrMenuToggle g_vrMenuHandedness;
+VrMenuToggle g_vrMenuMovementDirection;
 // `enabled` zeigt das Klettern mit den Haenden, `disabled` die
 // Retail-Steuerung ueber den Stick.
 VrMenuToggle g_vrMenuClimbing;
 // `enabled` = physisches Lehnen, `disabled` = nur Retails Kameraneigung.
 VrMenuToggle g_vrMenuPhysicalLean;
 VrMenuToggle g_vrMenuPhysicalDuck;
-// Master-Schalter; die vier Einzelaktionen bleiben bewusst in fearvr.ini,
-// damit die native, flache Menue-Seite nicht vier weitere Zeilen bekommt.
+VrMenuControl g_vrMenuLeanScale[kLeanScalePresets.size()];
 VrMenuToggle g_vrMenuMelee;
+VrMenuToggle g_vrMenuMeleeWeaponStrike;
+VrMenuToggle g_vrMenuMeleeOffHandStrike;
+VrMenuToggle g_vrMenuMeleeJumpKick;
+VrMenuToggle g_vrMenuMeleeSlideKick;
 VrMenuToggle g_vrMenuArms;
+VrMenuToggle g_vrMenuTwoHandGrip;
+VrMenuToggle g_vrMenuWeaponWeight;
+VrMenuToggle g_vrMenuWeaponRecoil;
+VrMenuToggle g_vrMenuWeaponWeightDiagnostics;
+VrMenuToggle g_vrMenuWeaponProfileTarget;
 VrMenuControl g_vrMenuFovScale[kFovScalePercents.size()];
 VrMenuControl g_vrMenuTurnSpeed[3];
+VrMenuControl g_vrMenuWeaponWeightValue[kWeaponWeightPresets.size()];
+VrMenuControl g_vrMenuWeaponPositionFollow[
+    kWeaponPositionFollowPresets.size()];
+VrMenuControl g_vrMenuWeaponRotationFollow[
+    kWeaponRotationFollowPresets.size()];
+VrMenuControl g_vrMenuWeaponCatchUp[kWeaponCatchUpPresets.size()];
+VrMenuControl g_vrMenuWeaponRecoilStrength[
+    kWeaponRecoilStrengthPresets.size()];
+VrMenuControl g_vrMenuWeaponRecoilRise[
+    kWeaponRecoilRisePresets.size()];
+VrMenuControl g_vrMenuWeaponRecoilRecovery[
+    kWeaponRecoilRecoveryPresets.size()];
+VrMenuControl g_vrMenuResetWeaponProfile;
 VrMenuControl g_vrMenuRecenter;
 VrMenuControl g_vrMenuDefaults;
 VrMenuControl g_vrMenuBack;
@@ -844,6 +1085,7 @@ constexpr ULONGLONG kTrackedPoseGapGraceMilliseconds = 150;
 constexpr std::uintptr_t kRetailWeaponManagerUpdateRva = 0x00078140U;
 constexpr std::uintptr_t kRetailSetWeaponTransformRva = 0x00066F90U;
 constexpr std::uintptr_t kRetailSetWeaponVisibleRva = 0x00069320U;
+constexpr std::uintptr_t kRetailStartMuzzleFlashRva = 0x00069950U;
 constexpr std::uintptr_t kRetailGetFireVectorsRva = 0x0006B4A0U;
 // ClientWeapon_VectorObjFilterFn first rejects the local player, then replaces
 // the broad character proxy with Retails per-skeleton-node intersection.
@@ -895,6 +1137,8 @@ constexpr std::size_t kRetailCameraLastDescriptorOffset = 0x190;
 constexpr std::int32_t kRetailCameraDescriptorRotation = 0x1D;
 constexpr std::int32_t kRetailCameraDescriptorRotationAim = 0x1E;
 constexpr std::size_t kRetailCurrentWeaponOffset = 0x0C;
+constexpr std::size_t kRetailRightWeaponModelDataOffset = 0x10;
+constexpr std::size_t kRetailLeftWeaponModelDataOffset = 0xC8;
 // Retail CClientWeapon starts m_RightHandWeapon at +0x10. Its first LTObjRef
 // occupies 16 bytes on x86 (vptr, list links, HOBJECT), putting the model
 // HOBJECT at +0x1c and m_hMuzzleSocket at +0x50.
@@ -1025,23 +1269,51 @@ constexpr unsigned char kRetailListSwapItemsPrefix[] = {
 
 enum VrMenuCommand : std::uint32_t {
     kVrMenuOpen = 0x56520001U,
+    kVrMenuOpenDisplay,
+    kVrMenuOpenComfort,
+    kVrMenuOpenControls,
+    kVrMenuOpenWeapons,
+    kVrMenuOpenWeaponHandling,
+    kVrMenuOpenWeaponWeight,
+    kVrMenuOpenWeaponRecoil,
+    kVrMenuOpenMelee,
+    kVrMenuOpenAdvanced,
     kVrMenuToggleStereo,
     kVrMenuToggleTranslation,
     kVrMenuToggleStereoHud,
     kVrMenuToggleHeadBob,
     kVrMenuToggleComfort,
-    kVrMenuCycleWeaponWeight,
+    kVrMenuCycleWeaponWeightPreset,
     kVrMenuToggleAimGuide,
     kVrMenuToggleHaptics,
     kVrMenuCycleFlashlightMount,
     kVrMenuToggleHandedness,
+    kVrMenuToggleHeadRelativeMovement,
     kVrMenuToggleClimbing,
     kVrMenuTogglePhysicalLean,
     kVrMenuTogglePhysicalDuck,
+    kVrMenuCycleLeanScale,
     kVrMenuToggleMelee,
+    kVrMenuToggleMeleeWeaponStrike,
+    kVrMenuToggleMeleeOffHandStrike,
+    kVrMenuToggleMeleeJumpKick,
+    kVrMenuToggleMeleeSlideKick,
     kVrMenuToggleArms,
+    kVrMenuToggleTwoHandGrip,
+    kVrMenuToggleWeaponWeight,
+    kVrMenuToggleWeaponRecoil,
+    kVrMenuToggleWeaponWeightDiagnostics,
+    kVrMenuToggleWeaponProfileTarget,
     kVrMenuCycleFovScale,
     kVrMenuCycleTurnSpeed,
+    kVrMenuCycleWeaponWeight,
+    kVrMenuCycleWeaponPositionFollow,
+    kVrMenuCycleWeaponRotationFollow,
+    kVrMenuCycleWeaponCatchUp,
+    kVrMenuCycleWeaponRecoilStrength,
+    kVrMenuCycleWeaponRecoilRise,
+    kVrMenuCycleWeaponRecoilRecovery,
+    kVrMenuResetWeaponProfile,
     kVrMenuRecenter,
     kVrMenuDefaults,
     kVrMenuBack,
@@ -1592,6 +1864,9 @@ float ReadVrFloat(
 void WriteVrSetting(const wchar_t* name, int value) noexcept;
 void WriteVrFloat(
     const wchar_t* section, const wchar_t* name, float value) noexcept;
+void SaveActiveWeaponWeightProfile() noexcept;
+void SaveActiveWeaponRecoilProfile() noexcept;
+void SaveActiveWeaponCollisionProfile() noexcept;
 
 bool QueryBooleanOption(
     GetBooleanOptionFunction getter, bool fallback) noexcept {
@@ -1639,8 +1914,31 @@ void ApplyFovScalePreset() noexcept {
     }
 }
 
+std::uint32_t QueryRenderScalePercent() noexcept {
+    if (g_getRenderScalePercent == nullptr) {
+        return 100U;
+    }
+    __try {
+        return std::clamp(
+            g_getRenderScalePercent(), 100U, 200U);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 100U;
+    }
+}
+
+void ApplyRenderScalePercent() noexcept {
+    if (g_setRenderScalePercent == nullptr) {
+        return;
+    }
+    __try {
+        g_setRenderScalePercent(g_renderScalePercent);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void InitializeVrSettings() noexcept {
     LocateVrSettingsFile();
+    g_renderScalePercent = QueryRenderScalePercent();
     if (!g_vrSettingsFilePresent) {
         ApplyFovScalePreset();
         return;
@@ -1648,6 +1946,21 @@ void InitializeVrSettings() noexcept {
 
     g_weaponWeightDiagnosticsEnabled =
         ReadVrSetting(L"WeaponWeightDiagnostics", 0) != 0;
+    g_weaponRecoilEnabled =
+        ReadVrSetting(L"WeaponRecoilEnabled", 1) != 0;
+    g_weaponRecoilProfile = SanitizeWeaponRecoilProfile({
+        ReadVrFloat(L"VR", L"WeaponRecoilStrength", 1.5F),
+        ReadVrFloat(L"VR", L"WeaponRecoilMuzzleRise", 1.0F),
+        ReadVrFloat(L"VR", L"WeaponRecoilRecovery", 1.0F)});
+    g_weaponCollisionEnabled =
+        ReadVrSetting(L"WeaponCollisionEnabled", 1) != 0;
+    g_weaponCollisionDebugEnabled =
+        ReadVrSetting(L"WeaponCollisionDebug", 1) != 0;
+    g_defaultWeaponCollisionProfile = SanitizeWeaponCollisionProfile({
+        ReadVrFloat(L"VR", L"WeaponCollisionLengthScale", 1.0F),
+        ReadVrFloat(L"VR", L"WeaponCollisionWidth", 0.10F),
+        ReadVrFloat(L"VR", L"WeaponCollisionHeight", 0.18F),
+        ReadVrFloat(L"VR", L"WeaponCollisionForwardOffset", 0.0F)});
     g_defaultWeaponWeightProfile = SanitizeWeaponWeightProfile({
         ReadVrFloat(L"VR", L"WeaponWeight", 1.0F),
         ReadVrFloat(L"VR", L"WeaponPositionalFollow", 18.0F),
@@ -1664,6 +1977,17 @@ void InitializeVrSettings() noexcept {
         : SanitizeWeaponWeightPreset(configuredWeaponWeightPreset);
     g_weaponWeightEnabled =
         g_weaponWeightPreset != WeaponWeightPreset::none;
+    g_armIkTuning = SanitizeArmIkTuning({
+        ReadVrFloat(L"VR", L"IkElbowOutward", 1.0F),
+        ReadVrFloat(L"VR", L"IkElbowDown", 0.45F),
+        ReadVrFloat(L"VR", L"IkElbowBack", 0.15F),
+        ReadVrSetting(L"IkElbowContinuity", 1) != 0,
+        ReadVrFloat(L"VR", L"IkLeftHandRight", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandUp", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandForward", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandPitch", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandYaw", 0.0F),
+        ReadVrFloat(L"VR", L"IkLeftHandRoll", 0.0F)});
     SetBooleanOption(
         g_setStereoEnabled,
         ReadVrSetting(
@@ -1718,13 +2042,24 @@ void InitializeVrSettings() noexcept {
     g_physicalDuckActive = false;
     g_leanScalePercent =
         std::clamp(ReadVrSetting(L"LeanScale", 200), 100, 400);
+    g_configuredEyeHeightMeters = SanitizeEyeHeightMeters(
+        ReadVrFloat(L"VR", L"EyeHeightMeters", 0.0F));
     g_leftHandedBindings =
         ReadVrSetting(L"LeftHanded", 0) != 0;
+    g_headRelativeMovement =
+        ReadVrSetting(L"HeadRelativeMovement", 0) != 0;
     g_showPlayerArms =
         ReadVrSetting(L"ShowArms", 0) != 0;
     g_fovScalePreset = FovScalePresetForPercent(
         ReadVrSetting(L"FovScale", 130));
     ApplyFovScalePreset();
+    // An explicit launcher value is a one-run override. Otherwise the live
+    // tool-menu choice persists with the remaining VR settings.
+    if (!CommandLineContains(L"-fearvr-render-scale")) {
+        g_renderScalePercent = static_cast<std::uint32_t>(
+            std::clamp(ReadVrSetting(L"RenderScale", 100), 100, 200));
+        ApplyRenderScalePercent();
+    }
     g_turnSpeedPreset =
         std::clamp(ReadVrSetting(L"TurnSpeed", 1), 0, 2);
     g_hiddenBodyPieceMask = static_cast<std::uint32_t>(
@@ -1806,6 +2141,33 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(
         L"WeaponWeightDiagnostics",
         g_weaponWeightDiagnosticsEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"WeaponRecoilEnabled", g_weaponRecoilEnabled ? 1 : 0);
+    WriteVrFloat(
+        L"VR", L"WeaponRecoilStrength",
+        g_weaponRecoilProfile.strength);
+    WriteVrFloat(
+        L"VR", L"WeaponRecoilMuzzleRise",
+        g_weaponRecoilProfile.muzzleRise);
+    WriteVrFloat(
+        L"VR", L"WeaponRecoilRecovery",
+        g_weaponRecoilProfile.recovery);
+    WriteVrSetting(
+        L"WeaponCollisionEnabled", g_weaponCollisionEnabled ? 1 : 0);
+    WriteVrSetting(
+        L"WeaponCollisionDebug", g_weaponCollisionDebugEnabled ? 1 : 0);
+    WriteVrFloat(
+        L"VR", L"WeaponCollisionLengthScale",
+        g_defaultWeaponCollisionProfile.lengthScale);
+    WriteVrFloat(
+        L"VR", L"WeaponCollisionWidth",
+        g_defaultWeaponCollisionProfile.widthMeters);
+    WriteVrFloat(
+        L"VR", L"WeaponCollisionHeight",
+        g_defaultWeaponCollisionProfile.heightMeters);
+    WriteVrFloat(
+        L"VR", L"WeaponCollisionForwardOffset",
+        g_defaultWeaponCollisionProfile.forwardOffsetMeters);
     WriteVrFloat(
         L"VR", L"WeaponWeight",
         g_defaultWeaponWeightProfile.weight);
@@ -1818,6 +2180,33 @@ void SaveVrSettings() noexcept {
     WriteVrFloat(
         L"VR", L"WeaponCatchUpStrength",
         g_defaultWeaponWeightProfile.catchUpStrength);
+    WriteVrFloat(
+        L"VR", L"IkElbowOutward", g_armIkTuning.elbowOutward);
+    WriteVrFloat(
+        L"VR", L"IkElbowDown", g_armIkTuning.elbowDown);
+    WriteVrFloat(
+        L"VR", L"IkElbowBack", g_armIkTuning.elbowBack);
+    WriteVrSetting(
+        L"IkElbowContinuity",
+        g_armIkTuning.preserveElbowContinuity ? 1 : 0);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandRight",
+        g_armIkTuning.leftHandRightMeters);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandUp",
+        g_armIkTuning.leftHandUpMeters);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandForward",
+        g_armIkTuning.leftHandForwardMeters);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandPitch",
+        g_armIkTuning.leftHandPitchDegrees);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandYaw",
+        g_armIkTuning.leftHandYawDegrees);
+    WriteVrFloat(
+        L"VR", L"IkLeftHandRoll",
+        g_armIkTuning.leftHandRollDegrees);
     WriteVrSetting(L"HeadBob", g_headBobEnabled ? 1 : 0);
     WriteVrSetting(
         L"AimGuide", g_weaponAimGuideEnabled ? 1 : 0);
@@ -1846,13 +2235,23 @@ void SaveVrSettings() noexcept {
     WriteVrSetting(
         L"PhysicalDuck", g_physicalDuckEnabled ? 1 : 0);
     WriteVrSetting(L"LeanScale", g_leanScalePercent);
+    WriteVrFloat(
+        L"VR", L"EyeHeightMeters", g_configuredEyeHeightMeters);
     WriteVrSetting(
         L"LeftHanded", g_leftHandedBindings ? 1 : 0);
+    WriteVrSetting(
+        L"HeadRelativeMovement", g_headRelativeMovement ? 1 : 0);
     WriteVrSetting(L"ShowArms", g_showPlayerArms ? 1 : 0);
     WriteVrSetting(
         L"FovScale",
         static_cast<int>(CurrentFovScalePercent()));
+    WriteVrSetting(
+        L"RenderScale",
+        static_cast<int>(g_renderScalePercent));
     WriteVrSetting(L"TurnSpeed", g_turnSpeedPreset);
+    SaveActiveWeaponWeightProfile();
+    SaveActiveWeaponRecoilProfile();
+    SaveActiveWeaponCollisionProfile();
     g_vrSettingsFilePresent = true;
 }
 
@@ -1981,6 +2380,29 @@ VrMenuControl AddRetailVrMenuControl(
 
 void HideRetailVrSettingsControls() noexcept {
     SetRetailControlVisible(g_vrMenuTitle, false);
+    SetRetailControlVisible(g_vrMenuDisplayTitle, false);
+    SetRetailControlVisible(g_vrMenuComfortTitle, false);
+    SetRetailControlVisible(g_vrMenuControlsTitle, false);
+    SetRetailControlVisible(g_vrMenuWeaponsTitle, false);
+    SetRetailControlVisible(g_vrMenuWeaponHandlingTitle, false);
+    SetRetailControlVisible(g_vrMenuWeaponWeightTitle, false);
+    SetRetailControlVisible(g_vrMenuWeaponRecoilTitle, false);
+    SetRetailControlVisible(g_vrMenuMeleeTitle, false);
+    SetRetailControlVisible(g_vrMenuAdvancedTitle, false);
+    const VrMenuControl categoryControls[] = {
+        g_vrMenuOpenDisplay,
+        g_vrMenuOpenComfort,
+        g_vrMenuOpenControls,
+        g_vrMenuOpenWeapons,
+        g_vrMenuOpenWeaponHandling,
+        g_vrMenuOpenWeaponWeight,
+        g_vrMenuOpenWeaponRecoil,
+        g_vrMenuOpenMelee,
+        g_vrMenuOpenAdvanced,
+    };
+    for (const VrMenuControl& control : categoryControls) {
+        SetRetailControlVisible(control, false);
+    }
     const VrMenuToggle toggles[] = {
         g_vrMenuStereo,
         g_vrMenuTranslation,
@@ -1990,11 +2412,21 @@ void HideRetailVrSettingsControls() noexcept {
         g_vrMenuAimGuide,
         g_vrMenuHaptics,
         g_vrMenuHandedness,
+        g_vrMenuMovementDirection,
         g_vrMenuClimbing,
         g_vrMenuPhysicalLean,
         g_vrMenuPhysicalDuck,
         g_vrMenuMelee,
+        g_vrMenuMeleeWeaponStrike,
+        g_vrMenuMeleeOffHandStrike,
+        g_vrMenuMeleeJumpKick,
+        g_vrMenuMeleeSlideKick,
         g_vrMenuArms,
+        g_vrMenuTwoHandGrip,
+        g_vrMenuWeaponWeight,
+        g_vrMenuWeaponRecoil,
+        g_vrMenuWeaponWeightDiagnostics,
+        g_vrMenuWeaponProfileTarget,
     };
     for (const VrMenuToggle& toggle : toggles) {
         SetRetailControlVisible(toggle.enabled, false);
@@ -2003,7 +2435,7 @@ void HideRetailVrSettingsControls() noexcept {
     for (const VrMenuControl& turnSpeed : g_vrMenuTurnSpeed) {
         SetRetailControlVisible(turnSpeed, false);
     }
-    for (const VrMenuControl& weaponWeight : g_vrMenuWeaponWeight) {
+    for (const VrMenuControl& weaponWeight : g_vrMenuWeaponWeightPreset) {
         SetRetailControlVisible(weaponWeight, false);
     }
     for (const VrMenuControl& mount : g_vrMenuFlashlightMount) {
@@ -2012,6 +2444,31 @@ void HideRetailVrSettingsControls() noexcept {
     for (const VrMenuControl& fovScale : g_vrMenuFovScale) {
         SetRetailControlVisible(fovScale, false);
     }
+    for (const VrMenuControl& leanScale : g_vrMenuLeanScale) {
+        SetRetailControlVisible(leanScale, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponWeightValue) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponPositionFollow) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponRotationFollow) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponCatchUp) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponRecoilStrength) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponRecoilRise) {
+        SetRetailControlVisible(value, false);
+    }
+    for (const VrMenuControl& value : g_vrMenuWeaponRecoilRecovery) {
+        SetRetailControlVisible(value, false);
+    }
+    SetRetailControlVisible(g_vrMenuResetWeaponProfile, false);
     SetRetailControlVisible(g_vrMenuRecenter, false);
     SetRetailControlVisible(g_vrMenuDefaults, false);
     SetRetailControlVisible(g_vrMenuBack, false);
@@ -2024,57 +2481,274 @@ VrMenuControl SetRetailVrToggleVisible(
     return enabled ? toggle.enabled : toggle.disabled;
 }
 
+template <std::size_t Size>
+VrMenuControl SetRetailVrPresetVisible(
+    VrMenuControl (&controls)[Size], std::size_t selected) noexcept {
+    selected = (std::min)(selected, Size - 1U);
+    for (std::size_t index = 0; index < Size; ++index) {
+        SetRetailControlVisible(controls[index], index == selected);
+    }
+    return controls[selected];
+}
+
+bool HasCurrentWeaponWeightProfile() noexcept {
+    return g_weightedWeaponInput.weapon != nullptr &&
+           g_weightedWeaponInput.profileName[0] != '\0' &&
+           std::strcmp(
+               g_weightedWeaponInput.profileName, "default") != 0;
+}
+
+bool EditingCurrentWeaponWeightProfile() noexcept {
+    return g_vrWeaponProfileEditsCurrent &&
+           HasCurrentWeaponWeightProfile();
+}
+
+WeaponWeightProfile& EditableWeaponWeightProfile() noexcept {
+    return EditingCurrentWeaponWeightProfile()
+        ? g_weightedWeaponInput.profile
+        : g_defaultWeaponWeightProfile;
+}
+
+bool EditingCurrentWeaponRecoilProfile() noexcept {
+    return g_vrRecoilProfileEditsCurrent &&
+           HasCurrentWeaponWeightProfile();
+}
+
+const WeaponRecoilProfile& DisplayedWeaponRecoilProfile() noexcept {
+    return EditingCurrentWeaponRecoilProfile()
+        ? g_weightedWeaponInput.recoilProfile
+        : g_weaponRecoilProfile;
+}
+
+WeaponRecoilProfile& EditableWeaponRecoilProfile() noexcept {
+    if (!EditingCurrentWeaponRecoilProfile()) {
+        return g_weaponRecoilProfile;
+    }
+    if (!g_weightedWeaponInput.recoilProfileExplicit) {
+        g_weightedWeaponInput.recoilProfile = g_weaponRecoilProfile;
+        g_weightedWeaponInput.recoilProfileExplicit = true;
+    }
+    return g_weightedWeaponInput.recoilProfile;
+}
+
+const WeaponRecoilProfile& ActiveWeaponRecoilProfile() noexcept {
+    return g_weightedWeaponInput.recoilProfileExplicit
+        ? g_weightedWeaponInput.recoilProfile
+        : g_weaponRecoilProfile;
+}
+
+bool EditingCurrentWeaponCollisionProfile() noexcept {
+    return g_vrCollisionProfileEditsCurrent &&
+           HasCurrentWeaponWeightProfile();
+}
+
+const WeaponCollisionProfile& DisplayedWeaponCollisionProfile() noexcept {
+    return EditingCurrentWeaponCollisionProfile() &&
+           g_weightedWeaponInput.collisionProfileExplicit
+        ? g_weightedWeaponInput.collisionProfile
+        : g_defaultWeaponCollisionProfile;
+}
+
+WeaponCollisionProfile& EditableWeaponCollisionProfile() noexcept {
+    if (!EditingCurrentWeaponCollisionProfile()) {
+        return g_defaultWeaponCollisionProfile;
+    }
+    if (!g_weightedWeaponInput.collisionProfileExplicit) {
+        g_weightedWeaponInput.collisionProfile =
+            g_defaultWeaponCollisionProfile;
+        g_weightedWeaponInput.collisionProfileExplicit = true;
+    }
+    return g_weightedWeaponInput.collisionProfile;
+}
+
+const WeaponCollisionProfile& ActiveWeaponCollisionProfile() noexcept {
+    return g_weightedWeaponInput.collisionProfileExplicit
+        ? g_weightedWeaponInput.collisionProfile
+        : g_defaultWeaponCollisionProfile;
+}
+
+void ResetEditableWeaponWeightProfile() noexcept {
+    EditableWeaponWeightProfile() = WeaponWeightProfile{};
+    ResetWeaponWeightPair(
+        g_weightedWeaponInput.filters,
+        WeaponWeightResetReason::enabledChanged);
+}
+
 VrMenuControl RefreshRetailVrSettingsControls() noexcept {
-    // Only one control for each setting is visible. The logical page has more
-    // rows than the dynamically sized Retail system-menu frame, so
-    // MaintainRetailVrMenuScroll keeps the selected row inside its viewport.
     HideRetailVrSettingsControls();
-    const VrMenuControl first = SetRetailVrToggleVisible(
-        g_vrMenuStereo,
-        QueryBooleanOption(g_isStereoEnabled, true));
-    SetRetailVrToggleVisible(
-        g_vrMenuStereoHud,
-        QueryBooleanOption(g_isStereoHudEnabled, true));
-    const int weaponWeightPreset = std::clamp(
-        static_cast<int>(g_weaponWeightPreset), 0, 3);
-    for (int index = 0; index < 4; ++index) {
-        SetRetailControlVisible(
-            g_vrMenuWeaponWeight[index],
-            index == weaponWeightPreset);
+    VrMenuControl first = g_vrMenuBack;
+
+    switch (g_vrSettingsPage) {
+    case VrSettingsPage::Root:
+        SetRetailControlVisible(g_vrMenuTitle, true);
+        SetRetailControlVisible(g_vrMenuOpenDisplay, true);
+        SetRetailControlVisible(g_vrMenuOpenComfort, true);
+        SetRetailControlVisible(g_vrMenuOpenControls, true);
+        SetRetailControlVisible(g_vrMenuOpenWeapons, true);
+        SetRetailControlVisible(g_vrMenuOpenMelee, true);
+        SetRetailControlVisible(g_vrMenuOpenAdvanced, true);
+        first = g_vrMenuOpenDisplay;
+        break;
+    case VrSettingsPage::Display:
+        SetRetailControlVisible(g_vrMenuDisplayTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuStereo,
+            QueryBooleanOption(g_isStereoEnabled, true));
+        SetRetailVrToggleVisible(
+            g_vrMenuStereoHud,
+            QueryBooleanOption(g_isStereoHudEnabled, true));
+        SetRetailVrPresetVisible(
+            g_vrMenuFovScale,
+            static_cast<std::size_t>(g_fovScalePreset));
+        break;
+    case VrSettingsPage::Comfort:
+        SetRetailControlVisible(g_vrMenuComfortTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuTranslation,
+            QueryBooleanOption(g_isTranslationEnabled, false));
+        SetRetailVrToggleVisible(g_vrMenuHeadBob, g_headBobEnabled);
+        SetRetailVrToggleVisible(
+            g_vrMenuComfort,
+            QueryBooleanOption(g_isComfortModeEnabled, false));
+        SetRetailVrPresetVisible(
+            g_vrMenuTurnSpeed,
+            static_cast<std::size_t>(g_turnSpeedPreset));
+        SetRetailVrToggleVisible(
+            g_vrMenuMovementDirection, g_headRelativeMovement);
+        SetRetailVrToggleVisible(
+            g_vrMenuPhysicalLean, g_physicalLeanEnabled);
+        SetRetailVrPresetVisible(
+            g_vrMenuLeanScale,
+            ClosestVrPresetIndex(g_leanScalePercent, kLeanScalePresets));
+        break;
+    case VrSettingsPage::Controls:
+        SetRetailControlVisible(g_vrMenuControlsTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuHandedness, !g_leftHandedBindings);
+        SetRetailVrToggleVisible(
+            g_vrMenuHaptics, g_controllerHapticsEnabled);
+        {
+            const int flashlightMount = std::clamp(
+                static_cast<int>(g_flashlightMount),
+                0, kFlashlightMountCount - 1);
+            for (int index = 0; index < kFlashlightMountCount; ++index) {
+                SetRetailControlVisible(
+                    g_vrMenuFlashlightMount[index],
+                    index == flashlightMount);
+            }
+        }
+        SetRetailVrToggleVisible(g_vrMenuClimbing, g_climbingEnabled);
+        SetRetailVrToggleVisible(
+            g_vrMenuPhysicalDuck, g_physicalDuckEnabled);
+        SetRetailControlVisible(g_vrMenuRecenter, true);
+        break;
+    case VrSettingsPage::Weapons:
+        SetRetailControlVisible(g_vrMenuWeaponsTitle, true);
+        SetRetailControlVisible(g_vrMenuOpenWeaponHandling, true);
+        SetRetailControlVisible(g_vrMenuOpenWeaponWeight, true);
+        SetRetailControlVisible(g_vrMenuOpenWeaponRecoil, true);
+        first = g_vrMenuOpenWeaponHandling;
+        break;
+    case VrSettingsPage::WeaponHandling:
+        SetRetailControlVisible(g_vrMenuWeaponHandlingTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuAimGuide, g_weaponAimGuideEnabled);
+        SetRetailVrToggleVisible(g_vrMenuArms, g_showPlayerArms);
+        SetRetailVrToggleVisible(
+            g_vrMenuTwoHandGrip, g_twoHandedGripEnabled);
+        break;
+    case VrSettingsPage::WeaponWeight: {
+        SetRetailControlVisible(g_vrMenuWeaponWeightTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuWeaponProfileTarget,
+            EditingCurrentWeaponWeightProfile());
+        // The four presets include NONE, so the older independent on/off row
+        // would be redundant and would push this page beyond Retail's eight
+        // visible selectable rows.
+        const int weaponWeightPreset = std::clamp(
+            static_cast<int>(g_weaponWeightPreset), 0, 3);
+        for (int index = 0; index < 4; ++index) {
+            SetRetailControlVisible(
+                g_vrMenuWeaponWeightPreset[index],
+                index == weaponWeightPreset);
+        }
+        const WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponWeightValue,
+            ClosestVrPresetIndex(profile.weight, kWeaponWeightPresets));
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponPositionFollow,
+            ClosestVrPresetIndex(
+                profile.positionalFollow,
+                kWeaponPositionFollowPresets));
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponRotationFollow,
+            ClosestVrPresetIndex(
+                profile.rotationalFollow,
+                kWeaponRotationFollowPresets));
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponCatchUp,
+            ClosestVrPresetIndex(
+                profile.catchUpStrength, kWeaponCatchUpPresets));
+        SetRetailControlVisible(g_vrMenuResetWeaponProfile, true);
+        break;
     }
-    for (int index = 0; index < 3; ++index) {
-        SetRetailControlVisible(
-            g_vrMenuTurnSpeed[index],
-            index == g_turnSpeedPreset);
+    case VrSettingsPage::WeaponRecoil: {
+        SetRetailControlVisible(g_vrMenuWeaponRecoilTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuWeaponProfileTarget,
+            EditingCurrentWeaponRecoilProfile());
+        SetRetailVrToggleVisible(
+            g_vrMenuWeaponRecoil, g_weaponRecoilEnabled);
+        const WeaponRecoilProfile& profile =
+            DisplayedWeaponRecoilProfile();
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponRecoilStrength,
+            ClosestVrPresetIndex(
+                profile.strength,
+                kWeaponRecoilStrengthPresets));
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponRecoilRise,
+            ClosestVrPresetIndex(
+                profile.muzzleRise,
+                kWeaponRecoilRisePresets));
+        SetRetailVrPresetVisible(
+            g_vrMenuWeaponRecoilRecovery,
+            ClosestVrPresetIndex(
+                profile.recovery,
+                kWeaponRecoilRecoveryPresets));
+        break;
     }
-    for (int index = 0; index < 4; ++index) {
-        SetRetailControlVisible(
-            g_vrMenuFovScale[index],
-            index == g_fovScalePreset);
+    case VrSettingsPage::Melee:
+        SetRetailControlVisible(g_vrMenuMeleeTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuMelee, g_meleeThrustEnabled);
+        if (g_meleeThrustEnabled) {
+            SetRetailVrToggleVisible(
+                g_vrMenuMeleeWeaponStrike,
+                g_meleeWeaponStrikeEnabled);
+            SetRetailVrToggleVisible(
+                g_vrMenuMeleeOffHandStrike,
+                g_meleeOffHandStrikeEnabled);
+            SetRetailVrToggleVisible(
+                g_vrMenuMeleeJumpKick,
+                g_meleeJumpKickEnabled);
+            SetRetailVrToggleVisible(
+                g_vrMenuMeleeSlideKick,
+                g_meleeSlideKickEnabled);
+        }
+        break;
+    case VrSettingsPage::Advanced:
+        SetRetailControlVisible(g_vrMenuAdvancedTitle, true);
+        first = SetRetailVrToggleVisible(
+            g_vrMenuWeaponWeightDiagnostics,
+            g_weaponWeightDiagnosticsEnabled);
+        SetRetailControlVisible(g_vrMenuDefaults, true);
+        break;
+    case VrSettingsPage::None:
+    default:
+        break;
     }
-    SetRetailVrToggleVisible(
-        g_vrMenuAimGuide, g_weaponAimGuideEnabled);
-    SetRetailVrToggleVisible(
-        g_vrMenuHaptics, g_controllerHapticsEnabled);
-    const int flashlightMount = std::clamp(
-        static_cast<int>(g_flashlightMount),
-        0, kFlashlightMountCount - 1);
-    for (int index = 0; index < kFlashlightMountCount; ++index) {
-        SetRetailControlVisible(
-            g_vrMenuFlashlightMount[index],
-            index == flashlightMount);
-    }
-    SetRetailVrToggleVisible(
-        g_vrMenuHandedness, !g_leftHandedBindings);
-    SetRetailVrToggleVisible(g_vrMenuClimbing, g_climbingEnabled);
-    SetRetailVrToggleVisible(
-        g_vrMenuPhysicalLean, g_physicalLeanEnabled);
-    SetRetailVrToggleVisible(
-        g_vrMenuPhysicalDuck, g_physicalDuckEnabled);
-    SetRetailVrToggleVisible(g_vrMenuMelee, g_meleeThrustEnabled);
-    SetRetailVrToggleVisible(g_vrMenuArms, g_showPlayerArms);
-    SetRetailControlVisible(g_vrMenuRecenter, true);
-    SetRetailControlVisible(g_vrMenuDefaults, true);
     SetRetailControlVisible(g_vrMenuBack, true);
     MarkRetailVrMenuForLayout();
     return first;
@@ -2101,7 +2775,7 @@ RetailVrMenuVisibleControls() noexcept {
         toggleControl(
             g_vrMenuStereoHud,
             QueryBooleanOption(g_isStereoHudEnabled, true)),
-        g_vrMenuWeaponWeight[weaponWeightPreset],
+        g_vrMenuWeaponWeightPreset[weaponWeightPreset],
         toggleControl(g_vrMenuAimGuide, g_weaponAimGuideEnabled),
         toggleControl(g_vrMenuHaptics, g_controllerHapticsEnabled),
         g_vrMenuFlashlightMount[flashlightMount],
@@ -2121,6 +2795,12 @@ RetailVrMenuVisibleControls() noexcept {
 
 void MaintainRetailVrMenuScroll() noexcept {
     if (!g_vrSettingsPageActive) {
+        return;
+    }
+    // Categorized pages are deliberately shorter than Retail's viewport.
+    // The legacy flat-page row map below does not describe their controls and
+    // must not rewrite m_nFirstShown while navigating between categories.
+    if (IsVrSettingsPage(g_vrSettingsPage)) {
         return;
     }
     void* const list = RetailVrMenuList(g_vrMenuOwner);
@@ -2204,6 +2884,8 @@ void SelectRetailVrMenuControl(
 }
 
 void RestoreRetailSystemMenuControls() noexcept {
+    g_vrSettingsPage = VrSettingsPage::None;
+    g_vrSettingsPageActive = false;
     SetRetailVrMenuCompactSpacing(false);
     for (std::size_t index = 0;
          index < g_vrNormalControlCount; ++index) {
@@ -2211,6 +2893,21 @@ void RestoreRetailSystemMenuControls() noexcept {
     }
     HideRetailVrSettingsControls();
     MarkRetailVrMenuForLayout();
+}
+
+void ShowRetailVrSettingsPage(VrSettingsPage page) noexcept {
+    if (!g_vrMenuControlsBuilt || page == VrSettingsPage::None) {
+        return;
+    }
+    g_vrSettingsPage = page;
+    g_vrSettingsPageActive = true;
+    SetRetailVrMenuCompactSpacing(true);
+    const VrMenuControl first = RefreshRetailVrSettingsControls();
+    SelectRetailVrMenuControl(first);
+    // SetSelection counts hidden sibling controls while CalculatePositions
+    // does not. Every categorized page fits completely, so physical row zero
+    // is the only stable list origin after changing pages.
+    ResetRetailVrMenuScroll();
 }
 
 void EnterRetailVrSettingsPage() noexcept {
@@ -2221,16 +2918,10 @@ void EnterRetailVrSettingsPage() noexcept {
          index < g_vrNormalControlCount; ++index) {
         SetRetailControlVisible(g_vrNormalControls[index], false);
     }
-    g_vrMenuFirstVisibleRow = 0;
-    g_vrMenuPageRows = 8;
-    g_vrSettingsPageActive = true;
-    SetRetailVrMenuCompactSpacing(true);
-    const VrMenuControl first =
-        RefreshRetailVrSettingsControls();
-    SelectRetailVrMenuControl(first);
+    ShowRetailVrSettingsPage(VrSettingsPage::Root);
     Report(
         "INFO", "vr_settings_menu_opened",
-        "The native Retail pause menu is showing VR settings.");
+        "The native Retail pause menu is showing categorized VR settings.");
 }
 
 void LeaveRetailVrSettingsPage() noexcept {
@@ -2255,18 +2946,43 @@ void LeaveRetailVrSettingsPage() noexcept {
         "The native Retail system-menu controls were restored.");
 }
 
+void NavigateBackRetailVrSettingsPage() noexcept {
+    if (!g_vrSettingsPageActive) {
+        return;
+    }
+    const VrSettingsPage parent = ParentVrSettingsPage(g_vrSettingsPage);
+    if (parent == VrSettingsPage::None) {
+        LeaveRetailVrSettingsPage();
+    } else {
+        ShowRetailVrSettingsPage(parent);
+    }
+}
+
 void ResetVrTrackingBasis() noexcept {
     g_physicalDuckActive = false;
     InterlockedIncrement(&g_trackingResetGeneration);
 }
 
-void RequestVrPanelRecenter() noexcept {
+void RequestVrOriginRecenter() noexcept {
     if (g_requestRecenter != nullptr) {
         __try {
             g_requestRecenter();
+            return;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
+    ResetVrTrackingBasis();
+}
+
+void ResetArmIkBendMemory() noexcept {
+    g_rightHandControl.bendDirectionValid = false;
+    g_leftHandControl.bendDirectionValid = false;
+}
+
+void ResetArmIkTuning() noexcept {
+    g_armIkTuning = ArmIkTuning{};
+    ResetArmIkBendMemory();
+    g_twoHandedGrip = TwoHandedGripState{};
 }
 
 void ApplyVrDefaults() noexcept {
@@ -2282,24 +2998,47 @@ void ApplyVrDefaults() noexcept {
     ResetWeaponWeightPair(
         g_weightedWeaponInput.filters,
         WeaponWeightResetReason::enabledChanged);
+    g_weaponWeightDiagnosticsEnabled = false;
+    g_weaponRecoilEnabled = true;
+    g_weaponRecoilProfile = {};
+    ResetWeaponRecoil(g_weightedWeaponInput.recoil);
+    g_weaponCollisionEnabled = true;
+    g_weaponCollisionDebugEnabled = true;
+    g_defaultWeaponCollisionProfile = {};
+    g_weightedWeaponInput.collisionProfile = {};
+    g_weightedWeaponInput.collisionProfileExplicit = false;
+    g_weightedWeaponInput.collisionObstructed = false;
+    ResetWeaponCollisionRuntime(g_weightedWeaponInput.collision);
+    InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+    g_lastWeaponRecoilTick = 0;
+    g_weightedWeaponInput.profile = WeaponWeightProfile{};
+    g_vrWeaponProfileEditsCurrent = true;
+    g_vrRecoilProfileEditsCurrent = true;
+    g_vrCollisionProfileEditsCurrent = true;
     g_weaponAimGuideEnabled = true;
     g_controllerHapticsEnabled = true;
     g_flashlightMount = FlashlightMount::Weapon;
     g_twoHandedGripEnabled = true;
     g_leftHandedBindings = false;
+    g_headRelativeMovement = false;
     g_turnSpeedPreset = 1;
     g_fovScalePreset = 3;
     ApplyFovScalePreset();
+    g_renderScalePercent = 100U;
+    ApplyRenderScalePercent();
     g_climbingEnabled = false;
     g_physicalLeanEnabled = true;
     g_physicalDuckEnabled = true;
     g_physicalDuckActive = false;
+    g_leanScalePercent = 200;
+    ResetLeanCollision(g_leanCollision);
     g_meleeThrustEnabled = true;
     g_meleeWeaponStrikeEnabled = true;
     g_meleeOffHandStrikeEnabled = true;
     g_meleeJumpKickEnabled = true;
     g_meleeSlideKickEnabled = true;
     g_showPlayerArms = false;
+    ResetArmIkTuning();
     ResetMeleeActions(g_meleeActions);
     g_meleePulseUntil = 0;
     g_slideDuckPulseUntil = 0;
@@ -2309,8 +3048,7 @@ void ApplyVrDefaults() noexcept {
     g_climbOnLadder = false;
     g_climbAxis = 0.0F;
     g_climbWasGripping = false;
-    ResetVrTrackingBasis();
-    RequestVrPanelRecenter();
+    RequestVrOriginRecenter();
 }
 
 bool BuildRetailVrMenuControls(void* menu) noexcept {
@@ -2339,7 +3077,7 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
     }
 
     g_vrMenuEntry = AddRetailVrMenuControl(
-        L"VR SETTINGS", kVrMenuOpen);
+        L"VR Settings", kVrMenuOpen);
     if (g_vrMenuEntry.object == nullptr ||
         g_vrMenuEntry.index !=
             kRetailSystemMenuOriginalControlCount) {
@@ -2361,43 +3099,79 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
     g_vrMenuEntry.index = 3;
 
     g_vrMenuTitle = AddRetailVrMenuControl(
-        L"VR SETTINGS", 0, true);
+        L"VR Settings", 0, true);
+    g_vrMenuDisplayTitle = AddRetailVrMenuControl(
+        L"Display & HUD", 0, true);
+    g_vrMenuComfortTitle = AddRetailVrMenuControl(
+        L"Movement & Comfort", 0, true);
+    g_vrMenuControlsTitle = AddRetailVrMenuControl(
+        L"Controls", 0, true);
+    g_vrMenuWeaponsTitle = AddRetailVrMenuControl(
+        L"Weapons", 0, true);
+    g_vrMenuWeaponHandlingTitle = AddRetailVrMenuControl(
+        L"Weapon Handling", 0, true);
+    g_vrMenuWeaponWeightTitle = AddRetailVrMenuControl(
+        L"Simulated Weapon Weight", 0, true);
+    g_vrMenuWeaponRecoilTitle = AddRetailVrMenuControl(
+        L"Weapon Recoil", 0, true);
+    g_vrMenuMeleeTitle = AddRetailVrMenuControl(
+        L"Melee", 0, true);
+    g_vrMenuAdvancedTitle = AddRetailVrMenuControl(
+        L"Advanced", 0, true);
+    g_vrMenuOpenDisplay = AddRetailVrMenuControl(
+        L"Display & HUD", kVrMenuOpenDisplay);
+    g_vrMenuOpenComfort = AddRetailVrMenuControl(
+        L"Movement & Comfort", kVrMenuOpenComfort);
+    g_vrMenuOpenControls = AddRetailVrMenuControl(
+        L"Controls", kVrMenuOpenControls);
+    g_vrMenuOpenWeapons = AddRetailVrMenuControl(
+        L"Weapons", kVrMenuOpenWeapons);
+    g_vrMenuOpenWeaponHandling = AddRetailVrMenuControl(
+        L"Handling & appearance", kVrMenuOpenWeaponHandling);
+    g_vrMenuOpenWeaponWeight = AddRetailVrMenuControl(
+        L"Simulated weight", kVrMenuOpenWeaponWeight);
+    g_vrMenuOpenWeaponRecoil = AddRetailVrMenuControl(
+        L"Recoil", kVrMenuOpenWeaponRecoil);
+    g_vrMenuOpenMelee = AddRetailVrMenuControl(
+        L"Melee", kVrMenuOpenMelee);
+    g_vrMenuOpenAdvanced = AddRetailVrMenuControl(
+        L"Advanced", kVrMenuOpenAdvanced);
     g_vrMenuStereo.enabled = AddRetailVrMenuControl(
-        L"Stereo rendering: ON", kVrMenuToggleStereo);
+        L"Stereo rendering: On", kVrMenuToggleStereo);
     g_vrMenuStereo.disabled = AddRetailVrMenuControl(
-        L"Stereo rendering: OFF", kVrMenuToggleStereo);
+        L"Stereo rendering: Off", kVrMenuToggleStereo);
     g_vrMenuTranslation.enabled = AddRetailVrMenuControl(
-        L"HMD translation: ON", kVrMenuToggleTranslation);
+        L"HMD translation: On", kVrMenuToggleTranslation);
     g_vrMenuTranslation.disabled = AddRetailVrMenuControl(
-        L"HMD translation: OFF", kVrMenuToggleTranslation);
+        L"HMD translation: Off", kVrMenuToggleTranslation);
     g_vrMenuStereoHud.enabled = AddRetailVrMenuControl(
-        L"Stereo HUD: ON", kVrMenuToggleStereoHud);
+        L"Stereo HUD: On", kVrMenuToggleStereoHud);
     g_vrMenuStereoHud.disabled = AddRetailVrMenuControl(
-        L"Stereo HUD: OFF", kVrMenuToggleStereoHud);
+        L"Stereo HUD: Off", kVrMenuToggleStereoHud);
     g_vrMenuHeadBob.enabled = AddRetailVrMenuControl(
-        L"Head bob: ON", kVrMenuToggleHeadBob);
+        L"Head bob: On", kVrMenuToggleHeadBob);
     g_vrMenuHeadBob.disabled = AddRetailVrMenuControl(
-        L"Head bob: OFF", kVrMenuToggleHeadBob);
+        L"Head bob: Off", kVrMenuToggleHeadBob);
     g_vrMenuComfort.enabled = AddRetailVrMenuControl(
-        L"Comfort screen: ON", kVrMenuToggleComfort);
+        L"Comfort screen: On", kVrMenuToggleComfort);
     g_vrMenuComfort.disabled = AddRetailVrMenuControl(
-        L"Comfort screen: OFF", kVrMenuToggleComfort);
-    g_vrMenuWeaponWeight[0] = AddRetailVrMenuControl(
-        L"Weapon weight: NONE", kVrMenuCycleWeaponWeight);
-    g_vrMenuWeaponWeight[1] = AddRetailVrMenuControl(
-        L"Weapon weight: LIGHT", kVrMenuCycleWeaponWeight);
-    g_vrMenuWeaponWeight[2] = AddRetailVrMenuControl(
-        L"Weapon weight: MEDIUM", kVrMenuCycleWeaponWeight);
-    g_vrMenuWeaponWeight[3] = AddRetailVrMenuControl(
-        L"Weapon weight: HEAVY", kVrMenuCycleWeaponWeight);
+        L"Comfort screen: Off", kVrMenuToggleComfort);
+    g_vrMenuWeaponWeightPreset[0] = AddRetailVrMenuControl(
+        L"Weapon weight: None", kVrMenuCycleWeaponWeightPreset);
+    g_vrMenuWeaponWeightPreset[1] = AddRetailVrMenuControl(
+        L"Weapon weight: Light", kVrMenuCycleWeaponWeightPreset);
+    g_vrMenuWeaponWeightPreset[2] = AddRetailVrMenuControl(
+        L"Weapon weight: Medium", kVrMenuCycleWeaponWeightPreset);
+    g_vrMenuWeaponWeightPreset[3] = AddRetailVrMenuControl(
+        L"Weapon weight: Heavy", kVrMenuCycleWeaponWeightPreset);
     g_vrMenuAimGuide.enabled = AddRetailVrMenuControl(
-        L"Red aim guide: ON", kVrMenuToggleAimGuide);
+        L"Red aim guide: On", kVrMenuToggleAimGuide);
     g_vrMenuAimGuide.disabled = AddRetailVrMenuControl(
-        L"Red aim guide: OFF", kVrMenuToggleAimGuide);
+        L"Red aim guide: Off", kVrMenuToggleAimGuide);
     g_vrMenuHaptics.enabled = AddRetailVrMenuControl(
-        L"Controller vibration: ON", kVrMenuToggleHaptics);
+        L"Controller vibration: On", kVrMenuToggleHaptics);
     g_vrMenuHaptics.disabled = AddRetailVrMenuControl(
-        L"Controller vibration: OFF", kVrMenuToggleHaptics);
+        L"Controller vibration: Off", kVrMenuToggleHaptics);
     g_vrMenuFlashlightMount[
         static_cast<int>(FlashlightMount::LeftHand)] =
         AddRetailVrMenuControl(
@@ -2414,29 +3188,83 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
             L"Flashlight mount: WEAPON",
             kVrMenuCycleFlashlightMount);
     g_vrMenuHandedness.enabled = AddRetailVrMenuControl(
-        L"Controls: RIGHT-HANDED", kVrMenuToggleHandedness);
+        L"Controls: Right-handed", kVrMenuToggleHandedness);
     g_vrMenuHandedness.disabled = AddRetailVrMenuControl(
-        L"Controls: LEFT-HANDED", kVrMenuToggleHandedness);
+        L"Controls: Left-handed", kVrMenuToggleHandedness);
+    g_vrMenuMovementDirection.enabled = AddRetailVrMenuControl(
+        L"Move direction: Head", kVrMenuToggleHeadRelativeMovement);
+    g_vrMenuMovementDirection.disabled = AddRetailVrMenuControl(
+        L"Move direction: Body", kVrMenuToggleHeadRelativeMovement);
     g_vrMenuClimbing.enabled = AddRetailVrMenuControl(
-        L"Ladder climbing: HANDS", kVrMenuToggleClimbing);
+        L"Ladder climbing: Hands", kVrMenuToggleClimbing);
     g_vrMenuClimbing.disabled = AddRetailVrMenuControl(
-        L"Ladder climbing: CLASSIC", kVrMenuToggleClimbing);
+        L"Ladder climbing: Classic", kVrMenuToggleClimbing);
     g_vrMenuPhysicalLean.enabled = AddRetailVrMenuControl(
-        L"Physical lean: ON", kVrMenuTogglePhysicalLean);
+        L"Physical lean: On", kVrMenuTogglePhysicalLean);
     g_vrMenuPhysicalLean.disabled = AddRetailVrMenuControl(
-        L"Physical lean: OFF", kVrMenuTogglePhysicalLean);
+        L"Physical lean: Off", kVrMenuTogglePhysicalLean);
     g_vrMenuPhysicalDuck.enabled = AddRetailVrMenuControl(
-        L"Physical duck: ON", kVrMenuTogglePhysicalDuck);
+        L"Physical duck: On", kVrMenuTogglePhysicalDuck);
     g_vrMenuPhysicalDuck.disabled = AddRetailVrMenuControl(
-        L"Physical duck: OFF", kVrMenuTogglePhysicalDuck);
+        L"Physical duck: Off", kVrMenuTogglePhysicalDuck);
+    g_vrMenuLeanScale[0] = AddRetailVrMenuControl(
+        L"Lean strength: 100%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[1] = AddRetailVrMenuControl(
+        L"Lean strength: 150%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[2] = AddRetailVrMenuControl(
+        L"Lean strength: 200%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[3] = AddRetailVrMenuControl(
+        L"Lean strength: 250%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[4] = AddRetailVrMenuControl(
+        L"Lean strength: 300%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[5] = AddRetailVrMenuControl(
+        L"Lean strength: 350%", kVrMenuCycleLeanScale);
+    g_vrMenuLeanScale[6] = AddRetailVrMenuControl(
+        L"Lean strength: 400%", kVrMenuCycleLeanScale);
     g_vrMenuMelee.enabled = AddRetailVrMenuControl(
-        L"Melee: GESTURES", kVrMenuToggleMelee);
+        L"Melee: Gestures", kVrMenuToggleMelee);
     g_vrMenuMelee.disabled = AddRetailVrMenuControl(
-        L"Melee: CLASSIC", kVrMenuToggleMelee);
+        L"Melee: Classic", kVrMenuToggleMelee);
+    g_vrMenuMeleeWeaponStrike.enabled = AddRetailVrMenuControl(
+        L"Weapon-hand strike: On", kVrMenuToggleMeleeWeaponStrike);
+    g_vrMenuMeleeWeaponStrike.disabled = AddRetailVrMenuControl(
+        L"Weapon-hand strike: Off", kVrMenuToggleMeleeWeaponStrike);
+    g_vrMenuMeleeOffHandStrike.enabled = AddRetailVrMenuControl(
+        L"Off-hand strike: On", kVrMenuToggleMeleeOffHandStrike);
+    g_vrMenuMeleeOffHandStrike.disabled = AddRetailVrMenuControl(
+        L"Off-hand strike: Off", kVrMenuToggleMeleeOffHandStrike);
+    g_vrMenuMeleeJumpKick.enabled = AddRetailVrMenuControl(
+        L"Jump kick gesture: On", kVrMenuToggleMeleeJumpKick);
+    g_vrMenuMeleeJumpKick.disabled = AddRetailVrMenuControl(
+        L"Jump kick gesture: Off", kVrMenuToggleMeleeJumpKick);
+    g_vrMenuMeleeSlideKick.enabled = AddRetailVrMenuControl(
+        L"Slide kick gesture: On", kVrMenuToggleMeleeSlideKick);
+    g_vrMenuMeleeSlideKick.disabled = AddRetailVrMenuControl(
+        L"Slide kick gesture: Off", kVrMenuToggleMeleeSlideKick);
     g_vrMenuArms.enabled = AddRetailVrMenuControl(
-        L"Show arms: ON", kVrMenuToggleArms);
+        L"Show arms: On", kVrMenuToggleArms);
     g_vrMenuArms.disabled = AddRetailVrMenuControl(
-        L"Show arms: OFF", kVrMenuToggleArms);
+        L"Show arms: Off", kVrMenuToggleArms);
+    g_vrMenuTwoHandGrip.enabled = AddRetailVrMenuControl(
+        L"Two-handed grip: On", kVrMenuToggleTwoHandGrip);
+    g_vrMenuTwoHandGrip.disabled = AddRetailVrMenuControl(
+        L"Two-handed grip: Off", kVrMenuToggleTwoHandGrip);
+    g_vrMenuWeaponWeight.enabled = AddRetailVrMenuControl(
+        L"Simulated weapon weight: On", kVrMenuToggleWeaponWeight);
+    g_vrMenuWeaponWeight.disabled = AddRetailVrMenuControl(
+        L"Simulated weapon weight: Off", kVrMenuToggleWeaponWeight);
+    g_vrMenuWeaponRecoil.enabled = AddRetailVrMenuControl(
+        L"Weapon recoil: On", kVrMenuToggleWeaponRecoil);
+    g_vrMenuWeaponRecoil.disabled = AddRetailVrMenuControl(
+        L"Weapon recoil: Off", kVrMenuToggleWeaponRecoil);
+    g_vrMenuWeaponWeightDiagnostics.enabled = AddRetailVrMenuControl(
+        L"Weapon diagnostics: On", kVrMenuToggleWeaponWeightDiagnostics);
+    g_vrMenuWeaponWeightDiagnostics.disabled = AddRetailVrMenuControl(
+        L"Weapon diagnostics: Off", kVrMenuToggleWeaponWeightDiagnostics);
+    g_vrMenuWeaponProfileTarget.enabled = AddRetailVrMenuControl(
+        L"Tuning profile: Current weapon", kVrMenuToggleWeaponProfileTarget);
+    g_vrMenuWeaponProfileTarget.disabled = AddRetailVrMenuControl(
+        L"Tuning profile: Default", kVrMenuToggleWeaponProfileTarget);
     g_vrMenuFovScale[0] = AddRetailVrMenuControl(
         L"FOV scale: 100%", kVrMenuCycleFovScale);
     g_vrMenuFovScale[1] = AddRetailVrMenuControl(
@@ -2446,22 +3274,123 @@ bool BuildRetailVrMenuControls(void* menu) noexcept {
     g_vrMenuFovScale[3] = AddRetailVrMenuControl(
         L"FOV scale: 130%", kVrMenuCycleFovScale);
     g_vrMenuTurnSpeed[0] = AddRetailVrMenuControl(
-        L"Turn speed: SLOW",
+        L"Smooth turn: Slow",
         kVrMenuCycleTurnSpeed);
     g_vrMenuTurnSpeed[1] = AddRetailVrMenuControl(
-        L"Turn speed: NORMAL",
+        L"Smooth turn: Normal",
         kVrMenuCycleTurnSpeed);
     g_vrMenuTurnSpeed[2] = AddRetailVrMenuControl(
-        L"Turn speed: FAST",
+        L"Smooth turn: Fast",
         kVrMenuCycleTurnSpeed);
+    g_vrMenuWeaponWeightValue[0] = AddRetailVrMenuControl(
+        L"Weight: 0.25x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[1] = AddRetailVrMenuControl(
+        L"Weight: 0.50x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[2] = AddRetailVrMenuControl(
+        L"Weight: 0.75x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[3] = AddRetailVrMenuControl(
+        L"Weight: 1.00x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[4] = AddRetailVrMenuControl(
+        L"Weight: 1.50x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[5] = AddRetailVrMenuControl(
+        L"Weight: 2.00x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[6] = AddRetailVrMenuControl(
+        L"Weight: 3.00x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponWeightValue[7] = AddRetailVrMenuControl(
+        L"Weight: 4.00x", kVrMenuCycleWeaponWeight);
+    g_vrMenuWeaponPositionFollow[0] = AddRetailVrMenuControl(
+        L"Position follow: 6", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[1] = AddRetailVrMenuControl(
+        L"Position follow: 10", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[2] = AddRetailVrMenuControl(
+        L"Position follow: 14", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[3] = AddRetailVrMenuControl(
+        L"Position follow: 18", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[4] = AddRetailVrMenuControl(
+        L"Position follow: 24", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[5] = AddRetailVrMenuControl(
+        L"Position follow: 32", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponPositionFollow[6] = AddRetailVrMenuControl(
+        L"Position follow: 40", kVrMenuCycleWeaponPositionFollow);
+    g_vrMenuWeaponRotationFollow[0] = AddRetailVrMenuControl(
+        L"Rotation follow: 6", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[1] = AddRetailVrMenuControl(
+        L"Rotation follow: 10", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[2] = AddRetailVrMenuControl(
+        L"Rotation follow: 14", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[3] = AddRetailVrMenuControl(
+        L"Rotation follow: 20", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[4] = AddRetailVrMenuControl(
+        L"Rotation follow: 26", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[5] = AddRetailVrMenuControl(
+        L"Rotation follow: 32", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponRotationFollow[6] = AddRetailVrMenuControl(
+        L"Rotation follow: 40", kVrMenuCycleWeaponRotationFollow);
+    g_vrMenuWeaponCatchUp[0] = AddRetailVrMenuControl(
+        L"Catch-up strength: 0.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[1] = AddRetailVrMenuControl(
+        L"Catch-up strength: 0.5", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[2] = AddRetailVrMenuControl(
+        L"Catch-up strength: 1.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[3] = AddRetailVrMenuControl(
+        L"Catch-up strength: 1.5", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[4] = AddRetailVrMenuControl(
+        L"Catch-up strength: 2.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[5] = AddRetailVrMenuControl(
+        L"Catch-up strength: 3.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponCatchUp[6] = AddRetailVrMenuControl(
+        L"Catch-up strength: 4.0", kVrMenuCycleWeaponCatchUp);
+    g_vrMenuWeaponRecoilStrength[0] = AddRetailVrMenuControl(
+        L"Recoil strength: 50%", kVrMenuCycleWeaponRecoilStrength);
+    g_vrMenuWeaponRecoilStrength[1] = AddRetailVrMenuControl(
+        L"Recoil strength: 100%", kVrMenuCycleWeaponRecoilStrength);
+    g_vrMenuWeaponRecoilStrength[2] = AddRetailVrMenuControl(
+        L"Recoil strength: 150%", kVrMenuCycleWeaponRecoilStrength);
+    g_vrMenuWeaponRecoilStrength[3] = AddRetailVrMenuControl(
+        L"Recoil strength: 200%", kVrMenuCycleWeaponRecoilStrength);
+    g_vrMenuWeaponRecoilStrength[4] = AddRetailVrMenuControl(
+        L"Recoil strength: 300%", kVrMenuCycleWeaponRecoilStrength);
+    g_vrMenuWeaponRecoilStrength[5] = AddRetailVrMenuControl(
+        L"Recoil strength: 500%", kVrMenuCycleWeaponRecoilStrength);
+    g_vrMenuWeaponRecoilRise[0] = AddRetailVrMenuControl(
+        L"Muzzle rise: None", kVrMenuCycleWeaponRecoilRise);
+    g_vrMenuWeaponRecoilRise[1] = AddRetailVrMenuControl(
+        L"Muzzle rise: 50%", kVrMenuCycleWeaponRecoilRise);
+    g_vrMenuWeaponRecoilRise[2] = AddRetailVrMenuControl(
+        L"Muzzle rise: 100%", kVrMenuCycleWeaponRecoilRise);
+    g_vrMenuWeaponRecoilRise[3] = AddRetailVrMenuControl(
+        L"Muzzle rise: 150%", kVrMenuCycleWeaponRecoilRise);
+    g_vrMenuWeaponRecoilRise[4] = AddRetailVrMenuControl(
+        L"Muzzle rise: 200%", kVrMenuCycleWeaponRecoilRise);
+    g_vrMenuWeaponRecoilRise[5] = AddRetailVrMenuControl(
+        L"Muzzle rise: 300%", kVrMenuCycleWeaponRecoilRise);
+    g_vrMenuWeaponRecoilRecovery[0] = AddRetailVrMenuControl(
+        L"Recovery speed: 50%", kVrMenuCycleWeaponRecoilRecovery);
+    g_vrMenuWeaponRecoilRecovery[1] = AddRetailVrMenuControl(
+        L"Recovery speed: 75%", kVrMenuCycleWeaponRecoilRecovery);
+    g_vrMenuWeaponRecoilRecovery[2] = AddRetailVrMenuControl(
+        L"Recovery speed: 100%", kVrMenuCycleWeaponRecoilRecovery);
+    g_vrMenuWeaponRecoilRecovery[3] = AddRetailVrMenuControl(
+        L"Recovery speed: 150%", kVrMenuCycleWeaponRecoilRecovery);
+    g_vrMenuWeaponRecoilRecovery[4] = AddRetailVrMenuControl(
+        L"Recovery speed: 200%", kVrMenuCycleWeaponRecoilRecovery);
+    g_vrMenuWeaponRecoilRecovery[5] = AddRetailVrMenuControl(
+        L"Recovery speed: 300%", kVrMenuCycleWeaponRecoilRecovery);
+    g_vrMenuResetWeaponProfile = AddRetailVrMenuControl(
+        L"Reset selected weapon profile", kVrMenuResetWeaponProfile);
     g_vrMenuRecenter = AddRetailVrMenuControl(
-        L"Recenter 2D panel", kVrMenuRecenter);
+        L"Recenter VR origin", kVrMenuRecenter);
     g_vrMenuDefaults = AddRetailVrMenuControl(
         L"Reset VR defaults", kVrMenuDefaults);
     g_vrMenuBack = AddRetailVrMenuControl(
-        L"BACK", kVrMenuBack);
+        L"Back", kVrMenuBack);
 
-    if (g_vrMenuBack.object == nullptr) {
+    if (g_vrMenuOpenDisplay.object == nullptr ||
+        g_vrMenuOpenAdvanced.object == nullptr ||
+        g_vrMenuOpenWeaponRecoil.object == nullptr ||
+        g_vrMenuWeaponRecoilRecovery[0].object == nullptr ||
+        g_vrMenuResetWeaponProfile.object == nullptr ||
+        g_vrMenuBack.object == nullptr) {
         return false;
     }
     HideRetailVrSettingsControls();
@@ -2505,6 +3434,33 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
     case kVrMenuOpen:
         EnterRetailVrSettingsPage();
         return 1;
+    case kVrMenuOpenDisplay:
+        ShowRetailVrSettingsPage(VrSettingsPage::Display);
+        return 1;
+    case kVrMenuOpenComfort:
+        ShowRetailVrSettingsPage(VrSettingsPage::Comfort);
+        return 1;
+    case kVrMenuOpenControls:
+        ShowRetailVrSettingsPage(VrSettingsPage::Controls);
+        return 1;
+    case kVrMenuOpenWeapons:
+        ShowRetailVrSettingsPage(VrSettingsPage::Weapons);
+        return 1;
+    case kVrMenuOpenWeaponHandling:
+        ShowRetailVrSettingsPage(VrSettingsPage::WeaponHandling);
+        return 1;
+    case kVrMenuOpenWeaponWeight:
+        ShowRetailVrSettingsPage(VrSettingsPage::WeaponWeight);
+        return 1;
+    case kVrMenuOpenWeaponRecoil:
+        ShowRetailVrSettingsPage(VrSettingsPage::WeaponRecoil);
+        return 1;
+    case kVrMenuOpenMelee:
+        ShowRetailVrSettingsPage(VrSettingsPage::Melee);
+        return 1;
+    case kVrMenuOpenAdvanced:
+        ShowRetailVrSettingsPage(VrSettingsPage::Advanced);
+        return 1;
     case kVrMenuToggleStereo:
         SetBooleanOption(
             g_setStereoEnabled,
@@ -2530,7 +3486,9 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             QueryBooleanOption(g_isStereoHudEnabled, true));
         break;
     case kVrMenuToggleHeadBob:
-        ApplyHeadBobEnabled(!g_headBobEnabled);
+        if (g_headBobEnabled || !g_forceHeadBobDisabled) {
+            ApplyHeadBobEnabled(!g_headBobEnabled);
+        }
         selection = SetRetailVrToggleVisible(
             g_vrMenuHeadBob, g_headBobEnabled);
         break;
@@ -2542,7 +3500,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             g_vrMenuComfort,
             QueryBooleanOption(g_isComfortModeEnabled, false));
         break;
-    case kVrMenuCycleWeaponWeight: {
+    case kVrMenuCycleWeaponWeightPreset: {
         const int next =
             (static_cast<int>(g_weaponWeightPreset) + 1) % 4;
         g_weaponWeightPreset = SanitizeWeaponWeightPreset(next);
@@ -2550,9 +3508,9 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             g_weaponWeightPreset != WeaponWeightPreset::none;
         for (int index = 0; index < 4; ++index) {
             SetRetailControlVisible(
-                g_vrMenuWeaponWeight[index], index == next);
+                g_vrMenuWeaponWeightPreset[index], index == next);
         }
-        selection = g_vrMenuWeaponWeight[next];
+        selection = g_vrMenuWeaponWeightPreset[next];
         g_weightedWeaponInput = {};
         ResetWeaponWeightPair(
             g_weightedWeaponInput.filters,
@@ -2606,6 +3564,15 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             "INFO", "vr_flashlight_mount_changed", message);
         break;
     }
+    case kVrMenuToggleTwoHandGrip:
+        g_twoHandedGripEnabled = !g_twoHandedGripEnabled;
+        if (!g_twoHandedGripEnabled) {
+            g_twoHandedGripActive = false;
+            g_twoHandedGrip = TwoHandedGripState{};
+        }
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuTwoHandGrip, g_twoHandedGripEnabled);
+        break;
     case kVrMenuToggleHandedness:
         g_leftHandedBindings = !g_leftHandedBindings;
         // Der gespiegelte Zustand betrifft auch die Handkalibrierung und die
@@ -2618,6 +3585,16 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             g_leftHandedBindings
                 ? "Controller bindings are mirrored for left-handed play."
                 : "Controller bindings use the right-handed default.");
+        break;
+    case kVrMenuToggleHeadRelativeMovement:
+        g_headRelativeMovement = !g_headRelativeMovement;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMovementDirection, g_headRelativeMovement);
+        Report(
+            "INFO", "vr_movement_direction_changed",
+            g_headRelativeMovement
+                ? "Forward movement follows horizontal HMD direction."
+                : "Forward movement follows the Retail player body.");
         break;
     case kVrMenuToggleClimbing:
         g_climbingEnabled = !g_climbingEnabled;
@@ -2645,6 +3622,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         g_meleePulseUntil = 0;
         g_slideDuckPulseUntil = 0;
         g_slideForwardPulseUntil = 0;
+        RefreshRetailVrSettingsControls();
         selection = SetRetailVrToggleVisible(
             g_vrMenuMelee, g_meleeThrustEnabled);
         Report(
@@ -2652,6 +3630,34 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
             g_meleeThrustEnabled
                 ? "Motion-controller melee gestures are enabled."
                 : "Melee uses classic Retail controls only.");
+        break;
+    case kVrMenuToggleMeleeWeaponStrike:
+        g_meleeWeaponStrikeEnabled = !g_meleeWeaponStrikeEnabled;
+        ResetMeleeActions(g_meleeActions);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMeleeWeaponStrike,
+            g_meleeWeaponStrikeEnabled);
+        break;
+    case kVrMenuToggleMeleeOffHandStrike:
+        g_meleeOffHandStrikeEnabled = !g_meleeOffHandStrikeEnabled;
+        ResetMeleeActions(g_meleeActions);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMeleeOffHandStrike,
+            g_meleeOffHandStrikeEnabled);
+        break;
+    case kVrMenuToggleMeleeJumpKick:
+        g_meleeJumpKickEnabled = !g_meleeJumpKickEnabled;
+        ResetMeleeActions(g_meleeActions);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMeleeJumpKick,
+            g_meleeJumpKickEnabled);
+        break;
+    case kVrMenuToggleMeleeSlideKick:
+        g_meleeSlideKickEnabled = !g_meleeSlideKickEnabled;
+        ResetMeleeActions(g_meleeActions);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuMeleeSlideKick,
+            g_meleeSlideKickEnabled);
         break;
     case kVrMenuToggleArms:
         g_showPlayerArms = !g_showPlayerArms;
@@ -2664,6 +3670,57 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
                   "material."
                 : "Player upper and lower arms use the transparent VR "
                   "material; hands, torso and legs remain visible.");
+        break;
+    case kVrMenuToggleWeaponWeight:
+        g_weaponWeightEnabled = !g_weaponWeightEnabled;
+        ResetWeaponWeightPair(
+            g_weightedWeaponInput.filters,
+            WeaponWeightResetReason::enabledChanged);
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuWeaponWeight, g_weaponWeightEnabled);
+        break;
+    case kVrMenuToggleWeaponRecoil:
+        g_weaponRecoilEnabled = !g_weaponRecoilEnabled;
+        ResetWeaponRecoil(g_weightedWeaponInput.recoil);
+        InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+        g_lastWeaponRecoilTick = 0;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuWeaponRecoil, g_weaponRecoilEnabled);
+        break;
+    case kVrMenuToggleWeaponWeightDiagnostics:
+        g_weaponWeightDiagnosticsEnabled =
+            !g_weaponWeightDiagnosticsEnabled;
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuWeaponWeightDiagnostics,
+            g_weaponWeightDiagnosticsEnabled);
+        break;
+    case kVrMenuToggleWeaponProfileTarget:
+        if (HasCurrentWeaponWeightProfile()) {
+            if (g_vrSettingsPage == VrSettingsPage::WeaponRecoil) {
+                g_vrRecoilProfileEditsCurrent =
+                    !g_vrRecoilProfileEditsCurrent;
+                if (g_vrRecoilProfileEditsCurrent) {
+                    (void)EditableWeaponRecoilProfile();
+                }
+            } else {
+                g_vrWeaponProfileEditsCurrent =
+                    !g_vrWeaponProfileEditsCurrent;
+            }
+        } else {
+            g_vrWeaponProfileEditsCurrent = false;
+            g_vrRecoilProfileEditsCurrent = false;
+        }
+        RefreshRetailVrSettingsControls();
+        selection = SetRetailVrToggleVisible(
+            g_vrMenuWeaponProfileTarget,
+            g_vrSettingsPage == VrSettingsPage::WeaponRecoil
+                ? EditingCurrentWeaponRecoilProfile()
+                : EditingCurrentWeaponWeightProfile());
+        break;
+    case kVrMenuResetWeaponProfile:
+        ResetEditableWeaponWeightProfile();
+        RefreshRetailVrSettingsControls();
+        selection = g_vrMenuResetWeaponProfile;
         break;
     case kVrMenuCycleFovScale: {
         g_fovScalePreset = (g_fovScalePreset + 1) % 4;
@@ -2705,6 +3762,14 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
                 ? "Lowering the headset engages Retail crouch."
                 : "Only the classic stick crouch engages Retail crouch.");
         break;
+    case kVrMenuCycleLeanScale: {
+        const std::size_t index = NextVrPresetIndex(
+            g_leanScalePercent, kLeanScalePresets);
+        g_leanScalePercent = kLeanScalePresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuLeanScale, index);
+        break;
+    }
     case kVrMenuCycleTurnSpeed:
         g_turnSpeedPreset = (g_turnSpeedPreset + 1) % 3;
         for (int index = 0; index < 3; ++index) {
@@ -2714,8 +3779,74 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         }
         selection = g_vrMenuTurnSpeed[g_turnSpeedPreset];
         break;
+    case kVrMenuCycleWeaponWeight: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.weight, kWeaponWeightPresets);
+        profile.weight = kWeaponWeightPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponWeightValue, index);
+        break;
+    }
+    case kVrMenuCycleWeaponPositionFollow: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.positionalFollow, kWeaponPositionFollowPresets);
+        profile.positionalFollow = kWeaponPositionFollowPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponPositionFollow, index);
+        break;
+    }
+    case kVrMenuCycleWeaponRotationFollow: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.rotationalFollow, kWeaponRotationFollowPresets);
+        profile.rotationalFollow = kWeaponRotationFollowPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponRotationFollow, index);
+        break;
+    }
+    case kVrMenuCycleWeaponCatchUp: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.catchUpStrength, kWeaponCatchUpPresets);
+        profile.catchUpStrength = kWeaponCatchUpPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponCatchUp, index);
+        break;
+    }
+    case kVrMenuCycleWeaponRecoilStrength: {
+        WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.strength,
+            kWeaponRecoilStrengthPresets);
+        profile.strength = kWeaponRecoilStrengthPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponRecoilStrength, index);
+        break;
+    }
+    case kVrMenuCycleWeaponRecoilRise: {
+        WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.muzzleRise,
+            kWeaponRecoilRisePresets);
+        profile.muzzleRise = kWeaponRecoilRisePresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponRecoilRise, index);
+        break;
+    }
+    case kVrMenuCycleWeaponRecoilRecovery: {
+        WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+        const std::size_t index = NextVrPresetIndex(
+            profile.recovery,
+            kWeaponRecoilRecoveryPresets);
+        profile.recovery = kWeaponRecoilRecoveryPresets[index];
+        selection = SetRetailVrPresetVisible(
+            g_vrMenuWeaponRecoilRecovery, index);
+        break;
+    }
     case kVrMenuRecenter:
-        RequestVrPanelRecenter();
+        RequestVrOriginRecenter();
         selection = g_vrMenuRecenter;
         break;
     case kVrMenuDefaults:
@@ -2724,7 +3855,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
         selection = g_vrMenuDefaults;
         break;
     case kVrMenuBack:
-        LeaveRetailVrSettingsPage();
+        NavigateBackRetailVrSettingsPage();
         return 1;
     default:
         return g_retailMenuOnCommand(
@@ -2733,6 +3864,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
 
     MarkRetailVrMenuForLayout();
     SelectRetailVrMenuControl(selection);
+    ResetRetailVrMenuScroll();
     SaveVrSettings();
     return 1;
 }
@@ -3391,6 +4523,21 @@ bool RotationToPitchYawRoll(
            std::isfinite(roll);
 }
 
+bool ResolveYawOnlyRotation(
+    const LTRotation& rotation,
+    LTRotation& yawOnlyRotation) noexcept {
+    float ignoredPitch = 0.0F;
+    float yaw = 0.0F;
+    float ignoredRoll = 0.0F;
+    if (!RotationToPitchYawRoll(
+            rotation, ignoredPitch, yaw, ignoredRoll)) {
+        return false;
+    }
+    yawOnlyRotation = LTRotation(0.0F, yaw, 0.0F);
+    yawOnlyRotation.Normalize();
+    return RotationIsFiniteAndUsable(yawOnlyRotation);
+}
+
 bool IsRetailCinematicCamera() noexcept {
     unsigned char* const camera = ResolveRetailPlayerCamera();
     if (camera == nullptr) {
@@ -3679,31 +4826,24 @@ void* ResolveRetailPickupDetector() noexcept {
 // Ob die Kamera fuer einen Retail-Aufruf ueberhaupt umgesetzt werden darf.
 // Waehrend Zwischensequenzen und im Komfortpanel gehoert sie der Engine —
 // dieselbe Grenze, an der auch der Taschenlampenpfad zurueckweicht.
+bool IsNativeVrWorldActive() noexcept {
+    if (!g_hookInstalled || g_disableStereoRender ||
+        g_isStereoEnabled == nullptr ||
+        g_isHostConnected == nullptr) {
+        return false;
+    }
+    __try {
+        return g_isStereoEnabled() != FALSE &&
+               g_isHostConnected() != FALSE &&
+               (g_isFlatPanelActive == nullptr ||
+                g_isFlatPanelActive() == FALSE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 bool IsInteractionOverrideAllowed() noexcept {
-    if (!g_hookInstalled || g_disableInteractionHooks) {
-        return false;
-    }
-    bool stereoEnabled = false;
-    if (g_isStereoEnabled != nullptr) {
-        __try {
-            stereoEnabled = g_isStereoEnabled() != FALSE;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return false;
-        }
-    }
-    if (!stereoEnabled) {
-        return false;
-    }
-    if (g_isFlatPanelActive != nullptr) {
-        __try {
-            if (g_isFlatPanelActive() != FALSE) {
-                return false;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return false;
-        }
-    }
-    return true;
+    return !g_disableInteractionHooks && IsNativeVrWorldActive();
 }
 
 // CheckForIntersect liest Position und Drehung der Kamera ausschliesslich in
@@ -4741,6 +5881,683 @@ void RenderWeaponAimGuide(HLOCALOBJ camera) noexcept {
     }
 }
 
+void RenderWeaponCollisionBox(HLOCALOBJ camera) noexcept;
+
+void SetDevMenuQuad(
+    LT_POLYG4& quad, const LTVector& center,
+    const LTVector& right, const LTVector& up,
+    float halfWidth, float halfHeight,
+    std::uint8_t red, std::uint8_t green,
+    std::uint8_t blue, std::uint8_t alpha) noexcept {
+    quad.verts[0].pos = center - right * halfWidth + up * halfHeight;
+    quad.verts[1].pos = center + right * halfWidth + up * halfHeight;
+    quad.verts[2].pos = center + right * halfWidth - up * halfHeight;
+    quad.verts[3].pos = center - right * halfWidth - up * halfHeight;
+    for (LT_VERTG& vertex : quad.verts) {
+        vertex.rgba.Init(red, green, blue, alpha);
+    }
+}
+
+void FormatCurrentWeaponName(
+    wchar_t* text, std::size_t textCount) noexcept {
+    if (text == nullptr || textCount == 0) {
+        return;
+    }
+    text[0] = L'\0';
+    const WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    if (weighted.weapon == nullptr || weighted.profileName[0] == '\0') {
+        _snwprintf_s(text, textCount, _TRUNCATE, L"NONE");
+        return;
+    }
+    if (std::strcmp(weighted.profileName, "default") == 0) {
+        _snwprintf_s(text, textCount, _TRUNCATE, L"UNKNOWN");
+        return;
+    }
+    struct FriendlyWeaponName {
+        const char* profile;
+        const wchar_t* display;
+    };
+    constexpr FriendlyWeaponName names[] = {
+        {"pistol", L"PISTOL"},
+        {"rdpistol", L"RD PISTOL"},
+        {"submachinegun", L"SUBMACHINE GUN"},
+        {"assaultrifle", L"ASSAULT RIFLE"},
+        {"shotgun", L"SHOTGUN"},
+        {"nailgun", L"PENETRATOR"},
+        {"rocketlauncher", L"ROCKET LAUNCHER"},
+        {"cannon", L"CANNON"},
+        {"plasmaweapon", L"PARTICLE WEAPON"},
+    };
+    for (const FriendlyWeaponName& name : names) {
+        if (std::strcmp(weighted.profileName, name.profile) == 0) {
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"%s", name.display);
+            return;
+        }
+    }
+    std::size_t used = 0;
+    for (; weighted.profileName[used] != '\0' &&
+           used + 1 < textCount; ++used) {
+        const unsigned char value = static_cast<unsigned char>(
+            weighted.profileName[used]);
+        text[used] = value == '_'
+            ? L' '
+            : static_cast<wchar_t>(
+                  value >= 'a' && value <= 'z'
+                      ? value - 'a' + 'A' : value);
+    }
+    text[used] = L'\0';
+}
+
+void FormatDevMenuRow(
+    DevMenuTab tab, std::size_t row, wchar_t* text,
+    std::size_t textCount) noexcept {
+    if (text == nullptr || textCount == 0) {
+        return;
+    }
+    text[0] = L'\0';
+    const wchar_t* const onOff[] = {L"OFF", L"ON"};
+    switch (tab) {
+    case DevMenuTab::recoil: {
+        const WeaponRecoilProfile& recoil =
+            DisplayedWeaponRecoilProfile();
+        switch (row) {
+        case 0:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"RECOIL: %s",
+                         onOff[g_weaponRecoilEnabled ? 1 : 0]);
+            break;
+        case 1:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"EDIT PROFILE: %s",
+                EditingCurrentWeaponRecoilProfile()
+                    ? L"CURRENT" : L"DEFAULT");
+            break;
+        case 2:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"RECOIL STRENGTH: %.0f%%",
+                static_cast<double>(recoil.strength * 100.0F));
+            break;
+        case 3:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"MUZZLE RISE: %.0f%%",
+                static_cast<double>(recoil.muzzleRise * 100.0F));
+            break;
+        case 4:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"RECOVERY SPEED: %.0f%%",
+                static_cast<double>(recoil.recovery * 100.0F));
+            break;
+        }
+        break;
+    }
+    case DevMenuTab::weight: {
+        const WeaponWeightProfile& weight = EditableWeaponWeightProfile();
+        static constexpr const wchar_t* kWeightPresetNames[]{
+            L"NONE", L"LIGHT", L"MEDIUM", L"HEAVY"};
+        const int preset = std::clamp(
+            static_cast<int>(g_weaponWeightPreset), 0, 3);
+        switch (row) {
+        case 0:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"SIMULATED WEIGHT: %s",
+                kWeightPresetNames[preset]);
+            break;
+        case 1:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"EDIT PROFILE: %s",
+                EditingCurrentWeaponWeightProfile()
+                    ? L"CURRENT" : L"DEFAULT");
+            break;
+        case 2:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"WEIGHT: %.2fX",
+                         static_cast<double>(weight.weight));
+            break;
+        case 3:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"POSITION FOLLOW: %.0f",
+                static_cast<double>(weight.positionalFollow));
+            break;
+        case 4:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"ROTATION FOLLOW: %.0f",
+                static_cast<double>(weight.rotationalFollow));
+            break;
+        case 5:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"CATCH-UP: %.1f",
+                         static_cast<double>(weight.catchUpStrength));
+            break;
+        }
+        break;
+    }
+    case DevMenuTab::collision: {
+        const WeaponCollisionProfile& collision =
+            DisplayedWeaponCollisionProfile();
+        switch (row) {
+        case 0:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"WORLD COLLISION: %s",
+                onOff[g_weaponCollisionEnabled ? 1 : 0]);
+            break;
+        case 1:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"SHOW COLLISION BOX: %s",
+                onOff[g_weaponCollisionDebugEnabled ? 1 : 0]);
+            break;
+        case 2:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"EDIT PROFILE: %s",
+                EditingCurrentWeaponCollisionProfile()
+                    ? L"CURRENT" : L"DEFAULT");
+            break;
+        case 3:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"BOX LENGTH: %.0f%%",
+                static_cast<double>(collision.lengthScale * 100.0F));
+            break;
+        case 4:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"BOX WIDTH: %.0f CM",
+                static_cast<double>(collision.widthMeters * 100.0F));
+            break;
+        case 5:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"BOX HEIGHT: %.0f CM",
+                static_cast<double>(collision.heightMeters * 100.0F));
+            break;
+        case 6:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"FORWARD OFFSET: %+.0f CM",
+                static_cast<double>(
+                    collision.forwardOffsetMeters * 100.0F));
+            break;
+        }
+        break;
+    }
+    case DevMenuTab::weapon:
+        switch (row) {
+        case 0:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"AIM GUIDE: %s",
+                         onOff[g_weaponAimGuideEnabled ? 1 : 0]);
+            break;
+        case 1:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"SHOW ARMS: %s",
+                         onOff[g_showPlayerArms ? 1 : 0]);
+            break;
+        case 2:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"TWO-HAND GRIP: %s",
+                         onOff[g_twoHandedGripEnabled ? 1 : 0]);
+            break;
+        }
+        break;
+    case DevMenuTab::ik:
+        if (!g_devMenuIkLeftHandPage) {
+            switch (row) {
+            case 0:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"IK PAGE: ELBOWS");
+                break;
+            case 1:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"SHOW ARMS: %s",
+                    onOff[g_showPlayerArms ? 1 : 0]);
+                break;
+            case 2:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"ELBOW OUTWARD: %.0f%%",
+                    static_cast<double>(
+                        g_armIkTuning.elbowOutward * 100.0F));
+                break;
+            case 3:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"ELBOW DOWN: %.0f%%",
+                    static_cast<double>(
+                        g_armIkTuning.elbowDown * 100.0F));
+                break;
+            case 4:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"ELBOW BACK: %+.0f%%",
+                    static_cast<double>(
+                        g_armIkTuning.elbowBack * 100.0F));
+                break;
+            case 5:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"ELBOW STABILITY: %s",
+                    onOff[g_armIkTuning.preserveElbowContinuity ? 1 : 0]);
+                break;
+            case 6:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"RESET ALL IK");
+                break;
+            }
+        } else {
+            switch (row) {
+            case 0:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"IK PAGE: LEFT HAND");
+                break;
+            case 1:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND RIGHT: %+.1f CM",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandRightMeters * 100.0F));
+                break;
+            case 2:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND UP: %+.1f CM",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandUpMeters * 100.0F));
+                break;
+            case 3:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND FORWARD: %+.1f CM",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandForwardMeters * 100.0F));
+                break;
+            case 4:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND PITCH: %+.0f DEG",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandPitchDegrees));
+                break;
+            case 5:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND YAW: %+.0f DEG",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandYawDegrees));
+                break;
+            case 6:
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HAND ROLL: %+.0f DEG",
+                    static_cast<double>(
+                        g_armIkTuning.leftHandRollDegrees));
+                break;
+            }
+        }
+        break;
+    case DevMenuTab::movement: {
+        const wchar_t* const turnSpeeds[] = {L"SLOW", L"NORMAL", L"FAST"};
+        switch (row) {
+        case 0:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"HMD TRANSLATION: %s",
+                onOff[QueryBooleanOption(
+                    g_isTranslationEnabled, false) ? 1 : 0]);
+            break;
+        case 1:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"MOVE DIRECTION: %s",
+                g_headRelativeMovement ? L"HEAD" : L"BODY");
+            break;
+        case 2:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"HEAD BOB: %s",
+                g_forceHeadBobDisabled && !g_headBobEnabled
+                    ? L"LOCKED OFF" : onOff[g_headBobEnabled ? 1 : 0]);
+            break;
+        case 3:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"PHYSICAL LEAN: %s",
+                         onOff[g_physicalLeanEnabled ? 1 : 0]);
+            break;
+        case 4:
+            _snwprintf_s(text, textCount, _TRUNCATE,
+                         L"LEAN STRENGTH: %d%%", g_leanScalePercent);
+            break;
+        case 5:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"TURN SPEED: %s",
+                turnSpeeds[std::clamp(g_turnSpeedPreset, 0, 2)]);
+            break;
+        case 6:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"CLIMBING: %s",
+                g_climbingEnabled ? L"HANDS" : L"CLASSIC");
+            break;
+        case 7:
+            if (!g_headTracking.floorSpace) {
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HEIGHT MODE: LOCAL FALLBACK");
+            } else if (g_configuredEyeHeightMeters > 0.0F) {
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HEIGHT: SET %.0f CM (RESET)",
+                    static_cast<double>(
+                        g_configuredEyeHeightMeters * 100.0F));
+            } else if (IsPlausibleEyeHeightMeters(
+                           g_headTracking.sessionEyeHeightMeters)) {
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE,
+                    L"HEIGHT: AUTO %.0f CM",
+                    static_cast<double>(
+                        g_headTracking.sessionEyeHeightMeters * 100.0F));
+            } else {
+                _snwprintf_s(
+                    text, textCount, _TRUNCATE, L"HEIGHT: AUTO");
+            }
+            break;
+        case 8:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"SET HEIGHT FROM HMD");
+            break;
+        }
+        break;
+    }
+    case DevMenuTab::melee:
+        switch (row) {
+        case 0:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"MELEE GESTURES: %s",
+                         onOff[g_meleeThrustEnabled ? 1 : 0]);
+            break;
+        case 1:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"WEAPON STRIKE: %s",
+                         onOff[g_meleeWeaponStrikeEnabled ? 1 : 0]);
+            break;
+        case 2:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"OFF-HAND STRIKE: %s",
+                         onOff[g_meleeOffHandStrikeEnabled ? 1 : 0]);
+            break;
+        case 3:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"JUMP KICK: %s",
+                         onOff[g_meleeJumpKickEnabled ? 1 : 0]);
+            break;
+        case 4:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"SLIDE KICK: %s",
+                         onOff[g_meleeSlideKickEnabled ? 1 : 0]);
+            break;
+        }
+        break;
+    case DevMenuTab::vr:
+        switch (row) {
+        case 0:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"STEREO HUD: %s",
+                onOff[QueryBooleanOption(g_isStereoHudEnabled, true) ? 1 : 0]);
+            break;
+        case 1:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"FOV SCALE: %u%%",
+                         CurrentFovScalePercent());
+            break;
+        case 2:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"HANDEDNESS: %s",
+                         g_leftHandedBindings ? L"LEFT" : L"RIGHT");
+            break;
+        case 3:
+            _snwprintf_s(text, textCount, _TRUNCATE, L"HAPTICS: %s",
+                         onOff[g_controllerHapticsEnabled ? 1 : 0]);
+            break;
+        case 4:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"WEAPON DIAGNOSTICS: %s",
+                onOff[g_weaponWeightDiagnosticsEnabled ? 1 : 0]);
+            break;
+        case 5:
+            _snwprintf_s(
+                text, textCount, _TRUNCATE, L"RENDER SCALE: %u%%",
+                g_renderScalePercent);
+            break;
+        }
+        break;
+    }
+}
+
+void AppendDevMenuBitmapText(
+    const wchar_t* text, const LTVector& anchor,
+    float horizontalAnchor, float pixelSizeMeters,
+    std::uint8_t red, std::uint8_t green,
+    std::uint8_t blue, std::uint8_t alpha,
+    std::size_t& quadCount) noexcept {
+    if (text == nullptr || pixelSizeMeters <= 0.0F ||
+        quadCount >= g_devMenuGlyphQuads.size()) {
+        return;
+    }
+    const std::size_t length = std::wcslen(text);
+    if (length == 0) {
+        return;
+    }
+    const float pixelSize = pixelSizeMeters * kGameUnitsPerMeter;
+    const float totalWidth =
+        (static_cast<float>(length * 6U - 1U)) * pixelSize;
+    const float startX = -horizontalAnchor * totalWidth;
+    const LTVector towardViewer = g_devMenu.normal * -0.42F;
+
+    for (std::size_t character = 0; character < length; ++character) {
+        const auto* const glyph = DevMenuGlyphRows(text[character]);
+        if (glyph == nullptr) {
+            continue;
+        }
+        for (std::size_t row = 0; row < glyph->size(); ++row) {
+            const std::uint8_t bits = (*glyph)[row];
+            for (std::size_t column = 0; column < 5U; ++column) {
+                if ((bits & (1U << (4U - column))) == 0 ||
+                    quadCount >= g_devMenuGlyphQuads.size()) {
+                    continue;
+                }
+                const float x = startX +
+                    static_cast<float>(character * 6U + column) *
+                        pixelSize +
+                    pixelSize * 0.5F;
+                const float y =
+                    (3.0F - static_cast<float>(row)) * pixelSize;
+                SetDevMenuQuad(
+                    g_devMenuGlyphQuads[quadCount++],
+                    anchor + g_devMenu.right * x +
+                        g_devMenu.up * y + towardViewer,
+                    g_devMenu.right, g_devMenu.up,
+                    pixelSize * 0.43F, pixelSize * 0.43F,
+                    red, green, blue, alpha);
+            }
+        }
+    }
+}
+
+void AnchorFloatingDevMenu(HLOCALOBJ camera) noexcept {
+    if (g_client == nullptr || camera == nullptr) {
+        return;
+    }
+    LTRigidTransform cameraTransform;
+    if (g_client->GetObjectTransform(camera, &cameraTransform) != LT_OK) {
+        return;
+    }
+    LTVector right;
+    LTVector up;
+    LTVector forward;
+    cameraTransform.m_rRot.GetVectors(right, up, forward);
+    right.Normalize();
+    up.Normalize();
+    forward.Normalize();
+    g_devMenu.center = cameraTransform.m_vPos +
+        forward * (kDevMenuDistanceMeters * kGameUnitsPerMeter) -
+        up * (kDevMenuVerticalOffsetMeters * kGameUnitsPerMeter);
+    g_devMenu.right = right;
+    g_devMenu.up = up;
+    g_devMenu.normal = forward;
+    g_devMenu.anchorValid = true;
+}
+
+void RenderFloatingDevMenu(HLOCALOBJ camera) noexcept {
+    if (!g_devMenu.open || g_client == nullptr || camera == nullptr) {
+        return;
+    }
+    if (!g_devMenu.anchorValid) {
+        AnchorFloatingDevMenu(camera);
+    }
+    if (!g_devMenu.anchorValid) {
+        return;
+    }
+
+    constexpr float kWidth = kDevMenuWidthMeters * kGameUnitsPerMeter;
+    constexpr float kHeight = kDevMenuHeightMeters * kGameUnitsPerMeter;
+    constexpr float kHeader = kDevMenuHeaderMeters * kGameUnitsPerMeter;
+    constexpr float kTitle = kDevMenuTitleMeters * kGameUnitsPerMeter;
+    constexpr float kTab = kDevMenuTabMeters * kGameUnitsPerMeter;
+    constexpr float kRow = kDevMenuRowMeters * kGameUnitsPerMeter;
+    constexpr float kTextInset = 0.035F * kGameUnitsPerMeter;
+    const LTVector towardViewer = g_devMenu.normal * -0.12F;
+
+    ILTDrawPrim* const drawPrim = g_client->GetDrawPrim();
+    if (drawPrim == nullptr) {
+        return;
+    }
+    const HOBJECT oldCamera = drawPrim->GetCamera();
+    const ELTDrawPrimTransformMode oldTransformMode =
+        drawPrim->GetTransformMode();
+    const ELTDrawPrimZMode oldZMode = drawPrim->GetZMode();
+    const ELTDrawPrimRenderMode oldRenderMode =
+        drawPrim->GetRenderMode();
+
+    drawPrim->SetCamera(camera);
+    drawPrim->SetTransformMode(eLTDrawPrimTransformMode_World);
+    drawPrim->SetZMode(eLTDrawPrimZMode_None);
+    drawPrim->SetRenderMode(
+        eLTDrawPrimRenderMode_Modulate_Translucent);
+    const bool drawBlockActive =
+        drawPrim->BeginDrawPrimBlock() == LT_OK;
+
+    LT_POLYG4 background;
+    SetDevMenuQuad(
+        background, g_devMenu.center, g_devMenu.right, g_devMenu.up,
+        kWidth * 0.5F, kHeight * 0.5F, 4, 10, 18, 225);
+    drawPrim->DrawPrim(&background);
+
+    const float tabWidth = kWidth / static_cast<float>(kDevMenuTabCount);
+    const float tabY = kHeight * 0.5F - kTitle - kTab * 0.5F;
+    for (std::size_t tab = 0; tab < kDevMenuTabCount; ++tab) {
+        const bool active =
+            tab == static_cast<std::size_t>(g_devMenu.selectedTab);
+        const bool hovered =
+            g_devMenu.pointerValid &&
+            g_devMenu.pointerRegion == DevMenuHitRegion::tab &&
+            g_devMenu.pointerIndex == tab;
+        if (!active && !hovered) {
+            continue;
+        }
+        const float tabX = -kWidth * 0.5F +
+            (static_cast<float>(tab) + 0.5F) * tabWidth;
+        LT_POLYG4 tabHighlight;
+        SetDevMenuQuad(
+            tabHighlight,
+            g_devMenu.center + g_devMenu.right * tabX +
+                g_devMenu.up * tabY + towardViewer,
+            g_devMenu.right, g_devMenu.up,
+            tabWidth * 0.46F, kTab * 0.40F,
+            hovered ? 150 : 20, hovered ? 95 : 125,
+            hovered ? 20 : 170, 220);
+        drawPrim->DrawPrim(&tabHighlight);
+    }
+
+    const float selectedY = kHeight * 0.5F - kHeader -
+        (static_cast<float>(g_devMenu.selectedRow) + 0.5F) * kRow;
+    LT_POLYG4 highlight;
+    SetDevMenuQuad(
+        highlight,
+        g_devMenu.center + g_devMenu.up * selectedY + towardViewer,
+        g_devMenu.right, g_devMenu.up,
+        kWidth * 0.47F, kRow * 0.44F, 20, 125, 170, 210);
+    drawPrim->DrawPrim(&highlight);
+
+    if (g_devMenu.pointerValid) {
+        LT_POLYG4 pointer;
+        SetDevMenuQuad(
+            pointer, g_devMenu.pointerWorld + towardViewer * 2.0F,
+            g_devMenu.right, g_devMenu.up,
+            0.007F * kGameUnitsPerMeter,
+            0.007F * kGameUnitsPerMeter, 255, 190, 40, 255);
+        drawPrim->DrawPrim(&pointer);
+        if (g_weaponAim.valid) {
+            LT_LINEG ray;
+            ray.verts[0].pos = g_weaponAim.fireTransform.m_vPos;
+            ray.verts[1].pos = g_devMenu.pointerWorld;
+            ray.verts[0].rgba.Init(40, 220, 255, 210);
+            ray.verts[1].rgba.Init(255, 190, 40, 245);
+            drawPrim->DrawPrim(&ray);
+        }
+    }
+
+    std::size_t glyphQuadCount = 0;
+    const LTVector titleAnchor =
+        g_devMenu.center + g_devMenu.up *
+            (kHeight * 0.5F - kTitle * 0.43F);
+    wchar_t title[80] = L"FEAR VR LIVE TUNING";
+    if (g_devMenu.selectedTab == DevMenuTab::recoil ||
+        g_devMenu.selectedTab == DevMenuTab::weight ||
+        g_devMenu.selectedTab == DevMenuTab::collision ||
+        g_devMenu.selectedTab == DevMenuTab::weapon) {
+        wchar_t weaponName[48]{};
+        FormatCurrentWeaponName(weaponName, std::size(weaponName));
+        _snwprintf_s(
+            title, std::size(title), _TRUNCATE,
+            L"EQUIPPED: %s", weaponName);
+    }
+    AppendDevMenuBitmapText(
+        title, titleAnchor, 0.5F, 0.0034F,
+        240, 250, 255, 255, glyphQuadCount);
+
+    for (std::size_t tab = 0; tab < kDevMenuTabCount; ++tab) {
+        const float tabX = -kWidth * 0.5F +
+            (static_cast<float>(tab) + 0.5F) * tabWidth;
+        const bool active =
+            tab == static_cast<std::size_t>(g_devMenu.selectedTab);
+        AppendDevMenuBitmapText(
+            kDevMenuTabLabels[tab],
+            g_devMenu.center + g_devMenu.right * tabX +
+                g_devMenu.up * tabY,
+            0.5F, 0.00155F,
+            active ? 255 : 160, active ? 220 : 195,
+            active ? 80 : 210, 255, glyphQuadCount);
+    }
+
+    const std::size_t rowCount = DevMenuRowCount(g_devMenu.selectedTab);
+    for (std::size_t row = 0; row < rowCount; ++row) {
+        wchar_t text[80]{};
+        FormatDevMenuRow(
+            g_devMenu.selectedTab, row, text, std::size(text));
+        const float rowY = kHeight * 0.5F - kHeader -
+            (static_cast<float>(row) + 0.5F) * kRow;
+        const LTVector anchor =
+            g_devMenu.center - g_devMenu.right *
+                (kWidth * 0.5F - kTextInset) +
+            g_devMenu.up * rowY;
+        const bool selected = row == g_devMenu.selectedRow;
+        AppendDevMenuBitmapText(
+            text, anchor, 0.0F, 0.0035F,
+            selected ? 255 : 220,
+            selected ? 220 : 240,
+            selected ? 80 : 248,
+            255, glyphQuadCount);
+    }
+    const LTVector helpAnchor =
+        g_devMenu.center - g_devMenu.up *
+            (kHeight * 0.5F - 0.025F * kGameUnitsPerMeter);
+    AppendDevMenuBitmapText(
+        L"POINT + TRIGGER/A: CHANGE  STICK: NAV  B: CLOSE",
+        helpAnchor, 0.5F, 0.00185F,
+        155, 200, 220, 255, glyphQuadCount);
+    if (glyphQuadCount != 0) {
+        drawPrim->DrawPrim(
+            g_devMenuGlyphQuads.data(),
+            static_cast<std::uint32_t>(glyphQuadCount));
+    }
+
+    if (drawBlockActive) {
+        drawPrim->EndDrawPrimBlock();
+    }
+
+    drawPrim->SetRenderMode(oldRenderMode);
+    drawPrim->SetZMode(oldZMode);
+    drawPrim->SetTransformMode(oldTransformMode);
+    drawPrim->SetCamera(oldCamera);
+}
+
 static_assert(sizeof(void*) == 4,
               "The GameClient loader must remain x86.");
 
@@ -4822,9 +6639,30 @@ bool PrepareTrackedEyePoses(
         return false;
     }
     g_headTracking.currentCenter = currentCenter;
+    g_headTracking.floorSpace =
+        (request.flags & FEARVR_RF_FLOOR_SPACE) != 0;
+    g_headTracking.verticalTranslationOverride = false;
+    g_headTracking.verticalTranslationMeters = 0.0F;
+    if (g_headTracking.floorSpace) {
+        if (!IsPlausibleEyeHeightMeters(
+                g_headTracking.sessionEyeHeightMeters) &&
+            IsPlausibleEyeHeightMeters(currentCenter.py)) {
+            g_headTracking.sessionEyeHeightMeters = currentCenter.py;
+        }
+        const float activeEyeHeight =
+            g_configuredEyeHeightMeters > 0.0F
+            ? g_configuredEyeHeightMeters
+            : g_headTracking.sessionEyeHeightMeters;
+        if (IsPlausibleEyeHeightMeters(activeEyeHeight)) {
+            g_headTracking.verticalTranslationOverride = true;
+            g_headTracking.verticalTranslationMeters =
+                CalibratedVerticalOffsetMeters(
+                    currentCenter.py, activeEyeHeight);
+        }
+    }
 
     const ULONGLONG now = GetTickCount64();
-    const LONG resetGeneration = InterlockedCompareExchange(
+    LONG resetGeneration = InterlockedCompareExchange(
         &g_trackingResetGeneration, 0, 0);
     if (request.frameId == g_headTracking.lastFrameId) {
         if (g_headTracking.lastFreshFrameTick != 0 &&
@@ -4841,11 +6679,22 @@ bool PrepareTrackedEyePoses(
     } else {
         g_headTracking.lastFrameId = request.frameId;
         g_headTracking.lastFreshFrameTick = now;
+        const bool originRecenterRequested =
+            g_headTracking.centered &&
+            g_headTracking.recenterGeneration !=
+                request.recenterGeneration;
+        // A bridge origin recenter invalidates controller and weapon filters
+        // that share the old tracking basis. Advance the local reset once,
+        // before recording the new basis, so presentation is rebuilt together
+        // without causing another recenter on the following frame.
+        if (originRecenterRequested) {
+            resetGeneration =
+                InterlockedIncrement(&g_trackingResetGeneration);
+        }
         const bool recenter =
             !g_headTracking.centered ||
             g_headTracking.trackingLost ||
-            g_headTracking.recenterGeneration !=
-                request.recenterGeneration ||
+            originRecenterRequested ||
             g_headTracking.resetGeneration != resetGeneration;
         if (recenter) {
             const FearVrPose previousRecenter =
@@ -4902,16 +6751,22 @@ bool PrepareTrackedEyePoses(
         return false;
     }
 
-    // Physisches Lehnen braucht denselben Kopfversatz wie die opt-in
-    // Translation — nur wird er gleich darauf an der Weltgeometrie
-    // begrenzt, statt ungebremst durch Waende zu gehen.
+    // Both modes use the same relative HMD center, but room-scale keeps a
+    // normal play-area range while artificial lean retains its short cap.
+    const bool roomScaleTranslation =
+        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0;
     const bool translationEnabled =
-        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0 ||
-        g_physicalLeanEnabled;
+        roomScaleTranslation || g_physicalLeanEnabled;
+    const float maximumTranslationMeters = roomScaleTranslation
+        ? kRoomScaleMaxTranslationMeters
+        : kPhysicalLeanMaxTranslationMeters;
     for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
         eyePose[eye] = EyePoseRelativeToRecenter(
             g_headTracking.recenter, currentCenter,
-            request.eye[eye].pose, translationEnabled);
+            request.eye[eye].pose, translationEnabled,
+            maximumTranslationMeters, 1.0F,
+            g_headTracking.verticalTranslationOverride,
+            g_headTracking.verticalTranslationMeters);
         if (!eyePose[eye].valid) {
             return false;
         }
@@ -4956,8 +6811,9 @@ std::uint64_t MonotonicNanoseconds() noexcept {
 // betraegt wenige Zentimeter und wuerde nur einen zweiten Strahl kosten.
 float UpdateLeanTranslationScale(
     const LTVector& cameraPosition,
-    const LTVector& worldOffset) noexcept {
-    if (!g_physicalLeanEnabled || g_client == nullptr) {
+    const LTVector& worldOffset,
+    bool collisionEnabled) noexcept {
+    if (!collisionEnabled || g_client == nullptr) {
         ResetLeanCollision(g_leanCollision);
         return 1.0F;
     }
@@ -5203,8 +7059,25 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     FearVrRenderRequest request{};
     if (!g_getRenderRequest(&request) ||
         (request.flags & FEARVR_RF_VALID) == 0 ||
-        (request.flags & FEARVR_RF_FLATSCREEN) != 0 ||
         request.frameId == 0) {
+        return g_renderCameraWithOverride(
+            renderer, camera, techniqueOverride);
+    }
+    if (g_waitForNewRenderRequest != nullptr &&
+        g_lastStereoRenderRequestId != 0) {
+        g_stereoStep = "wait_for_fresh_render_request";
+        FearVrRenderRequest freshRequest{};
+        constexpr std::uint32_t kMaximumPacingWaitMilliseconds = 20;
+        if (g_waitForNewRenderRequest(
+                request.frameId,
+                kMaximumPacingWaitMilliseconds,
+                &freshRequest) &&
+            (freshRequest.flags & FEARVR_RF_VALID) != 0 &&
+            freshRequest.frameId != 0) {
+            request = freshRequest;
+        }
+    }
+    if ((request.flags & FEARVR_RF_FLATSCREEN) != 0) {
         return g_renderCameraWithOverride(
             renderer, camera, techniqueOverride);
     }
@@ -5375,16 +7248,30 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     } else {
         ResolveSlideKickViewBase(
             originalTransform.m_rRot, viewBaseRotation);
+        // Retail's camera stores persistent mouse/gamepad pitch underneath the
+        // render object. In VR that rotation would be multiplied by the HMD
+        // and cannot be removed by an HMD recenter. Gameplay therefore keeps
+        // only Retail yaw (body/smooth turn); physical pitch and roll belong
+        // exclusively to the headset.
+        LTRotation yawOnlyRotation;
+        if (ResolveYawOnlyRotation(
+                viewBaseRotation, yawOnlyRotation)) {
+            viewBaseRotation = yawOnlyRotation;
+        }
     }
     const LTRigidTransform stableCameraBase(
         visualBasePosition, viewBaseRotation);
     LTVector bodyPresentationWorldOffset(
         0.0F, 0.0F, 0.0F);
 
-    // Physisches Lehnen: Der gemeinsame Kopfversatz beider Augen wird an der
-    // Welt begrenzt. Beide Augenposen enthalten ihn als denselben Summanden,
-    // deshalb genuegt es, den gesperrten Anteil hier wieder abzuziehen.
-    g_stereoStep = "limit_physical_lean";
+    // The common center delta is world-limited. Both eye poses contain it as
+    // the same term, so the blocked part can be removed from each eye here.
+    const bool roomScaleTranslation =
+        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0;
+    const float maximumTranslationMeters = roomScaleTranslation
+        ? kRoomScaleMaxTranslationMeters
+        : kPhysicalLeanMaxTranslationMeters;
+    g_stereoStep = "limit_head_translation";
     if (cutsceneCamera) {
         // A scripted camera already owns the viewer's world-space position.
         // Keeping the common HMD center translation here moves the eyes away
@@ -5394,20 +7281,66 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         const TrackingVector rawDelta =
             HeadTranslationRelativeToRecenter(
                 g_headTracking.recenter,
-                g_headTracking.currentCenter);
+                g_headTracking.currentCenter,
+                maximumTranslationMeters,
+                g_headTracking.verticalTranslationOverride,
+                g_headTracking.verticalTranslationMeters);
         for (RelativeEyePose& tracked : trackedEye) {
             tracked.positionMeters.x -= rawDelta.x * cutsceneBlend;
             tracked.positionMeters.y -= rawDelta.y * cutsceneBlend;
             tracked.positionMeters.z -= rawDelta.z * cutsceneBlend;
         }
         g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
+    } else if (roomScaleTranslation) {
+        // Room-scale is direct physical movement: keep it 1:1 and do not
+        // apply the artificial lean-strength multiplier. The render body
+        // follows the permitted horizontal projection while the world ray
+        // prevents the camera from crossing nearby solid geometry.
+        const TrackingVector rawDelta =
+            HeadTranslationRelativeToRecenter(
+                g_headTracking.recenter,
+                g_headTracking.currentCenter,
+                kRoomScaleMaxTranslationMeters,
+                g_headTracking.verticalTranslationOverride,
+                g_headTracking.verticalTranslationMeters);
+        const LTVector rawUnits(
+            rawDelta.x * kGameUnitsPerMeter,
+            rawDelta.y * kGameUnitsPerMeter,
+            rawDelta.z * kGameUnitsPerMeter);
+        const LTVector horizontalUnits(
+            rawUnits.x, 0.0F, rawUnits.z);
+        const LTVector worldOffset =
+            viewBaseRotation.RotateVector(horizontalUnits);
+        g_leanTranslationScale = UpdateLeanTranslationScale(
+            originalTransform.m_vPos, worldOffset, true);
+        g_leanViewOffsetUnits = LTVector(
+            rawUnits.x * g_leanTranslationScale,
+            rawUnits.y,
+            rawUnits.z * g_leanTranslationScale);
+        bodyPresentationWorldOffset =
+            viewBaseRotation.RotateVector(
+                LTVector(
+                    g_leanViewOffsetUnits.x, 0.0F,
+                    g_leanViewOffsetUnits.z));
+
+        // The prepared eye poses contain the unblocked center delta. Replace
+        // only that shared term, preserving per-eye IPD and full HMD rotation.
+        for (RelativeEyePose& tracked : trackedEye) {
+            tracked.positionMeters.x -=
+                rawDelta.x * (1.0F - g_leanTranslationScale);
+            tracked.positionMeters.z -=
+                rawDelta.z * (1.0F - g_leanTranslationScale);
+        }
     } else if (g_physicalLeanEnabled) {
         // `rawDelta` steckt so in den Augenposen und ist deshalb die Groesse,
         // die unten wieder herausgerechnet wird. Gewollt ist dagegen der
         // verstaerkte Versatz fuer Blickpunkt, Haende und Waffe.
         const TrackingVector rawDelta =
             HeadTranslationRelativeToRecenter(
-                g_headTracking.recenter, g_headTracking.currentCenter);
+                g_headTracking.recenter, g_headTracking.currentCenter,
+                kPhysicalLeanMaxTranslationMeters,
+                g_headTracking.verticalTranslationOverride,
+                g_headTracking.verticalTranslationMeters);
         const float leanScale =
             static_cast<float>(std::clamp(g_leanScalePercent, 100, 400)) *
             0.01F;
@@ -5424,14 +7357,16 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             remaining.x * kGameUnitsPerMeter,
             remaining.y * kGameUnitsPerMeter,
             remaining.z * kGameUnitsPerMeter);
+        const LTVector horizontalUnits(
+            remainingUnits.x, 0.0F, remainingUnits.z);
         const LTVector worldOffset =
-            viewBaseRotation.RotateVector(remainingUnits);
+            viewBaseRotation.RotateVector(horizontalUnits);
         g_leanTranslationScale = UpdateLeanTranslationScale(
-            originalTransform.m_vPos, worldOffset);
+            originalTransform.m_vPos, worldOffset, true);
 
         g_leanViewOffsetUnits = LTVector(
             remaining.x * g_leanTranslationScale * kGameUnitsPerMeter,
-            remaining.y * g_leanTranslationScale * kGameUnitsPerMeter,
+            remaining.y * kGameUnitsPerMeter,
             remaining.z * g_leanTranslationScale * kGameUnitsPerMeter);
         bodyPresentationWorldOffset =
             viewBaseRotation.RotateVector(
@@ -5446,27 +7381,14 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             tracked.positionMeters.x -=
                 rawDelta.x - remaining.x * g_leanTranslationScale;
             tracked.positionMeters.y -=
-                rawDelta.y - remaining.y * g_leanTranslationScale;
+                rawDelta.y - remaining.y;
             tracked.positionMeters.z -=
                 rawDelta.z - remaining.z * g_leanTranslationScale;
         }
-    } else if (
-        (request.flags & FEARVR_RF_TRANSLATION_ON) != 0) {
-        const TrackingVector rawDelta =
-            HeadTranslationRelativeToRecenter(
-                g_headTracking.recenter,
-                g_headTracking.currentCenter);
-        g_leanViewOffsetUnits = LTVector(
-            rawDelta.x * kGameUnitsPerMeter,
-            rawDelta.y * kGameUnitsPerMeter,
-            rawDelta.z * kGameUnitsPerMeter);
-        bodyPresentationWorldOffset =
-            viewBaseRotation.RotateVector(
-                LTVector(
-                    g_leanViewOffsetUnits.x, 0.0F,
-                    g_leanViewOffsetUnits.z));
     } else {
         g_leanViewOffsetUnits = LTVector(0.0F, 0.0F, 0.0F);
+        ResetLeanCollision(g_leanCollision);
+        g_leanTranslationScale = 1.0F;
     }
     if (!cutsceneCamera) {
         // Im normalen Spiel folgt der sichtbare Körper dem Yaw des Spielers,
@@ -5522,15 +7444,19 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         g_client->SetCameraFOV(camera, stereoFovX, stereoFovY);
         g_stereoStep =
             eye == FEARVR_EYE_LEFT
+                ? "begin_left_eye"
+                : "begin_right_eye";
+        g_beginEye(eye);
+        g_stereoStep =
+            eye == FEARVR_EYE_LEFT
                 ? "clear_left_target"
                 : "clear_right_target";
         if (renderer->ClearRenderTarget(
                 CLEARRTARGET_ALL, 0) != LT_OK) {
+            // CaptureEye also restores a supersampled D3D9 render target.
+            g_captureEye(eye);
             break;
         }
-        g_stereoStep =
-            eye == FEARVR_EYE_LEFT ? "begin_left_eye" : "begin_right_eye";
-        g_beginEye(eye);
         g_stereoStep =
             eye == FEARVR_EYE_LEFT
                 ? "render_left_eye"
@@ -5547,6 +7473,7 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
                 eye == FEARVR_EYE_LEFT
                     ? "render_left_aim_guide"
                     : "render_right_aim_guide";
+            RenderWeaponCollisionBox(camera);
             RenderWeaponAimGuide(camera);
             g_stereoStep =
                 eye == FEARVR_EYE_LEFT
@@ -5555,10 +7482,18 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
             RenderWristHud(camera);
             g_stereoStep =
                 eye == FEARVR_EYE_LEFT
+                    ? "render_left_dev_menu"
+                    : "render_right_dev_menu";
+            RenderFloatingDevMenu(camera);
+            g_stereoStep =
+                eye == FEARVR_EYE_LEFT
                     ? "capture_left_eye"
                     : "capture_right_eye";
-            g_captureEye(eye);
         }
+        // Always leave the eye scope. EndStereoFrame receives frame 0 below
+        // when rendering failed, so a restored but incomplete eye pair can
+        // never be published.
+        g_captureEye(eye);
         ++renderedEyes;
     }
 
@@ -5569,6 +7504,10 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     g_client->SetCameraFOV(camera, originalFovX, originalFovY);
     g_stereoRecovery.valid = false;
     g_stereoStep = "end_stereo_frame";
+    const bool stereoComplete =
+        renderedEyes == FEARVR_EYE_COUNT &&
+        eyeResult[FEARVR_EYE_LEFT] == LT_OK &&
+        eyeResult[FEARVR_EYE_RIGHT] == LT_OK;
     FearVrGameCameraSample gameCamera{};
     gameCamera.frameId = request.frameId;
     gameCamera.pose.px =
@@ -5586,11 +7525,11 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
     gameCamera.pose.qw =
         viewBaseRotation.m_Quat[LTRotation::QW];
     gameCamera.flags = FEARVR_GCF_VALID;
-    g_endStereoFrame(request.frameId, &gameCamera);
+    g_endStereoFrame(
+        stereoComplete ? request.frameId : 0,
+        stereoComplete ? &gameCamera : nullptr);
 
-    if (renderedEyes != FEARVR_EYE_COUNT ||
-        eyeResult[FEARVR_EYE_LEFT] != LT_OK ||
-        eyeResult[FEARVR_EYE_RIGHT] != LT_OK) {
+    if (!stereoComplete) {
         if (InterlockedCompareExchange(
                 &g_stereoFallbackLogged, 1, 0) == 0) {
             Report(
@@ -5603,6 +7542,7 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         return g_renderCameraWithOverride(
             renderer, camera, techniqueOverride);
     }
+    g_lastStereoRenderRequestId = request.frameId;
     if (InterlockedCompareExchange(
             &g_firstStereoFrameLogged, 1, 0) == 0) {
         Report(
@@ -5651,6 +7591,14 @@ LTRESULT InvokeStereoProtected(
     }
     g_bodyPresentationOffsetActive = false;
     g_stereoRecovery.valid = false;
+    if (g_endStereoFrame != nullptr) {
+        __try {
+            // Besides invalidating the partial pair, this restores any
+            // supersampled D3D9 eye target left active by the exception.
+            g_endStereoFrame(0, nullptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
 
     char message[192]{};
     std::snprintf(
@@ -5719,10 +7667,14 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     g_twoHandedGripActive = false;
     g_twoHandedGrip = TwoHandedGripState{};
     g_weaponDisabled = false;
+    g_retailVisibilityInitializedWeapon = nullptr;
+    g_retailWeaponUpdateInProgress = nullptr;
     g_weightedWeaponInput = {};
     ResetWeaponWeightPair(
         g_weightedWeaponInput.filters,
         WeaponWeightResetReason::sceneLoaded);
+    InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+    g_lastWeaponRecoilTick = 0;
 
     if (hadState) {
         Report(
@@ -7202,7 +9154,7 @@ void LogRegressionCommandTransition(
 void InjectSemanticCommandBits(
     const void* bindManager) noexcept {
     if (g_semanticBitsInjected || bindManager == nullptr ||
-        g_disableCommandInjection) {
+        g_disableCommandInjection || DevMenuCapturesControllerInput()) {
         return;
     }
     g_semanticBitsInjected = true;
@@ -7324,6 +9276,18 @@ float __fastcall HookRetailGetBindingValue(
     if (binding == nullptr) {
         return original;
     }
+    // The default mouse bindings feed COMMAND_ID_PITCH/YAW directly into
+    // CPlayerCamera's persistent local rotation. Suppress only those legacy
+    // look paths while the native 3D world is actually active. Flat menus,
+    // host loss, F8 fallback and -NoStereo retain normal mouse control.
+    if ((IsLegacyVrPitchCommand(binding->command) ||
+         IsLegacyVrMouseYawCommand(binding->command)) &&
+        IsNativeVrWorldActive()) {
+        return 0.0F;
+    }
+    if (DevMenuCapturesControllerInput()) {
+        return original;
+    }
     // Menu is handled once on the left menu-button edge through
     // IClientShell::OnKeyDown(VK_ESCAPE). Injecting COMMAND_ID_MENU too
     // would open and close the pause menu within the same update.
@@ -7397,12 +9361,14 @@ float __fastcall HookRetailGetBindingValue(
 
 bool ResolveRetailWeaponTargets(
     void*& weaponManagerUpdate, void*& setWeaponTransform,
-    void*& setWeaponVisible, void*& getFireVectors,
+    void*& setWeaponVisible, void*& startMuzzleFlash,
+    void*& getFireVectors,
     void*& setTrackedTarget,
     void*& vectorObjectFilter) noexcept {
     weaponManagerUpdate = nullptr;
     setWeaponTransform = nullptr;
     setWeaponVisible = nullptr;
+    startMuzzleFlash = nullptr;
     getFireVectors = nullptr;
     setTrackedTarget = nullptr;
     vectorObjectFilter = nullptr;
@@ -7436,6 +9402,7 @@ bool ResolveRetailWeaponTargets(
     auto* const update = base + kRetailWeaponManagerUpdateRva;
     auto* const setTransform = base + kRetailSetWeaponTransformRva;
     auto* const setVisible = base + kRetailSetWeaponVisibleRva;
+    auto* const muzzleFlash = base + kRetailStartMuzzleFlashRva;
     auto* const fireVectors = base + kRetailGetFireVectorsRva;
     auto* const trackedTarget = base + kRetailSetTrackedTargetRva;
     auto* const vectorFilter =
@@ -7454,6 +9421,12 @@ bool ResolveRetailWeaponTargets(
     // Damit ist der Ort des Deaktiviert-Flags belegt.
     constexpr unsigned char kSetVisibleDisabledProbe[] = {
         0x8A, 0x86, 0x23, 0x02, 0x00, 0x00};
+    // CWeaponModelData::StartMuzzleFlash begins by reserving its ClientFX
+    // create structure and loading m_MuzzleFlashFX from +0x50.
+    constexpr unsigned char kStartMuzzleFlashPrefix[] = {
+        0x81, 0xEC, 0xC4, 0x00, 0x00, 0x00, 0x56, 0x8B,
+        0xF1, 0x8B, 0x46, 0x50, 0x85, 0xC0, 0x57, 0x74,
+        0x22};
     constexpr unsigned char kFireVectorsPrefix[] = {
         0x83, 0xEC, 0x58, 0xA1};
     constexpr unsigned char kFireVectorsBody[] = {
@@ -7480,6 +9453,9 @@ bool ResolveRetailWeaponTargets(
             kSetVisibleDisabledProbe,
             sizeof(kSetVisibleDisabledProbe)) ||
         !MatchesCode(
+            muzzleFlash, kStartMuzzleFlashPrefix,
+            sizeof(kStartMuzzleFlashPrefix)) ||
+        !MatchesCode(
             fireVectors, kFireVectorsPrefix,
             sizeof(kFireVectorsPrefix)) ||
         !MatchesCode(
@@ -7501,6 +9477,7 @@ bool ResolveRetailWeaponTargets(
     weaponManagerUpdate = update;
     setWeaponTransform = setTransform;
     setWeaponVisible = setVisible;
+    startMuzzleFlash = muzzleFlash;
     getFireVectors = fireVectors;
     setTrackedTarget = trackedTarget;
     vectorObjectFilter = vectorFilter;
@@ -7609,6 +9586,17 @@ LTVector ResolveTrackedHandBasePosition(
                     (desiredPosition - cameraTransform.m_vPos) * blend;
             }
             return resolvedPosition;
+        }
+        // Keep tracked hands, weapon sockets and firing presentation on the
+        // same yaw-only gameplay basis as the stereo eyes. Otherwise an old
+        // Retail mouse pitch could disappear from the view yet remain baked
+        // into the controller/weapon transforms until another game update.
+        LTRotation yawOnlyRotation;
+        if (ResolveYawOnlyRotation(
+                cameraTransform.m_rRot, yawOnlyRotation) ||
+            ResolveYawOnlyRotation(
+                retailBaseRotation, yawOnlyRotation)) {
+            resolvedBaseRotation = yawOnlyRotation;
         }
         const bool ducking =
             g_retailMovement.available &&
@@ -7865,6 +9853,56 @@ HOBJECT RetailRightWeaponModel(const void* weapon) noexcept {
     return model;
 }
 
+bool RetailRightWeaponModelIsVisible(const void* weapon) noexcept {
+    if (g_client == nullptr) {
+        return false;
+    }
+    HOBJECT const model = RetailRightWeaponModel(weapon);
+    if (model == nullptr) {
+        return false;
+    }
+    __try {
+        ILTCommon* const common = g_client->Common();
+        uint32 flags = 0;
+        return common != nullptr &&
+               common->GetObjectFlags(
+                   model, OFT_Flags, flags) == LT_OK &&
+               (flags & FLAG_VISIBLE) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Keep the carried model renderable without calling CClientWeapon::SetVisible.
+// Retail's full visibility routine always hides m_MuzzleFlashFX, even when it
+// is asked to show the weapon, so it must not run after the weapon update has
+// made a firing flash visible.
+void ForceRetailRightWeaponModelVisible(const void* weapon) noexcept {
+    static volatile LONG fixActiveLogged = 0;
+    if (g_client == nullptr) {
+        return;
+    }
+    HOBJECT const model = RetailRightWeaponModel(weapon);
+    if (model == nullptr) {
+        return;
+    }
+    __try {
+        ILTCommon* const common = g_client->Common();
+        if (common != nullptr &&
+            common->SetObjectFlags(
+                model, OFT_Flags, FLAG_VISIBLE,
+                FLAG_VISIBLE) == LT_OK &&
+            InterlockedCompareExchange(
+                &fixActiveLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "muzzle_flash_visibility_fix_active",
+                "Post-update weapon visibility now changes only the model "
+                "flag, preserving Retail muzzle-flash FX state.");
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 WeaponWeightPose ToWeaponWeightPose(const FearVrPose& pose) noexcept {
     return {
         {pose.px, pose.py, pose.pz},
@@ -7946,6 +9984,161 @@ WeaponWeightProfile LoadWeaponWeightProfile(
             g_defaultWeaponWeightProfile.catchUpStrength)});
 }
 
+void SaveActiveWeaponWeightProfile() noexcept {
+    const WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    if (weighted.profileName[0] == '\0') {
+        return;
+    }
+    wchar_t section[128] = L"WeaponWeight.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         weighted.profileName[index] != '\0' &&
+         used + 1 < std::size(section); ++index) {
+        section[used++] =
+            static_cast<unsigned char>(weighted.profileName[index]);
+    }
+    section[used] = L'\0';
+    WriteVrFloat(section, L"Weight", weighted.profile.weight);
+    WriteVrFloat(
+        section, L"PositionalFollow", weighted.profile.positionalFollow);
+    WriteVrFloat(
+        section, L"RotationalFollow", weighted.profile.rotationalFollow);
+    WriteVrFloat(
+        section, L"CatchUpStrength", weighted.profile.catchUpStrength);
+}
+
+WeaponRecoilProfile LoadWeaponRecoilProfile(
+    const char* profileName, bool& explicitProfile) noexcept {
+    explicitProfile = false;
+    if (profileName == nullptr || profileName[0] == '\0') {
+        return g_weaponRecoilProfile;
+    }
+    wchar_t section[128] = L"WeaponRecoil.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         profileName[index] != '\0' && used + 1 < std::size(section);
+         ++index) {
+        section[used++] =
+            static_cast<unsigned char>(profileName[index]);
+    }
+    section[used] = L'\0';
+
+    wchar_t value[32]{};
+    const auto hasValue = [&](const wchar_t* name) noexcept {
+        value[0] = L'\0';
+        return g_vrSettingsFilePresent &&
+               g_vrSettingsPath[0] != L'\0' &&
+               GetPrivateProfileStringW(
+                   section, name, L"", value,
+                   static_cast<DWORD>(std::size(value)),
+                   g_vrSettingsPath) != 0;
+    };
+    explicitProfile =
+        hasValue(L"Strength") || hasValue(L"MuzzleRise") ||
+        hasValue(L"Recovery");
+    return SanitizeWeaponRecoilProfile({
+        ReadVrFloat(
+            section, L"Strength", g_weaponRecoilProfile.strength),
+        ReadVrFloat(
+            section, L"MuzzleRise", g_weaponRecoilProfile.muzzleRise),
+        ReadVrFloat(
+            section, L"Recovery", g_weaponRecoilProfile.recovery)});
+}
+
+void SaveActiveWeaponRecoilProfile() noexcept {
+    const WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    if (!weighted.recoilProfileExplicit ||
+        !HasCurrentWeaponWeightProfile()) {
+        return;
+    }
+    wchar_t section[128] = L"WeaponRecoil.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         weighted.profileName[index] != '\0' &&
+         used + 1 < std::size(section); ++index) {
+        section[used++] =
+            static_cast<unsigned char>(weighted.profileName[index]);
+    }
+    section[used] = L'\0';
+    WriteVrFloat(
+        section, L"Strength", weighted.recoilProfile.strength);
+    WriteVrFloat(
+        section, L"MuzzleRise", weighted.recoilProfile.muzzleRise);
+    WriteVrFloat(
+        section, L"Recovery", weighted.recoilProfile.recovery);
+}
+
+WeaponCollisionProfile LoadWeaponCollisionProfile(
+    const char* profileName, bool& explicitProfile) noexcept {
+    explicitProfile = false;
+    if (profileName == nullptr || profileName[0] == '\0' ||
+        std::strcmp(profileName, "default") == 0) {
+        return g_defaultWeaponCollisionProfile;
+    }
+    wchar_t section[128] = L"WeaponCollision.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         profileName[index] != '\0' && used + 1 < std::size(section);
+         ++index) {
+        section[used++] = static_cast<unsigned char>(profileName[index]);
+    }
+    section[used] = L'\0';
+
+    wchar_t value[32]{};
+    const auto hasValue = [&](const wchar_t* name) noexcept {
+        value[0] = L'\0';
+        return g_vrSettingsFilePresent &&
+               g_vrSettingsPath[0] != L'\0' &&
+               GetPrivateProfileStringW(
+                   section, name, L"", value,
+                   static_cast<DWORD>(std::size(value)),
+                   g_vrSettingsPath) != 0;
+    };
+    explicitProfile =
+        hasValue(L"LengthScale") || hasValue(L"Width") ||
+        hasValue(L"Height") || hasValue(L"ForwardOffset");
+    return SanitizeWeaponCollisionProfile({
+        ReadVrFloat(
+            section, L"LengthScale",
+            g_defaultWeaponCollisionProfile.lengthScale),
+        ReadVrFloat(
+            section, L"Width",
+            g_defaultWeaponCollisionProfile.widthMeters),
+        ReadVrFloat(
+            section, L"Height",
+            g_defaultWeaponCollisionProfile.heightMeters),
+        ReadVrFloat(
+            section, L"ForwardOffset",
+            g_defaultWeaponCollisionProfile.forwardOffsetMeters)});
+}
+
+void SaveActiveWeaponCollisionProfile() noexcept {
+    const WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    if (!weighted.collisionProfileExplicit ||
+        !HasCurrentWeaponWeightProfile()) {
+        return;
+    }
+    wchar_t section[128] = L"WeaponCollision.";
+    std::size_t used = std::wcslen(section);
+    for (std::size_t index = 0;
+         weighted.profileName[index] != '\0' &&
+         used + 1 < std::size(section); ++index) {
+        section[used++] =
+            static_cast<unsigned char>(weighted.profileName[index]);
+    }
+    section[used] = L'\0';
+    WriteVrFloat(
+        section, L"LengthScale",
+        weighted.collisionProfile.lengthScale);
+    WriteVrFloat(
+        section, L"Width", weighted.collisionProfile.widthMeters);
+    WriteVrFloat(
+        section, L"Height", weighted.collisionProfile.heightMeters);
+    WriteVrFloat(
+        section, L"ForwardOffset",
+        weighted.collisionProfile.forwardOffsetMeters);
+}
+
 void PrepareWeightedWeaponPoses(
     const void* weapon, FearVrPose& aimPose,
     std::uint32_t& aimValidHands, FearVrPose& gripPose,
@@ -7963,12 +10156,21 @@ void PrepareWeightedWeaponPoses(
         // sensitive update path, then load an explicit incoming profile.
         ResetWeaponWeightPair(
             weighted.filters, WeaponWeightResetReason::weaponChanged);
+        ResetWeaponRecoil(weighted.recoil);
+        ResetWeaponCollisionRuntime(weighted.collision);
+        weighted.collisionObstructed = false;
+        InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+        g_lastWeaponRecoilTick = 0;
         weighted.weapon = weapon;
         weighted.lastSampleId = 0;
         weighted.lastAimValidTick = 0;
         weighted.lastGripValidTick = 0;
         weighted.profile = LoadWeaponWeightProfile(
             weapon, weighted.profileName);
+        weighted.recoilProfile = LoadWeaponRecoilProfile(
+            weighted.profileName, weighted.recoilProfileExplicit);
+        weighted.collisionProfile = LoadWeaponCollisionProfile(
+            weighted.profileName, weighted.collisionProfileExplicit);
     }
     if (weighted.resetGeneration != resetGeneration) {
         ResetWeaponWeightPair(
@@ -7976,6 +10178,9 @@ void PrepareWeightedWeaponPoses(
             weighted.resetGeneration < 0
                 ? WeaponWeightResetReason::referenceSpaceChanged
                 : WeaponWeightResetReason::teleportedOrRecentered);
+        ResetWeaponRecoil(weighted.recoil);
+        ResetWeaponCollisionRuntime(weighted.collision);
+        weighted.collisionObstructed = false;
         weighted.resetGeneration = resetGeneration;
         weighted.lastSampleId = 0;
         weighted.lastAimValidTick = 0;
@@ -7987,6 +10192,29 @@ void PrepareWeightedWeaponPoses(
                 weighted.filters, WeaponWeightResetReason::enabledChanged);
         }
         weighted.enabledOnLastUpdate = false;
+        weighted.recoilOffset = {};
+        const LONG pendingRecoilShots =
+            InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+        const bool rawAimValid =
+            (aimValidHands & FEARVR_HAND_MASK_RIGHT) != 0;
+        const bool rawGripValid =
+            (gripValidHands & FEARVR_HAND_MASK_RIGHT) != 0;
+        if (rawAimValid && rawGripValid && g_weaponRecoilEnabled) {
+            UpdateWeaponRecoil(
+                weighted.recoil, MonotonicNanoseconds(), true,
+                weighted.profile, ActiveWeaponRecoilProfile(),
+                pendingRecoilShots > 0
+                    ? static_cast<std::uint32_t>(pendingRecoilShots) : 0U,
+                weighted.recoilOffset);
+            WeaponWeightPose recoilingAim = ToWeaponWeightPose(aimPose);
+            WeaponWeightPose recoilingGrip = ToWeaponWeightPose(gripPose);
+            ApplyWeaponRecoil(
+                weighted.recoilOffset, recoilingAim, recoilingGrip);
+            aimPose = FromWeaponWeightPose(recoilingAim);
+            gripPose = FromWeaponWeightPose(recoilingGrip);
+        } else {
+            ResetWeaponRecoil(weighted.recoil);
+        }
         return;
     }
     if (!weighted.enabledOnLastUpdate) {
@@ -8058,17 +10286,39 @@ void PrepareWeightedWeaponPoses(
         }
     }
 
+    const LONG pendingRecoilShots =
+        InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+    weighted.recoilOffset = {};
+    if (aimFresh && gripFresh) {
+        UpdateWeaponRecoil(
+            weighted.recoil, MonotonicNanoseconds(),
+            g_weaponRecoilEnabled, weighted.profile,
+            ActiveWeaponRecoilProfile(),
+            pendingRecoilShots > 0
+                ? static_cast<std::uint32_t>(pendingRecoilShots) : 0U,
+            weighted.recoilOffset);
+        WeaponWeightPose recoilingAim = ToWeaponWeightPose(aimPose);
+        WeaponWeightPose recoilingGrip = ToWeaponWeightPose(gripPose);
+        ApplyWeaponRecoil(
+            weighted.recoilOffset, recoilingAim, recoilingGrip);
+        aimPose = FromWeaponWeightPose(recoilingAim);
+        gripPose = FromWeaponWeightPose(recoilingGrip);
+    } else {
+        ResetWeaponRecoil(weighted.recoil);
+    }
+
     if (g_weaponWeightDiagnosticsEnabled &&
         (weighted.lastDiagnosticTick == 0 ||
          now - weighted.lastDiagnosticTick >= 1000)) {
         weighted.lastDiagnosticTick = now;
-        char message[384]{};
+        char message[448]{};
         std::snprintf(
             message, sizeof(message),
             "profile=%s valid=%d pos_error=%.2fcm angle_error=%.2fdeg "
             "position_omega=%.2f rotation_omega=%.2f "
             "linear_velocity=(%.3f,%.3f,%.3f) "
-            "angular_velocity=(%.3f,%.3f,%.3f) reset=%u",
+            "angular_velocity=(%.3f,%.3f,%.3f) "
+            "recoil=(%.2fcm,%.2fdeg) reset=%u",
             weighted.profileName, aimFresh && gripFresh ? 1 : 0,
             weighted.aimDiagnostics.positionalErrorMeters * 100.0F,
             weighted.aimDiagnostics.angularErrorRadians *
@@ -8081,6 +10331,9 @@ void PrepareWeightedWeaponPoses(
             weighted.aimDiagnostics.angularVelocity.x,
             weighted.aimDiagnostics.angularVelocity.y,
             weighted.aimDiagnostics.angularVelocity.z,
+            weighted.recoilOffset.backwardMeters * 100.0F,
+            weighted.recoilOffset.pitchRadians *
+                (180.0F / 3.14159265358979323846F),
             static_cast<unsigned>(weighted.aimDiagnostics.resetReason));
         Report("INFO", "weapon_weight_diagnostics", message);
     }
@@ -9958,8 +12211,8 @@ bool CurrentSupportDirection(LTVector& direction) noexcept {
 // ein `return` wuerde sie deshalb schlagartig auf Einhand-Zielen und damit in
 // die Bildmitte zuruecksetzen. Stattdessen wird der Winkel weich gedaempft.
 bool ClampTwoHandedTargetDirection(
-    const LTVector& forward, LTVector& target) noexcept {
-    const float dot = std::clamp(forward.Dot(target), -1.0F, 1.0F);
+    const LTVector& baseDirection, LTVector& target) noexcept {
+    const float dot = std::clamp(baseDirection.Dot(target), -1.0F, 1.0F);
     const float angle = std::acos(dot);
     const float limited = SoftLimitedSteerAngle(angle);
     if (!std::isfinite(limited) || limited >= angle - 0.0001F) {
@@ -9968,26 +12221,26 @@ bool ClampTwoHandedTargetDirection(
 
     // Das Kreuzprodukt von Hand: `LTVector::Cross` dreht die Operanden-
     // reihenfolge gegenueber dem rechtshaendigen Kreuzprodukt um
-    // (COORDINATE-SYSTEM.md §1). Mit `forward.Cross(target)` zeigte die
+    // (COORDINATE-SYSTEM.md §1). Mit `baseDirection.Cross(target)` zeigte die
     // Drehachse deshalb genau in die Gegenrichtung, und die begrenzte Waffe
     // kippte auf die falsche Seite der Zielachse — der Sprung, den der
     // Benutzer am 28.07.2026 als "ploetzlich nach links" gemeldet hat.
     // `RotationBetweenDirections` rechnet aus demselben Grund von Hand.
     LTVector axis(
-        forward.y * target.z - forward.z * target.y,
-        forward.z * target.x - forward.x * target.z,
-        forward.x * target.y - forward.y * target.x);
+        baseDirection.y * target.z - baseDirection.z * target.y,
+        baseDirection.z * target.x - baseDirection.x * target.z,
+        baseDirection.x * target.y - baseDirection.y * target.x);
     if (axis.MagSqr() < 0.0001F) {
         // Handlinie und Waffenachse sind (anti)parallel: jede senkrechte
         // Achse taugt, die Richtung ist hier ohnehin nicht bestimmt.
         const LTVector reference =
-            std::fabs(forward.y) < 0.9F
+            std::fabs(baseDirection.y) < 0.9F
                 ? LTVector(0.0F, 1.0F, 0.0F)
                 : LTVector(1.0F, 0.0F, 0.0F);
         axis.Init(
-            forward.y * reference.z - forward.z * reference.y,
-            forward.z * reference.x - forward.x * reference.z,
-            forward.x * reference.y - forward.y * reference.x);
+            baseDirection.y * reference.z - baseDirection.z * reference.y,
+            baseDirection.z * reference.x - baseDirection.x * reference.z,
+            baseDirection.x * reference.y - baseDirection.y * reference.x);
     }
     if (axis.MagSqr() < 0.0001F) {
         return false;
@@ -9996,19 +12249,34 @@ bool ClampTwoHandedTargetDirection(
 
     LTRotation limit;
     limit.Init(axis, limited);
-    target = limit.RotateVector(forward);
+    target = limit.RotateVector(baseDirection);
     return target.MagSqr() > 0.0001F;
 }
 
+void ReleaseTwoHandedGrip(bool preserveGeometry = true) noexcept {
+    g_twoHandedGripActive = false;
+    if (!preserveGeometry) {
+        g_twoHandedGrip = TwoHandedGripState{};
+        return;
+    }
+    g_twoHandedGrip.placementValid = false;
+    g_twoHandedGrip.animatedRightSocketValid = false;
+    g_twoHandedGrip.animatedLeftSocketValid = false;
+}
+
 void UpdateTwoHandedGrip() noexcept {
+    const void* const weapon = g_weaponAim.retailWeapon;
+    if (g_twoHandedGrip.geometryWeapon != weapon) {
+        ReleaseTwoHandedGrip(false);
+        g_twoHandedGrip.geometryWeapon = weapon;
+    }
     const bool usable =
-        g_twoHandedGripEnabled && g_weaponAim.valid &&
+        weapon != nullptr && g_twoHandedGripEnabled && g_weaponAim.valid &&
         g_weaponAim.gripValid && g_weaponAim.leftGripValid &&
         !DualPistolsVrActive();
     if (g_twoHandedGripActive) {
         if (!usable || ShouldReleaseTwoHandedGrip(g_currentInput)) {
-            g_twoHandedGripActive = false;
-            g_twoHandedGrip = TwoHandedGripState{};
+            ReleaseTwoHandedGrip();
         }
         return;
     }
@@ -10017,101 +12285,462 @@ void UpdateTwoHandedGrip() noexcept {
     }
 
     g_twoHandedGripActive = true;
-    g_twoHandedGrip.blendRamp = 0.0F;
-    // Der Winkelversatz zwischen Handlinie und Waffe im Moment des Zugreifens.
-    // Ohne ihn schnappt die Waffe beim Greifen auf die Handlinie — genau das
-    // Verschieben, das der Benutzer gemeldet hat. Mit ihm bleibt sie stehen,
-    // und erst die weitere Handbewegung dreht sie.
-    LTVector support;
-    LTVector forward = g_weaponAim.fireTransform.m_rRot.Forward();
-    g_twoHandedGrip.offsetValid =
-        CurrentSupportDirection(support) &&
-        forward.MagSqr() > 0.0001F &&
-        RotationBetweenDirections(
-            support, forward, g_twoHandedGrip.offset);
-
-    // Die sichtbare Hand darf nicht an der zufaelligen Controllerstelle
-    // einrasten. Die naechste unveraenderte Player-Body-Auswertung liefert
-    // stattdessen Retails original animierten linken Griff relativ zum
-    // rechten Waffenhand-Socket.
-    g_twoHandedGrip.placementValid = false;
-    g_twoHandedGrip.animatedRightSocketValid = false;
-    g_twoHandedGrip.animatedLeftSocketValid = false;
+    if (g_twoHandedGrip.geometryValid &&
+        g_twoHandedGrip.geometryWeapon == weapon) {
+        g_twoHandedGrip.placementValid = true;
+        g_twoHandedGrip.animatedRightSocketValid = false;
+        g_twoHandedGrip.animatedLeftSocketValid = false;
+    } else {
+        // Die sichtbare Hand darf nicht an der zufaelligen Controllerstelle
+        // einrasten. Die naechste unveraenderte Player-Body-Auswertung liefert
+        // stattdessen Retails original animierten linken Griff relativ zum
+        // rechten Waffenhand-Socket.
+        g_twoHandedGrip.placementValid = false;
+        g_twoHandedGrip.geometryValid = false;
+        g_twoHandedGrip.animatedRightSocketValid = false;
+        g_twoHandedGrip.animatedLeftSocketValid = false;
+    }
 
     if (InterlockedCompareExchange(
             &g_twoHandedGripActiveLogged, 1, 0) == 0) {
-        const float barrelLengthMeters = CurrentBarrelLengthMeters();
         char message[192]{};
         std::snprintf(
             message, sizeof(message),
-            "The left hand is supporting the weapon; barrel length "
-            "%.1f cm gives an aim blend of %.2f. The grab holds until "
-            "the button is released; the visible hand uses Retail's "
-            "weapon-specific animated grip.",
-            barrelLengthMeters * 100.0F,
-            TwoHandedAimBlend(barrelLengthMeters));
+            "The left hand is supporting the weapon as a rigid secondary "
+            "pivot using Retail's weapon-specific animated grip. Both "
+            "tracked hands drive the weapon until release.");
         Report("INFO", "two_handed_grip_active", message);
     }
 }
 
-// Beim beidhaendigen Halten fuehrt die Linie zwischen beiden Haenden die
-// Waffe. Wie stark, haengt an der Waffenlaenge: eine Pistole bleibt allein an
-// der rechten Hand, ein Gewehr liegt in beiden. Gedreht wird ueber die
-// kuerzeste Drehung, damit die Waffenneigung der rechten Hand erhalten bleibt.
+// Rigid two-anchor solve. The dominant controller contributes the base
+// orientation (including roll), the line between both tracked grips corrects
+// its direction, and translation then places the stored support attachment
+// exactly at the left controller. Moving the right hand around a stationary
+// support hand therefore rotates around the support pivot instead of dragging
+// the visible left hand around a right-hand origin.
 void ApplyTwoHandedAimSupport() noexcept {
-    if (!g_twoHandedGripActive || !g_twoHandedGrip.offsetValid) {
-        return;
-    }
-    const float blend =
-        TwoHandedAimBlend(CurrentBarrelLengthMeters());
-    if (blend <= 0.0F) {
+    if (!g_twoHandedGripActive || !g_twoHandedGrip.geometryValid) {
         return;
     }
 
     LTVector support;
     if (!CurrentSupportDirection(support)) {
+        // A collapsed hand line has no stable rigid solution. Release the
+        // secondary attachment rather than reverting to right-origin motion
+        // and dragging the visible support hand.
+        ReleaseTwoHandedGrip();
         return;
     }
-    LTVector forward = g_weaponAim.fireTransform.m_rRot.Forward();
-    if (forward.MagSqr() < 0.0001F) {
+    LTVector predictedSupport =
+        g_weaponAim.fireTransform.m_rRot.RotateVector(
+            g_twoHandedGrip.grabOffsetInWeapon);
+    if (predictedSupport.MagSqr() < 0.0001F) {
         return;
     }
-    forward.Normalize();
-
-    // Die Handlinie im Rahmen des Zugreifens: Beim Griff ist das exakt die
-    // damalige Waffenachse, danach dreht jede Handbewegung sie weiter.
-    LTVector target = g_twoHandedGrip.offset.RotateVector(support);
-    if (target.MagSqr() < 0.0001F) {
-        return;
-    }
-    target.Normalize();
+    predictedSupport.Normalize();
     // Zwei Haende an derselben Waffe koennen nicht beliebig zueinander
     // stehen. Laeuft die Stuetzhand zu weit weg, wird die Lenkung am Rand des
     // erlaubten Kegels begrenzt. Ein harter Abbruch hier wuerde auf die zuvor
     // berechnete Einhandpose zurueckfallen und die Waffe in die Bildmitte
     // springen lassen.
-    if (!ClampTwoHandedTargetDirection(forward, target)) {
+    if (!ClampTwoHandedTargetDirection(predictedSupport, support)) {
         return;
     }
 
-    // Der Anteil faehrt ueber wenige Bilder hoch. Der Versatz allein macht den
-    // Griff schon sprungfrei; die Rampe faengt zusaetzlich den Ruck ab, wenn
-    // die Hand im Moment des Zugreifens noch in Bewegung ist.
-    g_twoHandedGrip.blendRamp = (std::min)(
-        1.0F, g_twoHandedGrip.blendRamp + kTwoHandBlendRampPerFrame);
-    const float effectiveBlend = blend * g_twoHandedGrip.blendRamp;
-
-    LTVector blended = forward + (target - forward) * effectiveBlend;
-    if (blended.MagSqr() < 0.0001F) {
-        return;
-    }
-    blended.Normalize();
     LTRotation correction;
-    if (!RotationBetweenDirections(forward, blended, correction)) {
+    if (!RotationBetweenDirections(
+            predictedSupport, support, correction)) {
         return;
     }
     g_weaponAim.fireTransform.m_rRot =
         correction * g_weaponAim.fireTransform.m_rRot;
+    g_weaponAim.fireTransform.m_rRot.Normalize();
+
+    const LTVector rotatedSupportOffset =
+        g_weaponAim.fireTransform.m_rRot.RotateVector(
+            g_twoHandedGrip.grabOffsetInWeapon);
+    const TwoHandedPivotTranslation pivot = SolveSecondaryGripPivot(
+        {g_weaponAim.gripTransform.m_vPos.x,
+         g_weaponAim.gripTransform.m_vPos.y,
+         g_weaponAim.gripTransform.m_vPos.z},
+        {g_weaponAim.leftGripTransform.m_vPos.x,
+         g_weaponAim.leftGripTransform.m_vPos.y,
+         g_weaponAim.leftGripTransform.m_vPos.z},
+        {rotatedSupportOffset.x, rotatedSupportOffset.y,
+         rotatedSupportOffset.z});
+    if (!pivot.valid) {
+        return;
+    }
+    const LTVector pivotCorrection(
+        pivot.correction.x, pivot.correction.y, pivot.correction.z);
+    g_weaponAim.gripTransform.m_vPos = LTVector(
+        pivot.primaryPosition.x,
+        pivot.primaryPosition.y,
+        pivot.primaryPosition.z);
+    // Aim and grip poses originate on the same controller. Preserve their
+    // measured offset when the rigid weapon origin moves to honor the pivot.
+    g_weaponAim.fireTransform.m_vPos += pivotCorrection;
+}
+
+struct WeaponCollisionBoxGeometry {
+    LTVector rearCenter;
+    LTVector right;
+    LTVector up;
+    LTVector forward;
+    float lengthUnits{0.0F};
+    float halfWidthUnits{0.0F};
+    float halfHeightUnits{0.0F};
+};
+
+bool ResolveWeaponCollisionBox(
+    const void* weapon, WeaponCollisionBoxGeometry& box) noexcept {
+    if (weapon == nullptr || weapon != g_weaponAim.muzzleWeapon ||
+        !g_weaponAim.valid || !g_weaponAim.gripValid ||
+        !g_weaponAim.muzzleLocalValid) {
+        return false;
+    }
+    const WeaponCollisionProfile profile =
+        SanitizeWeaponCollisionProfile(ActiveWeaponCollisionProfile());
+    const float barrelLengthMeters = CurrentBarrelLengthMeters();
+    if (!(barrelLengthMeters > 0.02F)) {
+        return false;
+    }
+
+    g_weaponAim.fireTransform.m_rRot.GetVectors(
+        box.right, box.up, box.forward);
+    if (box.right.MagSqr() < 0.0001F ||
+        box.up.MagSqr() < 0.0001F ||
+        box.forward.MagSqr() < 0.0001F) {
+        return false;
+    }
+    box.right.Normalize();
+    box.up.Normalize();
+    box.forward.Normalize();
+    box.lengthUnits =
+        barrelLengthMeters * profile.lengthScale * kGameUnitsPerMeter;
+    box.halfWidthUnits =
+        profile.widthMeters * 0.5F * kGameUnitsPerMeter;
+    box.halfHeightUnits =
+        profile.heightMeters * 0.5F * kGameUnitsPerMeter;
+    box.rearCenter = g_weaponAim.gripTransform.m_vPos +
+        box.forward *
+            (profile.forwardOffsetMeters * kGameUnitsPerMeter);
+    return std::isfinite(box.lengthUnits) && box.lengthUnits > 2.0F;
+}
+
+void BuildWeaponCollisionCorners(
+    const WeaponCollisionBoxGeometry& box, float expansionUnits,
+    LTVector (&corners)[8]) noexcept {
+    expansionUnits = (std::max)(0.0F, expansionUnits);
+    const LTVector rearCenter =
+        box.rearCenter - box.forward * expansionUnits;
+    const LTVector frontCenter = box.rearCenter + box.forward *
+        (box.lengthUnits + expansionUnits);
+    const LTVector right = box.right *
+        (box.halfWidthUnits + expansionUnits);
+    const LTVector up = box.up *
+        (box.halfHeightUnits + expansionUnits);
+    corners[0] = rearCenter - right - up;
+    corners[1] = rearCenter + right - up;
+    corners[2] = rearCenter + right + up;
+    corners[3] = rearCenter - right + up;
+    corners[4] = frontCenter - right - up;
+    corners[5] = frontCenter + right - up;
+    corners[6] = frontCenter + right + up;
+    corners[7] = frontCenter - right + up;
+}
+
+bool TraceWeaponCollisionSegment(
+    const LTVector& from, const LTVector& to,
+    IntersectInfo& hit) noexcept {
+    if ((to - from).MagSqr() < 0.0001F) {
+        return false;
+    }
+    IntersectQuery query;
+    query.m_From = from;
+    query.m_To = to;
+    // Deliberately do not set INTERSECT_OBJECTS. Retail creates many solid,
+    // invisible helper objects and coarse AABB collision volumes around the
+    // player and weapon. They produced permanent false contacts and unstable
+    // normals. World polygons retain real level boundaries and carry HPOLY.
+    query.m_Flags = IGNORE_NONSOLID | INTERSECT_HPOLY;
+    return g_client->IntersectSegment(query, &hit) &&
+           hit.m_hPoly != INVALID_HPOLY;
+}
+
+bool AccumulateWeaponCollisionContact(
+    const WeaponCollisionBoxGeometry& box,
+    const LTVector (&corners)[8], const IntersectInfo& hit,
+    LTVector& correction) noexcept {
+    LTVector normal = hit.m_Plane.m_Normal;
+    if (!std::isfinite(normal.x) || !std::isfinite(normal.y) ||
+        !std::isfinite(normal.z) || normal.MagSqr() < 0.0001F) {
+        return false;
+    }
+    normal.Normalize();
+
+    // Engine polygon normals are not guaranteed to face the player. The
+    // tracking base remains on the traversable side even if the physical
+    // controller has crossed a thin wall, so orient every contact normal
+    // toward that stable safe point rather than toward the penetrating box.
+    const LTVector safePoint = g_weaponAim.trackingBaseValid
+        ? g_weaponAim.trackingBase.m_vPos
+        : box.rearCenter - box.forward * box.lengthUnits;
+    if ((safePoint - hit.m_Point).Dot(normal) < 0.0F) {
+        normal *= -1.0F;
+    }
+
+    float closestDistance = std::numeric_limits<float>::infinity();
+    for (const LTVector& corner : corners) {
+        closestDistance = (std::min)(
+            closestDistance, (corner - hit.m_Point).Dot(normal));
+    }
+    if (!std::isfinite(closestDistance)) {
+        return false;
+    }
+    const float maximumCorrection = (std::max)({
+        box.lengthUnits,
+        box.halfWidthUnits * 2.0F,
+        box.halfHeightUnits * 2.0F}) + kWeaponCollisionMarginUnits;
+    const float required = WeaponCollisionPlaneCorrection(
+        closestDistance, kWeaponCollisionMarginUnits,
+        maximumCorrection);
+    if (!(required > 0.0F)) {
+        return false;
+    }
+    const float alreadyCorrected = correction.Dot(normal);
+    if (required > alreadyCorrected) {
+        correction += normal * (required - alreadyCorrected);
+    }
+    return true;
+}
+
+void ApplyWeaponWorldCollision(const void* weapon) noexcept {
+    WeightedWeaponInputState& weighted = g_weightedWeaponInput;
+    WeaponCollisionBoxGeometry box{};
+    if (!g_weaponCollisionEnabled || g_client == nullptr ||
+        !ResolveWeaponCollisionBox(weapon, box)) {
+        ResetWeaponCollisionRuntime(weighted.collision);
+        weighted.collisionObstructed = false;
+        return;
+    }
+
+    LTVector corners[8]{};
+    BuildWeaponCollisionCorners(box, 0.0F, corners);
+    struct ProbeOffset {
+        float right;
+        float up;
+    };
+    constexpr ProbeOffset probes[] = {
+        { 0.0F,  0.0F},
+        {-1.0F, -1.0F}, { 1.0F, -1.0F},
+        { 1.0F,  1.0F}, {-1.0F,  1.0F},
+        { 0.0F, -1.0F}, { 1.0F,  0.0F},
+        { 0.0F,  1.0F}, {-1.0F,  0.0F},
+    };
+
+    LTVector targetCorrection;
+    targetCorrection.Init();
+    IntersectInfo selectedHit;
+    float selectedCorrectionMagnitudeSqr = 0.0F;
+    bool contact = false;
+    bool queryFailed = false;
+    for (const ProbeOffset& probe : probes) {
+        const LTVector origin = box.rearCenter +
+            box.right * (probe.right * box.halfWidthUnits) +
+            box.up * (probe.up * box.halfHeightUnits);
+        IntersectInfo hit;
+        __try {
+            if (TraceWeaponCollisionSegment(
+                    origin,
+                    origin + box.forward *
+                        (box.lengthUnits + kWeaponCollisionMarginUnits),
+                    hit)) {
+                LTVector candidate;
+                candidate.Init();
+                if (AccumulateWeaponCollisionContact(
+                        box, corners, hit, candidate)) {
+                    const float magnitudeSqr = candidate.MagSqr();
+                    if (!contact ||
+                        magnitudeSqr > selectedCorrectionMagnitudeSqr) {
+                        contact = true;
+                        targetCorrection = candidate;
+                        selectedHit = hit;
+                        selectedCorrectionMagnitudeSqr = magnitudeSqr;
+                    }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            queryFailed = true;
+            break;
+        }
+    }
+    WeaponCollisionRuntimeState& state = weighted.collision;
+    if (queryFailed) {
+        ResetWeaponCollisionRuntime(weighted.collision);
+        weighted.collisionObstructed = false;
+        return;
+    }
+
+    const std::uint64_t nowNs = MonotonicNanoseconds();
+    float seconds = 0.0F;
+    if (state.haveUpdate && nowNs > state.lastUpdateNs &&
+        nowNs - state.lastUpdateNs <= kWeaponCollisionMaxGapNs) {
+        seconds = static_cast<float>(nowNs - state.lastUpdateNs) * 1.0e-9F;
+    }
+    state.lastUpdateNs = nowNs;
+    state.haveUpdate = true;
+    if (contact) {
+        if (seconds <= 0.0F) {
+            state.correction = targetCorrection;
+        } else {
+            const float tighten = std::clamp(
+                seconds / kWeaponCollisionTightenSeconds, 0.0F, 1.0F);
+            state.correction +=
+                (targetCorrection - state.correction) * tighten;
+        }
+        state.holdUntilNs = nowNs + kWeaponCollisionHoldNs;
+    } else if (nowNs >= state.holdUntilNs) {
+        if (seconds <= 0.0F ||
+            seconds >= kWeaponCollisionReleaseSeconds) {
+            state.correction.Init();
+        } else {
+            const float release = std::clamp(
+                seconds / kWeaponCollisionReleaseSeconds, 0.0F, 1.0F);
+            state.correction *= 1.0F - release;
+        }
+    }
+
+    weighted.collisionObstructed = contact ||
+        state.correction.MagSqr() > 0.0001F;
+
+    const ULONGLONG diagnosticNow = GetTickCount64();
+    if (contact && g_weaponWeightDiagnosticsEnabled &&
+        (weighted.lastCollisionDiagnosticTick == 0 ||
+         diagnosticNow - weighted.lastCollisionDiagnosticTick >= 1000)) {
+        weighted.lastCollisionDiagnosticTick = diagnosticNow;
+        char message[256]{};
+        std::snprintf(
+            message, sizeof(message),
+            "profile=%s world=%u poly=%u surface=0x%08X "
+            "correction=(%.2f,%.2f,%.2f)",
+            weighted.profileName,
+            static_cast<unsigned>(selectedHit.m_hPoly.m_nWorldIndex),
+            static_cast<unsigned>(selectedHit.m_hPoly.m_nPolyIndex),
+            static_cast<unsigned>(selectedHit.m_SurfaceFlags),
+            state.correction.x, state.correction.y,
+            state.correction.z);
+        Report("INFO", "weapon_collision_contact", message);
+    }
+    g_weaponAim.fireTransform.m_vPos += state.correction;
+    g_weaponAim.gripTransform.m_vPos += state.correction;
+    if (g_twoHandedGripActive) {
+        g_weaponAim.leftAimTransform.m_vPos += state.correction;
+        g_weaponAim.leftGripTransform.m_vPos += state.correction;
+    }
+
+    static volatile LONG activeLogged = 0;
+    if (InterlockedCompareExchange(&activeLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "weapon_world_collision_active",
+            "The equipped weapon uses nine world-polygon-only probes and "
+            "smoothly resolves the rendered hands and muzzle along one "
+            "bounded surface normal.");
+    }
+}
+
+void RenderWeaponCollisionBox(HLOCALOBJ camera) noexcept {
+    const bool menuPreview =
+        g_devMenu.open && g_devMenu.selectedTab == DevMenuTab::collision;
+    if (g_client == nullptr || camera == nullptr || g_weaponDisabled ||
+        (!g_weaponCollisionDebugEnabled && !menuPreview)) {
+        return;
+    }
+    WeaponCollisionBoxGeometry box{};
+    if (!ResolveWeaponCollisionBox(g_weightedWeaponInput.weapon, box)) {
+        return;
+    }
+
+    const LTVector frontCenter =
+        box.rearCenter + box.forward * box.lengthUnits;
+    const LTVector right = box.right * box.halfWidthUnits;
+    const LTVector up = box.up * box.halfHeightUnits;
+    const LTVector corners[] = {
+        box.rearCenter - right - up,
+        box.rearCenter + right - up,
+        box.rearCenter + right + up,
+        box.rearCenter - right + up,
+        frontCenter - right - up,
+        frontCenter + right - up,
+        frontCenter + right + up,
+        frontCenter - right + up,
+    };
+    constexpr std::uint8_t edgeIndices[][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7},
+    };
+    LT_LINEG edges[std::size(edgeIndices)]{};
+    const bool obstructed = g_weightedWeaponInput.collisionObstructed;
+    const std::uint8_t red = obstructed ? 255 : 40;
+    const std::uint8_t green = obstructed ? 45 :
+        (g_weaponCollisionEnabled ? 255 : 170);
+    const std::uint8_t blue = obstructed ? 20 :
+        (g_weaponCollisionEnabled ? 80 : 255);
+    for (std::size_t index = 0; index < std::size(edges); ++index) {
+        edges[index].verts[0].pos = corners[edgeIndices[index][0]];
+        edges[index].verts[1].pos = corners[edgeIndices[index][1]];
+        edges[index].verts[0].rgba.Init(red, green, blue, 245);
+        edges[index].verts[1].rgba.Init(red, green, blue, 245);
+    }
+
+    ILTDrawPrim* const drawPrim = g_client->GetDrawPrim();
+    if (drawPrim == nullptr) {
+        return;
+    }
+    const HOBJECT oldCamera = drawPrim->GetCamera();
+    const ELTDrawPrimTransformMode oldTransformMode =
+        drawPrim->GetTransformMode();
+    const ELTDrawPrimZMode oldZMode = drawPrim->GetZMode();
+    const ELTDrawPrimRenderMode oldRenderMode =
+        drawPrim->GetRenderMode();
+    drawPrim->SetCamera(camera);
+    drawPrim->SetTransformMode(eLTDrawPrimTransformMode_World);
+    drawPrim->SetZMode(eLTDrawPrimZMode_NoWrite);
+    drawPrim->SetRenderMode(eLTDrawPrimRenderMode_Modulate_Additive);
+    drawPrim->DrawPrim(
+        edges, static_cast<std::uint32_t>(std::size(edges)));
+    drawPrim->SetRenderMode(oldRenderMode);
+    drawPrim->SetZMode(oldZMode);
+    drawPrim->SetTransformMode(oldTransformMode);
+    drawPrim->SetCamera(oldCamera);
+}
+
+void __fastcall HookRetailStartMuzzleFlash(
+    void* weaponModelData, void* ignoredEdx) {
+    (void)ignoredEdx;
+    void* flashOwner = weaponModelData;
+    void* const weapon = g_retailWeaponUpdateInProgress;
+    if (weapon != nullptr) {
+        auto* const bytes = static_cast<unsigned char*>(weapon);
+        void* const leftModelData =
+            bytes + kRetailLeftWeaponModelDataOffset;
+        if (weaponModelData == leftModelData &&
+            RetailRightWeaponModel(weapon) != nullptr) {
+            flashOwner =
+                bytes + kRetailRightWeaponModelDataOffset;
+            static volatile LONG redirectLogged = 0;
+            if (InterlockedCompareExchange(
+                    &redirectLogged, 1, 0) == 0) {
+                Report(
+                    "INFO", "dual_pistol_muzzle_flash_redirected",
+                    "A left-hand Dual Pistols shot now starts its flash on "
+                    "the carried right-hand pistol.");
+            }
+        }
+    }
+    g_retailStartMuzzleFlash(flashOwner);
 }
 
 int __fastcall HookRetailWeaponManagerUpdate(
@@ -10172,8 +12801,10 @@ int __fastcall HookRetailWeaponManagerUpdate(
     FearVrPose weightedGripPose{};
     std::uint32_t weightedAimValidHands = 0;
     std::uint32_t weightedGripValidHands = 0;
+    void* const weaponBeforeUpdate =
+        CurrentRetailWeapon(weaponManager);
     PrepareWeightedWeaponPoses(
-        CurrentRetailWeapon(weaponManager), weightedAimPose,
+        weaponBeforeUpdate, weightedAimPose,
         weightedAimValidHands, weightedGripPose,
         weightedGripValidHands);
     g_weaponAim.valid = BuildStableTrackedHandTransform(
@@ -10248,11 +12879,33 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // Feuerachse, nicht die Rohpose des Controllers.
     UpdateTwoHandedGrip();
     ApplyTwoHandedAimSupport();
+    ApplyWeaponWorldCollision(weaponBeforeUpdate);
 
     // Install before Retail updates the weapon from the RightHand socket.
     // This path is verified to run every playing frame, unlike the optional
     // SetTrackedTarget call site which is dormant in the shipped game path.
     EnsureHandNodeControls(CurrentRetailPlayerBody());
+
+    // Player-body mode normally keeps the separate player-view weapon hidden.
+    // Initialize Retail's logical visibility for each new weapon, or restore
+    // it when Retail actually hides the model. Do not call SetVisible on
+    // ordinary frames: it always hides the looped muzzle FX and can restart a
+    // short pistol flash between renders.
+    if (weaponBeforeUpdate != nullptr &&
+        !RetailWeaponIsDisabled(weaponBeforeUpdate) &&
+        (weaponBeforeUpdate !=
+             g_retailVisibilityInitializedWeapon ||
+         !RetailRightWeaponModelIsVisible(
+             weaponBeforeUpdate)) &&
+        g_retailSetWeaponVisible != nullptr) {
+        __try {
+            g_retailSetWeaponVisible(
+                weaponBeforeUpdate, true, true);
+            g_retailVisibilityInitializedWeapon =
+                weaponBeforeUpdate;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
 
     // F.E.A.R. applies CAccuracyMgr perturbation after GetFireVectors.
     // Suppress it only during the actual weapon update while VR aiming is
@@ -10273,8 +12926,10 @@ int __fastcall HookRetailWeaponManagerUpdate(
             currentPerturb = nullptr;
         }
     }
+    g_retailWeaponUpdateInProgress = weaponBeforeUpdate;
     const int state = g_retailWeaponManagerUpdate(
         weaponManager, baseRotation, basePosition);
+    g_retailWeaponUpdateInProgress = nullptr;
     if (currentPerturb != nullptr) {
         __try {
             *currentPerturb = savedPerturb;
@@ -10337,12 +12992,11 @@ int __fastcall HookRetailWeaponManagerUpdate(
     g_weaponDisabled = RetailWeaponIsDisabled(weapon);
     UpdateFlashlightModel(weapon);
     UpdateVrMuzzleFlash();
-    if (weapon != nullptr && !g_weaponDisabled &&
-        g_retailSetWeaponVisible != nullptr) {
-        g_retailSetWeaponVisible(weapon, true, true);
+    if (weapon != nullptr && !g_weaponDisabled) {
+        ForceRetailRightWeaponModelVisible(weapon);
     }
-    // Noch einmal nach SetWeaponVisible anwenden: Das linke Retail-Modell
-    // bleibt damit garantiert am Support-Controller statt an der Waffenhand.
+    // Die linke Dual-Pistol nach allen Retail-Sichtbarkeitsänderungen erneut
+    // an der Support-Hand fixieren.
     if (weapon != nullptr && !g_disableWeaponTransform &&
         DualPistolsVrActive()) {
         ApplyRetailLeftWeaponTransform();
@@ -10478,14 +13132,26 @@ bool CaptureOriginalTwoHandSocket(
     g_twoHandedGrip.grabRotationInWeapon =
         rightInverse * animatedLeft.m_rRot;
     g_twoHandedGrip.grabRotationInWeapon.Normalize();
+    const float minimumSeparation =
+        kTwoHandMinSteerSeparationMeters * kGameUnitsPerMeter;
+    g_twoHandedGrip.geometryValid =
+        gripOffset.MagSqr() > minimumSeparation * minimumSeparation;
+    if (!g_twoHandedGrip.geometryValid) {
+        ReleaseTwoHandedGrip(false);
+        return false;
+    }
     g_twoHandedGrip.placementValid = true;
+    g_twoHandedGrip.geometryWeapon = g_weaponAim.retailWeapon;
 
-    char message[192]{};
+    char message[224]{};
     std::snprintf(
         message, sizeof(message),
-        "Retail's animated LeftHand socket is fixed %.1f cm from the "
-        "weapon hand and now supplies the visible two-hand grip.",
-        static_cast<double>(separation));
+        "Cached the first untouched Retail LeftHand socket at %.1f cm "
+        "from the weapon hand: offset=(%.1f, %.1f, %.1f).",
+        static_cast<double>(separation),
+        static_cast<double>(gripOffset.x),
+        static_cast<double>(gripOffset.y),
+        static_cast<double>(gripOffset.z));
     Report("INFO", "two_handed_original_grip_captured", message);
     return true;
 }
@@ -10512,49 +13178,41 @@ bool ApplyUpperArmTarget(
         control.forearmOffsetFromUpperArm.Mag();
     const float lowerLength =
         control.socketOffsetFromForearm.Mag();
-    LTVector targetDirection =
-        targetPosition - currentWorld.m_vPos;
-    const float targetDistance = targetDirection.Mag();
-    if (upperLength < 0.01F || lowerLength < 0.01F ||
-        targetDistance < 0.01F) {
-        return false;
-    }
-    targetDirection /= targetDistance;
-
-    const float minimumReach =
-        std::fabs(upperLength - lowerLength) + 0.01F;
-    const float maximumReach =
-        upperLength + lowerLength - 0.01F;
-    const float solvedDistance = (std::max)(
-        minimumReach, (std::min)(maximumReach, targetDistance));
-    const float along =
-        (upperLength * upperLength -
-         lowerLength * lowerLength +
-         solvedDistance * solvedDistance) /
-        (2.0F * solvedDistance);
-    const float bendHeight = std::sqrt((std::max)(
-        0.0F, upperLength * upperLength - along * along));
-
     LTVector currentUpperDirection =
         currentWorld.m_rRot.RotateVector(
             control.forearmOffsetFromUpperArm);
-    LTVector bendDirection =
-        currentUpperDirection -
-        targetDirection *
-            currentUpperDirection.Dot(targetDirection);
-    if (bendDirection.MagSqr() < 0.0001F) {
-        bendDirection = LTVector(0.0F, -1.0F, 0.0F) -
-            targetDirection * -targetDirection.y;
+    const LTRotation& bodyRotation =
+        data.m_pModelTransform->m_rRot;
+    const LTVector bodyRight = bodyRotation.Right();
+    const LTVector bodyUp =
+        bodyRotation.RotateVector(LTVector(0.0F, 1.0F, 0.0F));
+    const LTVector bodyForward = bodyRotation.Forward();
+    // Elbows prefer an anatomical plane beside and slightly below/behind
+    // the chest. Unlike the prior animated-arm projection this pole remains
+    // stable while Retail changes locomotion or weapon animations.
+    const LTVector poleDirection =
+        bodyRight * (
+            control.elbowSideSign * g_armIkTuning.elbowOutward) -
+        bodyUp * g_armIkTuning.elbowDown -
+        bodyForward * g_armIkTuning.elbowBack;
+    const TwoBoneElbowSolution solution = SolveTwoBoneElbow(
+        {currentWorld.m_vPos.x, currentWorld.m_vPos.y,
+         currentWorld.m_vPos.z},
+        {targetPosition.x, targetPosition.y, targetPosition.z},
+        upperLength, lowerLength,
+        {poleDirection.x, poleDirection.y, poleDirection.z},
+        {control.bendDirectionWorld.x,
+         control.bendDirectionWorld.y,
+         control.bendDirectionWorld.z},
+        control.bendDirectionValid &&
+            g_armIkTuning.preserveElbowContinuity,
+        {currentUpperDirection.x, currentUpperDirection.y,
+         currentUpperDirection.z});
+    if (!solution.valid) {
+        return false;
     }
-    if (bendDirection.MagSqr() < 0.0001F) {
-        bendDirection = LTVector(1.0F, 0.0F, 0.0F);
-    }
-    bendDirection.Normalize();
-
-    const LTVector desiredElbow =
-        currentWorld.m_vPos +
-        targetDirection * along +
-        bendDirection * bendHeight;
+    const LTVector desiredElbow(
+        solution.elbow.x, solution.elbow.y, solution.elbow.z);
     LTRotation upperCorrection;
     if (!RotationBetweenDirections(
             currentUpperDirection,
@@ -10572,6 +13230,11 @@ bool ApplyUpperArmTarget(
     data.m_pNodeTransform->m_rRot = desiredObject.m_rRot;
     control.desiredElbowWorld = desiredElbow;
     control.desiredElbowValid = true;
+    control.bendDirectionWorld = LTVector(
+        solution.bendDirection.x,
+        solution.bendDirection.y,
+        solution.bendDirection.z);
+    control.bendDirectionValid = true;
     return true;
 }
 
@@ -10854,6 +13517,7 @@ bool InstallHandNodeControl(
     const char* forearmNodeName,
     const char* socketName, NodeControlFn handCallback,
     NodeControlFn upperArmCallback, NodeControlFn forearmCallback,
+    float elbowSideSign,
     HandNodeControlState& control,
     const char* installedEvent) noexcept {
     HMODELNODE node = INVALID_MODEL_NODE;
@@ -10886,6 +13550,7 @@ bool InstallHandNodeControl(
     }
 
     control.node = node;
+    control.elbowSideSign = elbowSideSign;
     control.socketFromNode =
         nodeWorld.GetInverse() * socketWorld;
     control.socketFromNodeValid = true;
@@ -11294,10 +13959,10 @@ void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
         if (!g_bodyPresentationNodeControl.installed) {
             HMODELNODE presentationNode = INVALID_MODEL_NODE;
             if ((model->GetNode(
-                     playerBody, "translation",
+                     playerBody, "null2",
                      presentationNode) == LT_OK ||
                  model->GetNode(
-                     playerBody, "null2",
+                     playerBody, "translation",
                      presentationNode) == LT_OK) &&
                 presentationNode != INVALID_MODEL_NODE &&
                 model->AddNodeControlFn(
@@ -11327,6 +13992,7 @@ void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
                 model, playerBody, "Right_hand", "Right_armu",
                 "Right_arml", "RightHand", &RightHandNodeControl,
                 &RightUpperArmNodeControl, &RightForearmNodeControl,
+                1.0F,
                 g_rightHandControl,
                 "weapon_hand_tracking_installed") && success;
         }
@@ -11335,6 +14001,7 @@ void EnsureHandNodeControls(HOBJECT playerBody) noexcept {
                 model, playerBody, "Left_hand", "Left_armu",
                 "Left_arml", "LeftHand", &LeftHandNodeControl,
                 &LeftUpperArmNodeControl, &LeftForearmNodeControl,
+                -1.0F,
                 g_leftHandControl,
                 "left_hand_tracking_installed") && success;
         }
@@ -11435,6 +14102,32 @@ void RequestFireHaptic(bool leftWeaponFired) noexcept {
     }
 }
 
+// Queue exactly one spring impulse for each successful Retail shot. Like the
+// haptic path, this is driven by GetFireVectors rather than trigger state, so
+// dry fire and blocked fire modes cannot move the weapon. The pose is rebuilt
+// before Retail fires in the current update, therefore the impulse is consumed
+// on the following update and never changes the bullet that caused it.
+void RequestWeaponRecoil() noexcept {
+    if (!g_weaponRecoilEnabled) {
+        return;
+    }
+    constexpr ULONGLONG kMinimumImpulseGapMs = 30;
+    const ULONGLONG now = GetTickCount64();
+    if (g_lastWeaponRecoilTick != 0 &&
+        now - g_lastWeaponRecoilTick < kMinimumImpulseGapMs) {
+        return;
+    }
+    g_lastWeaponRecoilTick = now;
+    InterlockedIncrement(&g_pendingWeaponRecoilShots);
+    if (InterlockedCompareExchange(
+            &g_weaponRecoilActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "weapon_recoil_active",
+            "Successful shots add configurable kick and muzzle-rise "
+            "impulses to the tracked weapon pose.");
+    }
+}
+
 bool __fastcall HookRetailGetFireVectors(
     const void* weapon, void* ignoredEdx,
     LTVector& right, LTVector& up,
@@ -11450,6 +14143,7 @@ bool __fastcall HookRetailGetFireVectors(
     if (result) {
         RequestFireHaptic(leftWeaponFired);
         TriggerVrMuzzleFlash(leftWeaponFired);
+        RequestWeaponRecoil();
     }
     if (!result || !g_weaponAim.valid) {
         return result;
@@ -11569,9 +14263,17 @@ void RemoveWeaponAimHooks() noexcept {
     RemoveVrMuzzleFlashObjects();
     RemoveFlashlightModel();
     RemoveHandNodeControls();
+    g_devMenu.open = false;
+    g_devMenu.anchorValid = false;
+    g_devMenu.pointerValid = false;
+    g_devMenu.suppressUntilRelease = false;
     if (g_retailWeaponManagerUpdateTarget != nullptr) {
         MH_DisableHook(g_retailWeaponManagerUpdateTarget);
         MH_RemoveHook(g_retailWeaponManagerUpdateTarget);
+    }
+    if (g_retailStartMuzzleFlashTarget != nullptr) {
+        MH_DisableHook(g_retailStartMuzzleFlashTarget);
+        MH_RemoveHook(g_retailStartMuzzleFlashTarget);
     }
     if (g_retailGetFireVectorsTarget != nullptr) {
         MH_DisableHook(g_retailGetFireVectorsTarget);
@@ -11582,11 +14284,13 @@ void RemoveWeaponAimHooks() noexcept {
         MH_RemoveHook(g_retailSetTrackedTargetTarget);
     }
     g_retailWeaponManagerUpdateTarget = nullptr;
+    g_retailStartMuzzleFlashTarget = nullptr;
     g_retailGetFireVectorsTarget = nullptr;
     g_retailSetTrackedTargetTarget = nullptr;
     g_retailWeaponManagerUpdate = nullptr;
     g_retailSetWeaponTransform = nullptr;
     g_retailSetWeaponVisible = nullptr;
+    g_retailStartMuzzleFlash = nullptr;
     g_retailGetFireVectors = nullptr;
     g_retailSetTrackedTarget = nullptr;
     g_retailVectorObjectFilter = nullptr;
@@ -11606,12 +14310,16 @@ void RemoveWeaponAimHooks() noexcept {
     g_weaponAim.leftMuzzleValid = false;
     g_weaponAim.leftMuzzleLocalValid = false;
     g_weaponAim.retailWeapon = nullptr;
+    g_retailWeaponUpdateInProgress = nullptr;
+    g_retailVisibilityInitializedWeapon = nullptr;
     g_weaponAim.trackingBaseValid = false;
     g_supportRightGripPoseCache = TrackedPoseCache{};
     g_weightedWeaponInput = {};
     ResetWeaponWeightPair(
         g_weightedWeaponInput.filters,
         WeaponWeightResetReason::sceneLoaded);
+    InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+    g_lastWeaponRecoilTick = 0;
     // Ohne Aim-Hooks laeuft kein Weapon-Manager-Update mehr, das den Griff
     // wieder loesen koennte. Sprinten und Lehnen duerfen nicht haengen.
     g_twoHandedGripActive = false;
@@ -11662,12 +14370,13 @@ bool InstallWeaponAimHooks() noexcept {
     void* update = nullptr;
     void* setTransform = nullptr;
     void* setVisible = nullptr;
+    void* startMuzzleFlash = nullptr;
     void* fireVectors = nullptr;
     void* setTrackedTarget = nullptr;
     void* vectorObjectFilter = nullptr;
     if (!ResolveRetailWeaponTargets(
-            update, setTransform, setVisible, fireVectors,
-            setTrackedTarget, vectorObjectFilter)) {
+            update, setTransform, setVisible, startMuzzleFlash,
+            fireVectors, setTrackedTarget, vectorObjectFilter)) {
         Report(
             "ERROR", "weapon_aim_layout_mismatch",
             "Retail 1.08 weapon transform/fire-vector signatures "
@@ -11684,6 +14393,7 @@ bool InstallWeaponAimHooks() noexcept {
         return false;
     }
     g_retailWeaponManagerUpdateTarget = update;
+    g_retailStartMuzzleFlashTarget = startMuzzleFlash;
     g_retailGetFireVectorsTarget = fireVectors;
     g_retailSetTrackedTargetTarget = setTrackedTarget;
     g_retailSetWeaponTransform =
@@ -11694,6 +14404,9 @@ bool InstallWeaponAimHooks() noexcept {
             setVisible);
     g_retailVectorObjectFilter =
         reinterpret_cast<ObjectFilterFn>(vectorObjectFilter);
+    g_retailStartMuzzleFlash =
+        reinterpret_cast<RetailStartMuzzleFlashFunction>(
+            startMuzzleFlash);
     const HMODULE retailModule =
         GetModuleHandleW(L"GameOrig.dll");
     g_retailAccuracyManager =
@@ -11707,6 +14420,12 @@ bool InstallWeaponAimHooks() noexcept {
         update,
         reinterpret_cast<void*>(&HookRetailWeaponManagerUpdate),
         reinterpret_cast<void**>(&g_retailWeaponManagerUpdate));
+    if (status == MH_OK) {
+        status = MH_CreateHook(
+            startMuzzleFlash,
+            reinterpret_cast<void*>(&HookRetailStartMuzzleFlash),
+            reinterpret_cast<void**>(&g_retailStartMuzzleFlash));
+    }
     if (status == MH_OK) {
         status = MH_CreateHook(
             fireVectors,
@@ -11723,6 +14442,9 @@ bool InstallWeaponAimHooks() noexcept {
     }
     if (status == MH_OK) {
         status = MH_EnableHook(update);
+    }
+    if (status == MH_OK) {
+        status = MH_EnableHook(startMuzzleFlash);
     }
     if (status == MH_OK) {
         status = MH_EnableHook(fireVectors);
@@ -11983,6 +14705,28 @@ void PollControllerInput() noexcept {
     if (g_leftHandedBindings) {
         MirrorInputHandedness(input);
     }
+    const InputVector2 assistedMovement = ApplyForwardAxisAssist(
+        input.moveX, input.moveY);
+    input.moveX = assistedMovement.x;
+    input.moveY = assistedMovement.y;
+    // Retail interprets its axes in player-body space, while VR users can
+    // freely turn their head without rotating that body. Convert only the
+    // locomotion stick into the current horizontal HMD frame. If tracking is
+    // unavailable, fail softly to body-relative input rather than dropping a
+    // held movement command.
+    const bool headPoseFresh =
+        g_headTracking.centered && !g_headTracking.trackingLost &&
+        g_headTracking.lastFreshFrameTick != 0 &&
+        now - g_headTracking.lastFreshFrameTick <= 250;
+    if (g_headRelativeMovement && headPoseFresh) {
+        const HeadRelativeMovement movement = RotateMovementByHeadYaw(
+            g_headTracking.recenter, g_headTracking.currentCenter,
+            input.moveX, input.moveY);
+        if (movement.valid) {
+            input.moveX = movement.x;
+            input.moveY = movement.y;
+        }
+    }
     constexpr float kTurnSpeedScale[] = {0.75F, 1.0F, 1.25F};
     const int turnPreset = std::clamp(g_turnSpeedPreset, 0, 2);
     input.turnX = std::clamp(
@@ -12014,8 +14758,7 @@ void PollControllerInput() noexcept {
     if (g_twoHandedGripActive &&
         input.squeeze[FEARVR_HAND_LEFT] <
             kTwoHandReleaseSqueeze) {
-        g_twoHandedGripActive = false;
-        g_twoHandedGrip = TwoHandedGripState{};
+        ReleaseTwoHandedGrip();
     }
     if (input.activeHands != g_lastActiveHands) {
         char message[96]{};
@@ -12317,6 +15060,630 @@ void UpdateRetailHudOverride() noexcept {
               "flat-panel rendering.");
 }
 
+DevMenuVector3 ToDevMenuVector(const LTVector& value) noexcept {
+    return {value.x, value.y, value.z};
+}
+
+void ResetDevMenuGameplayInput() noexcept {
+    g_weaponSwitchPulseUntil = 0;
+    g_weaponSwitchTriggered = false;
+    g_secondaryHoldStartTick = 0;
+    g_reloadPulseUntil = 0;
+    g_grenadePulseUntil = 0;
+    g_secondaryWasDown = false;
+    g_grenadeConsumed = false;
+    g_meleePulseUntil = 0;
+    g_slideDuckPulseUntil = 0;
+    g_slideForwardPulseUntil = 0;
+    ResetMeleeActions(g_meleeActions);
+    g_climbAxis = 0.0F;
+    g_climbActive = false;
+    ReleaseTwoHandedGrip();
+    for (bool& active : g_injectedCommandActive) {
+        active = false;
+    }
+    for (bool& active : g_controllerCommandActive) {
+        active = false;
+    }
+}
+
+void SelectFloatingDevMenuTab(std::size_t tabIndex) noexcept;
+
+void CloseFloatingDevMenu() noexcept {
+    if (!g_devMenu.open) {
+        return;
+    }
+    g_devMenu.open = false;
+    g_devMenu.anchorValid = false;
+    g_devMenu.pointerValid = false;
+    g_devMenu.suppressUntilRelease = true;
+    SaveVrSettings();
+    Report(
+        "INFO", "floating_dev_menu_closed",
+        "The live-tuning panel closed and controller gameplay input will "
+        "resume after its buttons are released.");
+}
+
+void OpenFloatingDevMenu() noexcept {
+    g_devMenu.open = true;
+    g_devMenu.anchorValid = false;
+    g_devMenu.pointerValid = false;
+    g_devMenu.suppressUntilRelease = true;
+    SelectFloatingDevMenuTab(
+        static_cast<std::size_t>(g_devMenu.selectedTab));
+    ResetDevMenuGameplayInput();
+    Report(
+        "INFO", "floating_dev_menu_opened",
+        "Both grips plus B opened the world-space live-tuning panel; "
+        "point with the right controller and press trigger or A.");
+}
+
+void SelectFloatingDevMenuTab(std::size_t tabIndex) noexcept {
+    if (tabIndex >= kDevMenuTabCount) {
+        return;
+    }
+    g_devMenu.selectedTab = static_cast<DevMenuTab>(tabIndex);
+    const std::size_t rowCount = DevMenuRowCount(g_devMenu.selectedTab);
+    g_devMenu.selectedRow = rowCount == 0
+        ? 0U : (std::min)(g_devMenu.selectedRow, rowCount - 1U);
+}
+
+void ActivateFloatingDevMenuRow(
+    DevMenuTab tab, std::size_t row) noexcept {
+    if (row >= DevMenuRowCount(tab)) {
+        return;
+    }
+    switch (tab) {
+    case DevMenuTab::recoil:
+        switch (row) {
+        case 0:
+            g_weaponRecoilEnabled = !g_weaponRecoilEnabled;
+            ResetWeaponRecoil(g_weightedWeaponInput.recoil);
+            InterlockedExchange(&g_pendingWeaponRecoilShots, 0);
+            g_lastWeaponRecoilTick = 0;
+            break;
+        case 1:
+            g_vrRecoilProfileEditsCurrent =
+                HasCurrentWeaponWeightProfile()
+                    ? !g_vrRecoilProfileEditsCurrent : false;
+            if (g_vrRecoilProfileEditsCurrent) {
+                (void)EditableWeaponRecoilProfile();
+            }
+            break;
+        case 2: {
+            WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+            profile.strength =
+                kWeaponRecoilStrengthPresets[NextVrPresetIndex(
+                    profile.strength,
+                    kWeaponRecoilStrengthPresets)];
+            break;
+        }
+        case 3: {
+            WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+            profile.muzzleRise =
+                kWeaponRecoilRisePresets[NextVrPresetIndex(
+                    profile.muzzleRise,
+                    kWeaponRecoilRisePresets)];
+            break;
+        }
+        case 4: {
+            WeaponRecoilProfile& profile = EditableWeaponRecoilProfile();
+            profile.recovery =
+                kWeaponRecoilRecoveryPresets[NextVrPresetIndex(
+                    profile.recovery,
+                    kWeaponRecoilRecoveryPresets)];
+            break;
+        }
+        }
+        break;
+    case DevMenuTab::weight: {
+        WeaponWeightProfile& profile = EditableWeaponWeightProfile();
+        switch (row) {
+        case 0: {
+            const int next =
+                (static_cast<int>(g_weaponWeightPreset) + 1) % 4;
+            g_weaponWeightPreset = SanitizeWeaponWeightPreset(next);
+            g_weaponWeightEnabled =
+                g_weaponWeightPreset != WeaponWeightPreset::none;
+            ResetWeaponWeightPair(
+                g_weightedWeaponInput.filters,
+                WeaponWeightResetReason::enabledChanged);
+            break;
+        }
+        case 1:
+            g_vrWeaponProfileEditsCurrent =
+                HasCurrentWeaponWeightProfile()
+                    ? !g_vrWeaponProfileEditsCurrent : false;
+            break;
+        case 2:
+            profile.weight = kWeaponWeightPresets[NextVrPresetIndex(
+                profile.weight, kWeaponWeightPresets)];
+            break;
+        case 3:
+            profile.positionalFollow =
+                kWeaponPositionFollowPresets[NextVrPresetIndex(
+                    profile.positionalFollow,
+                    kWeaponPositionFollowPresets)];
+            break;
+        case 4:
+            profile.rotationalFollow =
+                kWeaponRotationFollowPresets[NextVrPresetIndex(
+                    profile.rotationalFollow,
+                    kWeaponRotationFollowPresets)];
+            break;
+        case 5:
+            profile.catchUpStrength =
+                kWeaponCatchUpPresets[NextVrPresetIndex(
+                    profile.catchUpStrength, kWeaponCatchUpPresets)];
+            break;
+        }
+        break;
+    }
+    case DevMenuTab::collision: {
+        switch (row) {
+        case 0:
+            g_weaponCollisionEnabled = !g_weaponCollisionEnabled;
+            ResetWeaponCollisionRuntime(g_weightedWeaponInput.collision);
+            g_weightedWeaponInput.collisionObstructed = false;
+            break;
+        case 1:
+            g_weaponCollisionDebugEnabled =
+                !g_weaponCollisionDebugEnabled;
+            break;
+        case 2:
+            g_vrCollisionProfileEditsCurrent =
+                HasCurrentWeaponWeightProfile()
+                    ? !g_vrCollisionProfileEditsCurrent : false;
+            if (g_vrCollisionProfileEditsCurrent) {
+                (void)EditableWeaponCollisionProfile();
+            }
+            break;
+        case 3: {
+            WeaponCollisionProfile& profile =
+                EditableWeaponCollisionProfile();
+            profile.lengthScale =
+                kWeaponCollisionLengthPresets[NextVrPresetIndex(
+                    profile.lengthScale,
+                    kWeaponCollisionLengthPresets)];
+            break;
+        }
+        case 4: {
+            WeaponCollisionProfile& profile =
+                EditableWeaponCollisionProfile();
+            profile.widthMeters =
+                kWeaponCollisionWidthPresets[NextVrPresetIndex(
+                    profile.widthMeters,
+                    kWeaponCollisionWidthPresets)];
+            break;
+        }
+        case 5: {
+            WeaponCollisionProfile& profile =
+                EditableWeaponCollisionProfile();
+            profile.heightMeters =
+                kWeaponCollisionHeightPresets[NextVrPresetIndex(
+                    profile.heightMeters,
+                    kWeaponCollisionHeightPresets)];
+            break;
+        }
+        case 6: {
+            WeaponCollisionProfile& profile =
+                EditableWeaponCollisionProfile();
+            profile.forwardOffsetMeters =
+                kWeaponCollisionOffsetPresets[NextVrPresetIndex(
+                    profile.forwardOffsetMeters,
+                    kWeaponCollisionOffsetPresets)];
+            break;
+        }
+        }
+        if (row >= 2) {
+            ResetWeaponCollisionRuntime(g_weightedWeaponInput.collision);
+            g_weightedWeaponInput.collisionObstructed = false;
+        }
+        break;
+    }
+    case DevMenuTab::weapon:
+        switch (row) {
+        case 0:
+            g_weaponAimGuideEnabled = !g_weaponAimGuideEnabled;
+            break;
+        case 1:
+            g_showPlayerArms = !g_showPlayerArms;
+            break;
+        case 2:
+            g_twoHandedGripEnabled = !g_twoHandedGripEnabled;
+            if (!g_twoHandedGripEnabled) {
+                g_twoHandedGrip = TwoHandedGripState{};
+            }
+            break;
+        }
+        break;
+    case DevMenuTab::ik:
+        if (row == 0) {
+            g_devMenuIkLeftHandPage = !g_devMenuIkLeftHandPage;
+            g_devMenu.selectedRow = 0;
+            break;
+        }
+        if (!g_devMenuIkLeftHandPage) {
+            switch (row) {
+            case 1:
+                g_showPlayerArms = !g_showPlayerArms;
+                break;
+            case 2:
+                g_armIkTuning.elbowOutward =
+                    NextVrSteppedValue(
+                        g_armIkTuning.elbowOutward,
+                        0.20F, 2.00F, kIkElbowStep);
+                ResetArmIkBendMemory();
+                break;
+            case 3:
+                g_armIkTuning.elbowDown =
+                    NextVrSteppedValue(
+                        g_armIkTuning.elbowDown,
+                        0.00F, 1.50F, kIkElbowStep);
+                ResetArmIkBendMemory();
+                break;
+            case 4:
+                g_armIkTuning.elbowBack =
+                    NextVrSteppedValue(
+                        g_armIkTuning.elbowBack,
+                        -1.00F, 1.00F, kIkElbowStep);
+                ResetArmIkBendMemory();
+                break;
+            case 5:
+                g_armIkTuning.preserveElbowContinuity =
+                    !g_armIkTuning.preserveElbowContinuity;
+                ResetArmIkBendMemory();
+                break;
+            case 6:
+                ResetArmIkTuning();
+                break;
+            }
+        } else {
+            switch (row) {
+            case 1:
+                g_armIkTuning.leftHandRightMeters =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandRightMeters,
+                        -0.20F, 0.20F,
+                        kIkHandPositionStepMeters);
+                break;
+            case 2:
+                g_armIkTuning.leftHandUpMeters =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandUpMeters,
+                        -0.20F, 0.20F,
+                        kIkHandPositionStepMeters);
+                break;
+            case 3:
+                g_armIkTuning.leftHandForwardMeters =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandForwardMeters,
+                        -0.20F, 0.20F,
+                        kIkHandPositionStepMeters);
+                break;
+            case 4:
+                g_armIkTuning.leftHandPitchDegrees =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandPitchDegrees,
+                        -180.0F, 180.0F,
+                        kIkHandRotationStepDegrees);
+                break;
+            case 5:
+                g_armIkTuning.leftHandYawDegrees =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandYawDegrees,
+                        -180.0F, 180.0F,
+                        kIkHandRotationStepDegrees);
+                break;
+            case 6:
+                g_armIkTuning.leftHandRollDegrees =
+                    NextVrSteppedValue(
+                        g_armIkTuning.leftHandRollDegrees,
+                        -180.0F, 180.0F,
+                        kIkHandRotationStepDegrees);
+                break;
+            }
+        }
+        g_armIkTuning = SanitizeArmIkTuning(g_armIkTuning);
+        break;
+    case DevMenuTab::movement:
+        switch (row) {
+        case 0:
+            SetBooleanOption(
+                g_setTranslationEnabled,
+                !QueryBooleanOption(g_isTranslationEnabled, false));
+            break;
+        case 1:
+            g_headRelativeMovement = !g_headRelativeMovement;
+            Report(
+                "INFO", "vr_movement_direction_changed",
+                g_headRelativeMovement
+                    ? "Forward movement follows horizontal HMD direction."
+                    : "Forward movement follows the Retail player body.");
+            break;
+        case 2:
+            if (g_headBobEnabled || !g_forceHeadBobDisabled) {
+                ApplyHeadBobEnabled(!g_headBobEnabled);
+            }
+            break;
+        case 3:
+            g_physicalLeanEnabled = !g_physicalLeanEnabled;
+            ResetLeanCollision(g_leanCollision);
+            g_leanTranslationScale = 1.0F;
+            break;
+        case 4:
+            g_leanScalePercent = kLeanScalePresets[NextVrPresetIndex(
+                g_leanScalePercent, kLeanScalePresets)];
+            break;
+        case 5:
+            g_turnSpeedPreset = (g_turnSpeedPreset + 1) % 3;
+            break;
+        case 6:
+            g_climbingEnabled = !g_climbingEnabled;
+            ResetClimbGrip(g_climbGrip);
+            g_climbActive = false;
+            g_climbOnLadder = false;
+            g_climbAxis = 0.0F;
+            g_climbWasGripping = false;
+            break;
+        case 7:
+            g_configuredEyeHeightMeters = 0.0F;
+            if (g_headTracking.floorSpace &&
+                IsPlausibleEyeHeightMeters(
+                    g_headTracking.currentCenter.py)) {
+                g_headTracking.sessionEyeHeightMeters =
+                    g_headTracking.currentCenter.py;
+            }
+            Report(
+                "INFO", "vr_height_auto",
+                "Eye height returned to automatic session calibration.");
+            break;
+        case 8:
+            if (g_headTracking.floorSpace &&
+                IsPlausibleEyeHeightMeters(
+                    g_headTracking.currentCenter.py)) {
+                g_configuredEyeHeightMeters =
+                    SanitizeEyeHeightMeters(
+                        g_headTracking.currentCenter.py);
+                g_headTracking.sessionEyeHeightMeters =
+                    g_configuredEyeHeightMeters;
+                char message[128]{};
+                std::snprintf(
+                    message, sizeof(message),
+                    "Standing eye height set from HMD: %.0f cm.",
+                    static_cast<double>(
+                        g_configuredEyeHeightMeters * 100.0F));
+                Report("INFO", "vr_height_set", message);
+            } else {
+                ResetVrTrackingBasis();
+                Report(
+                    "WARN", "vr_height_floor_unavailable",
+                    "The runtime has no floor-relative reference space; "
+                    "the current local origin was recentered instead.");
+            }
+            break;
+        }
+        break;
+    case DevMenuTab::melee:
+        switch (row) {
+        case 0:
+            g_meleeThrustEnabled = !g_meleeThrustEnabled;
+            g_meleePulseUntil = 0;
+            g_slideDuckPulseUntil = 0;
+            g_slideForwardPulseUntil = 0;
+            break;
+        case 1:
+            g_meleeWeaponStrikeEnabled = !g_meleeWeaponStrikeEnabled;
+            break;
+        case 2:
+            g_meleeOffHandStrikeEnabled = !g_meleeOffHandStrikeEnabled;
+            break;
+        case 3:
+            g_meleeJumpKickEnabled = !g_meleeJumpKickEnabled;
+            break;
+        case 4:
+            g_meleeSlideKickEnabled = !g_meleeSlideKickEnabled;
+            break;
+        }
+        ResetMeleeActions(g_meleeActions);
+        break;
+    case DevMenuTab::vr:
+        switch (row) {
+        case 0:
+            SetBooleanOption(
+                g_setStereoHudEnabled,
+                !QueryBooleanOption(g_isStereoHudEnabled, true));
+            break;
+        case 1:
+            g_fovScalePreset = (g_fovScalePreset + 1) % 4;
+            ApplyFovScalePreset();
+            break;
+        case 2:
+            g_leftHandedBindings = !g_leftHandedBindings;
+            ResetVrTrackingBasis();
+            break;
+        case 3:
+            g_controllerHapticsEnabled = !g_controllerHapticsEnabled;
+            break;
+        case 4:
+            g_weaponWeightDiagnosticsEnabled =
+                !g_weaponWeightDiagnosticsEnabled;
+            break;
+        case 5:
+            g_renderScalePercent =
+                kRenderScalePercents[NextVrPresetIndex(
+                    g_renderScalePercent, kRenderScalePercents)];
+            ApplyRenderScalePercent();
+            break;
+        }
+        break;
+    }
+    SaveVrSettings();
+}
+
+bool UpdateDevMenuSelectionAxis(
+    bool down, bool& wasDown, ULONGLONG& repeatTick,
+    ULONGLONG now) noexcept {
+    constexpr ULONGLONG kInitialRepeatDelayMs = 350;
+    constexpr ULONGLONG kRepeatDelayMs = 120;
+    if (!down) {
+        wasDown = false;
+        repeatTick = 0;
+        return false;
+    }
+    if (!wasDown) {
+        wasDown = true;
+        repeatTick = now + kInitialRepeatDelayMs;
+        return true;
+    }
+    if (now >= repeatTick) {
+        repeatTick = now + kRepeatDelayMs;
+        return true;
+    }
+    return false;
+}
+
+void UpdateFloatingDevMenuRaySelection() noexcept {
+    g_devMenu.pointerValid = false;
+    g_devMenu.pointerRegion = DevMenuHitRegion::none;
+    if (!g_devMenu.open || !g_devMenu.anchorValid ||
+        !g_weaponAim.valid) {
+        return;
+    }
+    LTVector direction = g_weaponAim.fireTransform.m_rRot.Forward();
+    if (direction.MagSqr() < 1.0e-6F) {
+        return;
+    }
+    direction.Normalize();
+    DevMenuPanelGeometry panel{};
+    panel.center = ToDevMenuVector(g_devMenu.center);
+    panel.right = ToDevMenuVector(g_devMenu.right);
+    panel.up = ToDevMenuVector(g_devMenu.up);
+    panel.normal = ToDevMenuVector(g_devMenu.normal);
+    panel.width = kDevMenuWidthMeters * kGameUnitsPerMeter;
+    panel.height = kDevMenuHeightMeters * kGameUnitsPerMeter;
+    panel.headerHeight = kDevMenuHeaderMeters * kGameUnitsPerMeter;
+    panel.titleHeight = kDevMenuTitleMeters * kGameUnitsPerMeter;
+    panel.tabHeight = kDevMenuTabMeters * kGameUnitsPerMeter;
+    panel.rowHeight = kDevMenuRowMeters * kGameUnitsPerMeter;
+    panel.tabCount = kDevMenuTabCount;
+    panel.rowCount = DevMenuRowCount(g_devMenu.selectedTab);
+    DevMenuRayHit hit;
+    if (!HitTestDevMenuPanel(
+            panel,
+            ToDevMenuVector(g_weaponAim.fireTransform.m_vPos),
+            ToDevMenuVector(direction), hit)) {
+        return;
+    }
+    g_devMenu.pointerRegion = hit.region;
+    if (hit.region == DevMenuHitRegion::tab) {
+        g_devMenu.pointerIndex = hit.tab;
+    } else if (hit.region == DevMenuHitRegion::row) {
+        g_devMenu.pointerIndex = hit.row;
+        g_devMenu.selectedRow = hit.row;
+    }
+    g_devMenu.pointerWorld =
+        g_weaponAim.fireTransform.m_vPos + direction * hit.distance;
+    g_devMenu.pointerValid = true;
+}
+
+void PollFloatingDevMenuInput() noexcept {
+    const std::uint32_t buttons = g_currentInput.buttons;
+    const std::uint32_t pressed =
+        buttons & ~g_devMenu.lastButtons;
+    const bool triggerDown =
+        (g_currentInput.activeHands & FEARVR_HAND_MASK_RIGHT) != 0 &&
+        g_currentInput.trigger[FEARVR_HAND_RIGHT] >= 0.55F;
+    const bool triggerPressed =
+        triggerDown && !g_devMenu.lastTriggerDown;
+    const bool bothGrips =
+        g_currentInput.squeeze[FEARVR_HAND_LEFT] >= 0.75F &&
+        g_currentInput.squeeze[FEARVR_HAND_RIGHT] >= 0.75F;
+    const bool toggleRequested =
+        bothGrips &&
+        (pressed & FEARVR_IB_RIGHT_SECONDARY) != 0;
+    const ULONGLONG now = GetTickCount64();
+
+    const int gameState = ReadRetailGameState();
+    const bool playing =
+        gameState >= 0
+            ? gameState == kRetailGameStatePlaying
+            : (g_lastWeaponManagerUpdateTick != 0 &&
+               now - g_lastWeaponManagerUpdateTick <=
+                   kPlayingFrameFreshMilliseconds);
+
+    if (g_devMenu.open && !playing) {
+        CloseFloatingDevMenu();
+    } else if (!g_devMenu.open && toggleRequested && playing) {
+        OpenFloatingDevMenu();
+        g_devMenu.lastButtons = buttons;
+        g_devMenu.lastTriggerDown = triggerDown;
+        return;
+    }
+
+    if (g_devMenu.open) {
+        ResetDevMenuGameplayInput();
+        UpdateFloatingDevMenuRaySelection();
+        if ((pressed & FEARVR_IB_RIGHT_SECONDARY) != 0) {
+            CloseFloatingDevMenu();
+        } else {
+            const std::size_t rowCount =
+                DevMenuRowCount(g_devMenu.selectedTab);
+            if (UpdateDevMenuSelectionAxis(
+                    g_currentInput.turnY >= 0.55F,
+                    g_devMenu.axisUpDown,
+                g_devMenu.axisUpRepeatTick, now)) {
+                g_devMenu.selectedRow =
+                    (g_devMenu.selectedRow + rowCount - 1U) % rowCount;
+            }
+            if (UpdateDevMenuSelectionAxis(
+                    g_currentInput.turnY <= -0.55F,
+                    g_devMenu.axisDownDown,
+                g_devMenu.axisDownRepeatTick, now)) {
+                g_devMenu.selectedRow =
+                    (g_devMenu.selectedRow + 1U) % rowCount;
+            }
+            if (UpdateDevMenuSelectionAxis(
+                    g_currentInput.turnX <= -0.55F,
+                    g_devMenu.axisLeftDown,
+                    g_devMenu.axisLeftRepeatTick, now)) {
+                SelectFloatingDevMenuTab(
+                    (static_cast<std::size_t>(g_devMenu.selectedTab) +
+                     kDevMenuTabCount - 1U) % kDevMenuTabCount);
+            }
+            if (UpdateDevMenuSelectionAxis(
+                    g_currentInput.turnX >= 0.55F,
+                    g_devMenu.axisRightDown,
+                    g_devMenu.axisRightRepeatTick, now)) {
+                SelectFloatingDevMenuTab(
+                    (static_cast<std::size_t>(g_devMenu.selectedTab) + 1U) %
+                    kDevMenuTabCount);
+            }
+            if (triggerPressed ||
+                (pressed & FEARVR_IB_RIGHT_PRIMARY) != 0) {
+                if (g_devMenu.pointerValid &&
+                    g_devMenu.pointerRegion == DevMenuHitRegion::tab) {
+                    SelectFloatingDevMenuTab(g_devMenu.pointerIndex);
+                } else {
+                    ActivateFloatingDevMenuRow(
+                        g_devMenu.selectedTab, g_devMenu.selectedRow);
+                }
+            }
+        }
+    }
+
+    if (g_devMenu.suppressUntilRelease && !g_devMenu.open &&
+        g_currentInput.squeeze[FEARVR_HAND_LEFT] < 0.25F &&
+        g_currentInput.squeeze[FEARVR_HAND_RIGHT] < 0.25F &&
+        (buttons & (FEARVR_IB_RIGHT_PRIMARY |
+                    FEARVR_IB_RIGHT_SECONDARY)) == 0 &&
+        !triggerDown) {
+        g_devMenu.suppressUntilRelease = false;
+    }
+    g_devMenu.lastButtons = buttons;
+    g_devMenu.lastTriggerDown = triggerDown;
+}
+
 void PollControllerMenuInput() noexcept {
     PollFlashlightToggle();
     const std::uint32_t buttons = g_currentInput.buttons;
@@ -12431,7 +15798,7 @@ void PollControllerMenuInput() noexcept {
     }
     if ((pressed & kRightSecondaryButtonMask) != 0) {
         if (g_vrSettingsPageActive) {
-            LeaveRetailVrSettingsPage();
+            NavigateBackRetailVrSettingsPage();
         } else {
             // B geht in Untermenüs eine Ebene zurück und schließt das Menü
             // nur auf der obersten Ebene. Deshalb hier kein "Menü zu"
@@ -12480,12 +15847,17 @@ void __fastcall HookClientShellUpdate(
         ApplyHeadBobEnabled(false);
     }
     PollControllerInput();
+    PollFloatingDevMenuInput();
     if (!g_disableClientUpdateWork) {
-        PrepareWeaponSwitchPulse();
-        PrepareGrenadeAndReloadPulse();
-        UpdateMeleeActions();
-        UpdateClimbMotion();
-        PollControllerMenuInput();
+        if (!DevMenuCapturesControllerInput()) {
+            PrepareWeaponSwitchPulse();
+            PrepareGrenadeAndReloadPulse();
+            UpdateMeleeActions();
+            UpdateClimbMotion();
+            PollControllerMenuInput();
+        } else {
+            ResetDevMenuGameplayInput();
+        }
     }
     if (!g_disableClientUpdateWork) {
         UpdateCrosshairOverride();
@@ -12839,6 +16211,12 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     g_setFovScalePercent =
         Resolve<SetFovScalePercentFunction>(
             bridge, "FearVr_SetFovScalePercent");
+    g_getRenderScalePercent =
+        Resolve<GetRenderScalePercentFunction>(
+            bridge, "FearVr_GetRenderScalePercent");
+    g_setRenderScalePercent =
+        Resolve<SetRenderScalePercentFunction>(
+            bridge, "FearVr_SetRenderScalePercent");
     g_isTranslationEnabled =
         Resolve<GetBooleanOptionFunction>(
             bridge, "FearVr_IsTranslationEnabled");
@@ -12871,6 +16249,9 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
     g_getRenderRequest =
         Resolve<GetRenderRequestFunction>(
             bridge, "FearVr_GetRenderRequest");
+    g_waitForNewRenderRequest =
+        Resolve<WaitForNewRenderRequestFunction>(
+            bridge, "FearVr_WaitForNewRenderRequest");
     g_getInputState =
         Resolve<GetInputStateFunction>(
             bridge, "FearVr_GetInputState");
@@ -12892,6 +16273,8 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
         g_isStereoEnabled == nullptr ||
         g_setStereoEnabled == nullptr ||
         g_setFovScalePercent == nullptr ||
+        g_getRenderScalePercent == nullptr ||
+        g_setRenderScalePercent == nullptr ||
         g_isTranslationEnabled == nullptr ||
         g_setTranslationEnabled == nullptr ||
         g_isStereoHudEnabled == nullptr ||
@@ -12900,7 +16283,9 @@ bool InstallStereoHook(void* masterDatabase, HMODULE bridge) noexcept {
         g_setComfortModeEnabled == nullptr ||
         g_requestRecenter == nullptr ||
         g_registerStereoToggle == nullptr ||
-        g_getRenderRequest == nullptr || g_beginEye == nullptr ||
+        g_getRenderRequest == nullptr ||
+        g_waitForNewRenderRequest == nullptr ||
+        g_beginEye == nullptr ||
         g_captureEye == nullptr || g_endStereoFrame == nullptr) {
         Report(
             "ERROR", "stereo_bridge_exports_missing",

@@ -62,6 +62,21 @@ param(
     # Laesst die Arbeit im IClientShell::Update-Hook weg.
     [switch]$NoClientUpdate,
 
+    # Misst nur die rohe Present-Rate. Das Spiel bleibt im Desktopfenster
+    # sichtbar, aber es werden absichtlich keine Bilder ins Headset kopiert.
+    [switch]$NoCapture,
+
+    # Diagnose-Rollback für den verifizierten Jupiter-EX-HID-FPS-Fix.
+    [switch]$NoHidFpsFix,
+
+    # Diagnose-Rollback: FEAR nicht am OpenXR-Renderauftrag takten.
+    [switch]$NoXrFramePacing,
+
+    # Linear resolution scale for native stereo world rendering. Menus and
+    # videos retain the Retail backbuffer; this applies only during gameplay.
+    [ValidateRange(100, 200)]
+    [int]$RenderScale,
+
     # Laesst Weapon-Manager-, AimAt- und Fire-Vector-Hook ungesetzt.
     [switch]$NoAimHooks,
 
@@ -558,6 +573,15 @@ if ($NoStereo) { $gameArguments += '-fearvr-no-stereo' }
 if ($NoInject) { $gameArguments += '-fearvr-no-inject' }
 if ($NoBindingHook) { $gameArguments += '-fearvr-no-binding-hook' }
 if ($NoClientUpdate) { $gameArguments += '-fearvr-no-client-update' }
+if ($NoCapture) { $gameArguments += '-fearvr-no-capture' }
+if ($NoHidFpsFix) { $gameArguments += '-fearvr-no-hid-fps-fix' }
+if ($NoXrFramePacing) { $gameArguments += '-fearvr-no-xr-frame-pacing' }
+if ($PSBoundParameters.ContainsKey('RenderScale')) {
+    $gameArguments += @(
+        '-fearvr-render-scale',
+        $RenderScale.ToString([Globalization.CultureInfo]::InvariantCulture)
+    )
+}
 if ($NoAimHooks) { $gameArguments += '-fearvr-no-aim-hooks' }
 if ($NoAimAt) { $gameArguments += '-fearvr-no-aimat' }
 if ($AimAtPassthrough) { $gameArguments += '-fearvr-aimat-passthrough' }
@@ -773,7 +797,7 @@ Write-Host 'Trigger feuern die jeweilige Pistole; mit zwei Pistolen schaltet X Z
 Write-Host 'Linker Grip rennt, linker Stick-Klick nutzt Medkit, rechter Grip benutzt.'
 Write-Host 'Rechter Stick-Klick greift in 3D im Nahkampf an.'
 Write-Host 'Die linke Hand seitlich neigen lehnt um die Ecke.'
-Write-Host 'F8 Stereo an/aus, F9 richtet nur 2D-Bildschirme neu aus, F10 Komfortbildschirm.'
+Write-Host 'F8 Stereo an/aus, F9 setzt VR-Ursprung/2D-Panel neu, F10 Komfortbildschirm.'
 Write-Host 'VR-Einstellungen stehen im ESC-Menue unter "VR SETTINGS".'
 
 if ($Wait) {

@@ -34,6 +34,7 @@
 #include "ipc_bridge.h"
 #include "locomotion_reprojection.h"
 #include "protocol_utils.h"
+#include "reference_space_recenter.h"
 #include "stereo_math.h"
 #include "startup_splash.h"
 #include "texture_renderer.h"
@@ -926,6 +927,27 @@ private:
                     xrInput_->LogInteractionProfiles(session_);
                 }
             }
+            if (event.type ==
+                XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+                const auto* changed = reinterpret_cast<
+                    const XrEventDataReferenceSpaceChangePending*>(&event);
+                if (changed->session == session_ &&
+                    changed->referenceSpaceType ==
+                        XR_REFERENCE_SPACE_TYPE_LOCAL) {
+                    ScheduleReferenceSpaceRecenter(
+                        referenceSpaceRecenter_,
+                        static_cast<std::int64_t>(changed->changeTime));
+                    std::ostringstream message;
+                    message << "change_time=" << changed->changeTime
+                            << " pose_valid="
+                            << (changed->poseValid == XR_TRUE ? 1 : 0)
+                            << "; world recenter waits for the first fully "
+                               "tracked pose in the new LOCAL origin.";
+                    logger_.Write(
+                        "INFO", "reference_space_change_pending",
+                        message.str());
+                }
+            }
             if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
                 const auto* changed =
                     reinterpret_cast<const XrEventDataSessionStateChanged*>(
@@ -1059,9 +1081,23 @@ private:
 
             const XrViewStateFlags requiredFlags =
                 XR_VIEW_STATE_POSITION_VALID_BIT |
-                XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+                XR_VIEW_STATE_ORIENTATION_VALID_BIT |
+                XR_VIEW_STATE_POSITION_TRACKED_BIT |
+                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT;
             if (viewCount == 2 &&
                 (viewState.viewStateFlags & requiredFlags) == requiredFlags) {
+                if (CommitReferenceSpaceRecenterIfReady(
+                        referenceSpaceRecenter_,
+                        static_cast<std::int64_t>(
+                            frameState.predictedDisplayTime),
+                        true)) {
+                    logger_.Write(
+                        "INFO", "reference_space_recenter_committed",
+                        "generation=" + std::to_string(
+                            referenceSpaceRecenter_.generation) +
+                            "; the game will rebuild its head/body anchor "
+                            "from this fully tracked pose.");
+                }
                 std::array<XrFovf, FEARVR_EYE_COUNT> submittedFov{
                     locatedViews_[FEARVR_EYE_LEFT].fov,
                     locatedViews_[FEARVR_EYE_RIGHT].fov};
@@ -1134,6 +1170,8 @@ private:
                     request.predictedDisplayTimeNs =
                         static_cast<std::uint64_t>(
                             frameState.predictedDisplayTime);
+                    request.recenterGeneration =
+                        referenceSpaceRecenter_.generation;
                     request.flags = FEARVR_RF_VALID;
                     for (std::uint32_t eye = 0;
                          eye < FEARVR_EYE_COUNT; ++eye) {
@@ -1746,6 +1784,7 @@ private:
     std::array<RenderPoseSample, kRenderPoseHistorySize>
         renderPoseHistory_{};
     XrSessionStateMachine lifecycle_;
+    ReferenceSpaceRecenterState referenceSpaceRecenter_;
     std::array<EyeStats, FEARVR_EYE_COUNT> eyeStats_{};
     std::chrono::steady_clock::time_point perfWindowStart_{
         std::chrono::steady_clock::now()};

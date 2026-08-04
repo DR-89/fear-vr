@@ -203,6 +203,13 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   jeder Renderanforderung ihre OpenXR-Pose/FOV zu; der Compositor erhält
   zusammen mit dem importierten Bild exakt dessen Renderpose und kann korrekt
   zeitwarpen.
+- **Stabiler Erststart:** Eine Ansicht darf den Kopf-/Körperanker erst setzen,
+  wenn OpenXR Position und Orientierung nicht nur als gültig, sondern auch als
+  tatsächlich getrackt meldet. Ein angekündigter Wechsel des verwendeten
+  `LOCAL`-Reference-Space wird zum angegebenen XR-Zeitpunkt übernommen; die
+  erste vollständig getrackte Pose im neuen Ursprung erhöht über Host und
+  Bridge die Recenter-Generation. Damit kann kein vorläufiger Erststart-
+  Ursprung bis zum Prozessneustart am Körper hängen bleiben.
 - **Lokomotionsmessung seit Protokoll v6:** Der x86-Client veröffentlicht
   zusätzlich die Basis-Spielkamera jedes Stereo-Bilds sowie die neueste
   gerenderte Spielkamera. Der Host misst daraus den Weg, den das noch
@@ -256,9 +263,9 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 
 ### AD-010 — SteamVR-Desktop-Theater beim Retail-Start unterdrücken
 
-- **Status 31.07.2026:** Verworfen. Die beiden Theater-Hilfsskripte sowie ihre
-  Launcher- und Release-Aufrufe wurden entfernt. Der aktuelle Startpfad
-  verändert keine SteamVR-Konfiguration und startet keinen Wächter.
+- **Status 31.07.2026:** Wieder aktiv, nachdem das Problem auf zwei Rechnern
+  erneut auftrat. Die beiden separaten Theater-Hilfsskripte bleiben entfernt;
+  Einstellung und kurzer Wächter sind direkt in `play.ps1` integriert.
 - **Problem:** F.E.A.R. muss offiziell mit `steam.exe -applaunch 21090`
   gestartet werden. SteamVR erkennt es trotzdem als Desktopspiel und kann
   verzögert eine Theaterfläche über der bereits aktiven OpenXR-Szene öffnen.
@@ -267,10 +274,10 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
   Benutzer musste sie bei mehreren Läufen manuell schließen. Selbst der
   dokumentierte Benutzerwert `steamvr.autoShowGameTheater=false` verhinderte
   die verspätete Einblendung in einem Lauf nicht zuverlässig.
-- **Gewählte Lösung:** Der Launcher setzt den Benutzerwert weiterhin auf
-  `false` und sichert die vorherige Konfiguration im Projekt. Zusätzlich
-  beobachtet ein versteckter, auf den neuen F.E.A.R.-Prozess begrenzter
-  Wächter höchstens fünf Minuten gezielt
+- **Gewählte Lösung:** Der Launcher setzt den Benutzerwert auf `false` und
+  sichert eine tatsächlich geänderte Konfiguration im jeweiligen Lauf-Log.
+  Zusätzlich beobachtet eine versteckte Instanz desselben Launchers, begrenzt
+  auf den neuen F.E.A.R.-Prozess und höchstens 20 Sekunden, gezielt
   `valve.steam.desktopgame.21090`. Wird diese Fläche erstmals sichtbar,
   beendet er zunächst den Theatermodus mit dem Compositor-Befehl
   `disable_theater_mode` und schließt anschließend das verbleibende Dashboard
@@ -457,8 +464,9 @@ Komponenten: `src/host64/`, `src/proxy32/`, `src/launcher/`,
 ### AD-018 — Runtime-unabhängiger Betrieb, Umschaltung per XR_RUNTIME_JSON
 
 - **Problem:** Der Mod soll auch über Virtual Desktop laufen und dabei nicht
-  von SteamVR abhängen. Der Host war bereits reines OpenXR; inzwischen
-  enthalten auch die Startskripte keine SteamVR-Theater-Sonderbehandlung mehr.
+  von SteamVR abhängen. Der Host bleibt reines OpenXR. Die Theaterbehandlung
+  wird nur aktiv, wenn SteamVR beim Spielstart tatsächlich läuft; ein reiner
+  VDXR-Lauf startet keinen SteamVR-Prozess.
 - **Messung/Beleg:** Mit `ActiveRuntime` auf VDXR meldete
   `fearvr-host.exe --validate-only` am 25.07.2026 `VirtualDesktopXR 1.0.10`,
   erkannte `Meta Quest 3`, wählte dieselbe Adapter-LUID `0x0:D57B` und

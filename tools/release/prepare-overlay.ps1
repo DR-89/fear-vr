@@ -166,6 +166,8 @@ if (-not (Test-Path -LiteralPath $d3d9Proxy -PathType Leaf)) {
 $bodyDirectory = Join-Path $moduleDirectory 'fearvr'
 $bodyTexture = Join-Path $bodyDirectory 'player_body_d.dds'
 $bodyMaterial = Join-Path $bodyDirectory 'player_body.Mat00'
+$vrLocalizedDatabase = Join-Path $moduleDirectory (
+    'DatabaseLocalized\FEARL.Gamdb00p')
 $missingPublicTools = @(
     $cfg.PublicToolsModules.Keys |
         Where-Object {
@@ -176,8 +178,11 @@ $missingPublicTools = @(
 $needsBodyAssets =
     -not (Test-Path -LiteralPath $bodyTexture -PathType Leaf) -or
     -not (Test-Path -LiteralPath $bodyMaterial -PathType Leaf)
+$needsVrUiAssets =
+    -not (Test-Path -LiteralPath $vrLocalizedDatabase -PathType Leaf)
 $needsPublicToolsSource =
-    $Force -or $missingPublicTools.Count -gt 0 -or $needsBodyAssets
+    $Force -or $missingPublicTools.Count -gt 0 -or $needsBodyAssets -or
+    $needsVrUiAssets
 
 $resolvedPublicTools = $null
 if ($needsPublicToolsSource) {
@@ -241,6 +246,11 @@ if ($resolvedPublicTools) {
             -SourceGame $resolvedPublicTools `
             -DestinationGame $moduleDirectory
     }
+    if ($Force -or $needsVrUiAssets) {
+        & (Join-Path $PSScriptRoot 'new-vr-ui-assets.ps1') `
+            -SourceGame $resolvedPublicTools `
+            -DestinationGame $moduleDirectory
+    }
 }
 
 foreach ($target in $cfg.PublicToolsModules.Keys) {
@@ -252,6 +262,9 @@ foreach ($target in $cfg.PublicToolsModules.Keys) {
 if ((Get-FileSha256 (Join-Path $moduleDirectory 'GameOrig.dll')) -ne
     $cfg.PublicToolsGameClientSha256) {
     throw 'GameOrig.dll stammt nicht aus den F.E.A.R. Public Tools 1.08.'
+}
+if (-not (Test-Path -LiteralPath $vrLocalizedDatabase -PathType Leaf)) {
+    throw "VR-Pickup-HUD-Datenbank fehlt: $vrLocalizedDatabase"
 }
 
 $archiveConfig = Join-Path $InstallDir 'fearvr.archcfg'

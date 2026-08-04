@@ -71,10 +71,124 @@ param(
     # AimAt-Hook bleibt gesetzt, ueberschreibt das Ziel aber nie.
     [switch]$AimAtPassthrough,
 
-    [switch]$Wait
+    [switch]$Wait,
+
+    # Interner, versteckter Startmodus desselben Launchers. So braucht das
+    # Release keine separaten SteamVR-Theater-Hilfsskripte mehr.
+    [Parameter(DontShow)]
+    [switch]$InternalTheaterGuard,
+
+    [Parameter(DontShow)]
+    [int]$TheaterGamePid,
+
+    [Parameter(DontShow)]
+    [string]$TheaterVrcmd,
+
+    [Parameter(DontShow)]
+    [string]$TheaterLogPath
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Invoke-IntegratedSteamVrTheaterGuard {
+    param(
+        [Parameter(Mandatory)]
+        [int]$GamePid,
+
+        [Parameter(Mandatory)]
+        [string]$VrCmd,
+
+        [Parameter(Mandatory)]
+        [string]$LogPath
+    )
+
+    $overlayKey = 'valve.steam.desktopgame.21090'
+    $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
+    function Write-TheaterGuardLog([string]$Message) {
+        try {
+            $line = '{0:o} {1}{2}' -f (
+                Get-Date
+            ).ToUniversalTime(), $Message, [Environment]::NewLine
+            [IO.File]::AppendAllText($LogPath, $line, $utf8WithoutBom)
+        } catch {
+            # Der Wächter ist eine Komfortfunktion; sein Log darf den Start nie
+            # verhindern.
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $VrCmd -PathType Leaf)) {
+        Write-TheaterGuardLog "vrcmd_missing path=$VrCmd"
+        return
+    }
+
+    # SteamVR 2.16 erzeugt die Fläche auf den beobachteten Systemen rund 3,5 s
+    # nach dem Spielstart. Zwanzig Sekunden decken auch einen kalten Start ab,
+    # ohne später im Spiel weiterhin vrcmd-Prozesse zu erzeugen.
+    $deadline = (Get-Date).AddSeconds(20)
+    Write-TheaterGuardLog "guard_started game_pid=$GamePid timeout=20"
+    while ((Get-Date) -lt $deadline) {
+        if ($null -eq (
+                Get-Process -Id $GamePid -ErrorAction SilentlyContinue)) {
+            Write-TheaterGuardLog 'game_exited'
+            return
+        }
+
+        $steamVrRunning = $null -ne (
+            Get-Process -Name 'vrserver' -ErrorAction SilentlyContinue |
+                Select-Object -First 1)
+        if (-not $steamVrRunning) {
+            Start-Sleep -Milliseconds 500
+            continue
+        }
+
+        $overlays = @(& $VrCmd --overlays 2>$null)
+        $theaterVisible = @(
+            $overlays | Where-Object {
+                $_ -match [Regex]::Escape($overlayKey) -and
+                $_ -match '\svisible\s'
+            }
+        ).Count -gt 0
+        if (-not $theaterVisible) {
+            Start-Sleep -Milliseconds 500
+            continue
+        }
+
+        # Nur Valves Desktopfläche für App 21090 wurde als sichtbar erkannt.
+        # Das normale SteamVR-Dashboard bleibt außerhalb dieses kurzen
+        # Startfensters vollständig unangetastet.
+        for ($attempt = 1; $attempt -le 3; ++$attempt) {
+            & $VrCmd --compositorcmd disable_theater_mode 2>$null | Out-Null
+            Start-Sleep -Milliseconds 100
+            & $VrCmd --hidedashboard 2>$null | Out-Null
+            Start-Sleep -Milliseconds 150
+            $verification = @(& $VrCmd --overlays 2>$null)
+            $stillVisible = @(
+                $verification | Where-Object {
+                    $_ -match [Regex]::Escape($overlayKey) -and
+                    $_ -match '\svisible\s'
+                }
+            ).Count -gt 0
+            if (-not $stillVisible) {
+                Write-TheaterGuardLog (
+                    "delayed_theater_hidden overlay=$overlayKey " +
+                    "attempt=$attempt")
+                return
+            }
+        }
+        Write-TheaterGuardLog "theater_hide_failed overlay=$overlayKey"
+        return
+    }
+    Write-TheaterGuardLog 'timeout_without_visible_theater'
+}
+
+if ($InternalTheaterGuard) {
+    Invoke-IntegratedSteamVrTheaterGuard `
+        -GamePid $TheaterGamePid `
+        -VrCmd $TheaterVrcmd `
+        -LogPath $TheaterLogPath
+    exit 0
+}
+
 . "$PSScriptRoot\_fearvr-release.ps1"
 $packageRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
@@ -214,12 +328,102 @@ function Write-LauncherEvent(
     }
 }
 
+function Find-SteamVrCommand([string]$SteamExecutable) {
+    if ([string]::IsNullOrWhiteSpace($SteamExecutable)) {
+        return $null
+    }
+    $steamRoot = Split-Path -Parent $SteamExecutable
+    $libraries = New-Object Collections.Generic.List[string]
+    $libraries.Add($steamRoot)
+    $libraryConfig = Join-Path $steamRoot 'steamapps\libraryfolders.vdf'
+    if (Test-Path -LiteralPath $libraryConfig -PathType Leaf) {
+        foreach ($match in [Text.RegularExpressions.Regex]::Matches(
+            [IO.File]::ReadAllText($libraryConfig),
+            '"path"\s*"([^"]+)"')) {
+            $libraries.Add(($match.Groups[1].Value -replace '\\\\', '\'))
+        }
+    }
+    foreach ($library in $libraries) {
+        $candidate = Join-Path $library (
+            'steamapps\common\SteamVR\bin\win64\vrcmd.exe')
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Disable-AutomaticSteamVrTheater(
+    [string]$SteamExecutable,
+    [string]$BackupDirectory
+) {
+    if ([string]::IsNullOrWhiteSpace($SteamExecutable)) {
+        return $false
+    }
+    $settingsPath = Join-Path (
+        Split-Path -Parent $SteamExecutable) 'config\steamvr.vrsettings'
+    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+        Write-LauncherEvent 'INFO' 'steamvr_theater_setting_absent' (
+            "settings file not present: $settingsPath")
+        return $false
+    }
+
+    try {
+        $text = [IO.File]::ReadAllText($settingsPath)
+        $valuePattern =
+            '(?m)("autoShowGameTheater"\s*:\s*)(true|false)'
+        if ([Text.RegularExpressions.Regex]::IsMatch(
+                $text, $valuePattern)) {
+            $updated = [Text.RegularExpressions.Regex]::Replace(
+                $text, $valuePattern, '${1}false')
+        } else {
+            $sectionPattern = '(?m)(^\s*"steamvr"\s*:\s*\{\s*\r?\n)'
+            if (-not [Text.RegularExpressions.Regex]::IsMatch(
+                    $text, $sectionPattern)) {
+                Write-LauncherEvent 'WARN' 'steamvr_theater_setting_failed' (
+                    'section "steamvr" is absent from ' + $settingsPath)
+                return $false
+            }
+            $updated = [Text.RegularExpressions.Regex]::Replace(
+                $text, $sectionPattern,
+                '${1}      "autoShowGameTheater" : false,' +
+                    [Environment]::NewLine,
+                1)
+        }
+        if ($updated -cne $text) {
+            $backupPath = Join-Path $BackupDirectory (
+                'steamvr-before-theater-fix.vrsettings')
+            Copy-Item -LiteralPath $settingsPath -Destination $backupPath
+            $utf8WithoutBom = New-Object Text.UTF8Encoding($false)
+            [IO.File]::WriteAllText(
+                $settingsPath, $updated, $utf8WithoutBom)
+            Write-LauncherEvent 'INFO' 'steamvr_theater_setting_disabled' (
+                "backup=$backupPath")
+        } else {
+            Write-LauncherEvent 'INFO' 'steamvr_theater_setting_verified' (
+                'steamvr.autoShowGameTheater=false')
+        }
+        return $true
+    } catch {
+        Write-LauncherEvent 'WARN' 'steamvr_theater_setting_failed' (
+            $_.Exception.Message)
+        return $false
+    }
+}
+
 Write-Host '=== F.E.A.R. VR ===' -ForegroundColor Cyan
 Write-Host "Runtime: $($runtimeInfo.Name)$(if ($runtimeInfo.Override) { ' (erzwungen)' })"
 Write-Host "Logs:    $runLogDirectory"
 Write-LauncherEvent 'INFO' 'launcher_start' (
     "runtime=$($runtimeInfo.Name) kind=$($runtimeInfo.Kind) " +
     "launch_mode=$launchMode session=$sessionText")
+
+$steamVrCommand = Find-SteamVrCommand $steamExe
+if ($launchMode -eq 'steam') {
+    Disable-AutomaticSteamVrTheater `
+        -SteamExecutable $steamExe `
+        -BackupDirectory $runLogDirectory | Out-Null
+}
 
 # --- Host starten -----------------------------------------------------------
 $startupImage = Join-Path $packageRoot 'assets\fearvr-startup.jpg'
@@ -366,15 +570,18 @@ try {
             @('-applaunch', $deployment.steamAppId) + $gameArguments
         $steamArgumentText = $steamArguments -join ' '
         $launchStarted = Get-Date
-        $attemptOffsets = @(0, 10, 20)
+        $attemptOffsets = @(0, 3, 6)
         $attemptIndex = 0
-        $deadline = $launchStarted.AddSeconds(35)
+        $deadline = $launchStarted.AddSeconds(9)
         $lastSteamError = $null
 
         # Steam can acknowledge -applaunch while its client is still starting
         # and then lose the actual app request. This leaves the OpenXR host
         # alive but never creates FEAR.exe. Retry the same idempotent app launch
-        # twice while continuing to watch for the process.
+        # twice while continuing to watch for the process. The old 0/10/20 s
+        # schedule made a warm Steam client need up to 35 seconds. The measured
+        # good path creates FEAR.exe in under one second, so short 0/3/6 s
+        # retries preserve a cold-start fallback without delaying normal runs.
         do {
             $elapsed = ((Get-Date) - $launchStarted).TotalSeconds
             if ($attemptIndex -lt $attemptOffsets.Count -and
@@ -463,6 +670,30 @@ try {
 
     Write-LauncherEvent 'INFO' 'game_process_started' "pid=$($fear.Id)"
 
+    $theaterGuard = $null
+    $steamVrIsRunning = $null -ne (
+        Get-Process -Name 'vrserver' -ErrorAction SilentlyContinue |
+            Select-Object -First 1)
+    if ($steamVrCommand -and
+        ($runtimeInfo.Kind -eq 'steamvr' -or $steamVrIsRunning)) {
+        $guardLog = Join-Path $runLogDirectory 'steamvr-theater-guard.log'
+        $powershellExe = Join-Path $PSHOME 'powershell.exe'
+        if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) {
+            $powershellExe = (Get-Process -Id $PID).Path
+        }
+        $theaterGuard = Start-Process -FilePath $powershellExe `
+            -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                '-File', "`"$PSCommandPath`"",
+                '-InternalTheaterGuard',
+                '-TheaterGamePid', $fear.Id,
+                '-TheaterVrcmd', "`"$steamVrCommand`"",
+                '-TheaterLogPath', "`"$guardLog`""
+            ) -WindowStyle Hidden -PassThru
+        Write-LauncherEvent 'INFO' 'steamvr_theater_guard_started' (
+            "pid=$($theaterGuard.Id) game_pid=$($fear.Id)")
+    }
+
     # A running FEAR.exe alone is not a successful VR start. Confirm that the
     # early d3d9 bridge received this session's command line and produced its
     # proxy log. Otherwise the old launcher falsely reported success while the
@@ -515,6 +746,15 @@ d3d9.dll blockiert hat.
             }
         } catch { }
     }
+    if ($null -ne $theaterGuard) {
+        try {
+            $theaterGuard.Refresh()
+            if (-not $theaterGuard.HasExited) {
+                Stop-Process -Id $theaterGuard.Id -Force `
+                    -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
     try {
         $hostProcess.Refresh()
         if (-not $hostProcess.HasExited) {
@@ -538,7 +778,7 @@ Write-Host 'VR-Einstellungen stehen im ESC-Menue unter "VR SETTINGS".'
 
 if ($Wait) {
     $fear.WaitForExit()
-    foreach ($process in @($hostProcess)) {
+    foreach ($process in @($theaterGuard, $hostProcess)) {
         if ($null -eq $process) { continue }
         $process.WaitForExit(8000) | Out-Null
         $process.Refresh()

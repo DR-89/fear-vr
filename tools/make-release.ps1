@@ -157,7 +157,8 @@ foreach ($script in @(
     'release\_fearvr-release.ps1',
     'release\prepare-overlay.ps1',
     'release\play.ps1',
-    'release\new-body-assets.ps1'
+    'release\new-body-assets.ps1',
+    'release\new-vr-ui-assets.ps1'
 )) {
     $source = Join-Path $cfg.ProjectRoot "tools\$script"
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
@@ -220,6 +221,9 @@ Mit -PublicToolsGame kann deren Wurzel oder Dev\Runtime\Game angegeben werden.
             -Destination (Join-Path $overlayRoot "game-modules\$target") -Force
     }
     & (Join-Path $cfg.ProjectRoot 'tools\release\new-body-assets.ps1') `
+        -SourceGame $publicToolsSource `
+        -DestinationGame (Join-Path $overlayRoot 'game-modules')
+    & (Join-Path $cfg.ProjectRoot 'tools\release\new-vr-ui-assets.ps1') `
         -SourceGame $publicToolsSource `
         -DestinationGame (Join-Path $overlayRoot 'game-modules')
 

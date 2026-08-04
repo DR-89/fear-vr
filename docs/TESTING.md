@@ -304,6 +304,9 @@ M4-Gate:
 - kein künstliches Rollen beim normalen Lauf gemeldet;
 - bei mehr als 250 ms ohne neue Pose Wechsel auf Mono und Recenter bei
   Wiederkehr; ungültige Posen sind automatisiert getestet;
+- ein zukünftiger OpenXR-`LOCAL`-Ursprungswechsel wird erst ab seinem
+  angekündigten Zeitpunkt und nur mit vollständig getrackter Pose übernommen;
+  überlappende Meldungen und Generationsüberlauf sind automatisiert getestet;
 - Haupt-/Pausemenü, Stereo-HUD, Übergänge und Theater-Unterdrückung bestätigt;
 - Benutzerabnahme: M4 darf abgeschlossen werden.
 
@@ -562,8 +565,9 @@ unsauberen Arbeitsbaum ausdrücklich (AD-017).
 
 `tools\uninstall-fearvr.ps1` ist ohne `-Apply` ein reiner Trockenlauf.
 
-Aktuelle Launcher schreiben keinen SteamVR-Wert mehr. Der Deinstaller behält
-für alte Projektstände die gezielte Wiederherstellung von
+Aktuelle Launcher stellen den einzelnen SteamVR-Wert wieder auf `false`, weil
+die Theaterfläche auf zwei Rechnern erneut auftrat. Der Deinstaller behält
+zusätzlich für alte Projektstände die gezielte Wiederherstellung von
 `steamvr.autoShowGameTheater`; beide Rückstellzweige wurden gegen eine Kopie
 der echten Konfiguration getestet:
 
@@ -666,11 +670,29 @@ ein sehr gutes Ergebnis.
 | `--validate-only` unter VDXR | `VirtualDesktopXR 1.0.10`, `Meta Quest 3`, Adapter-LUID `0x0:D57B`, Swapchains 2×`2688x2880`, Exitcode 0 |
 | `--validate-only` unter SteamVR | `SteamVR/OpenXR 2.16.7`, Swapchains 2×`2064x2208` |
 | Spielstart `-Runtime vdxr` | `logs\m5-fear-20260725-005345`: Runtime VDXR, Bridge verbunden, `ipc_frame` importiert |
-| SteamVR-Theater-Hilfen | entfernt; weder unter VDXR noch SteamVR wird ein Wächter gestartet oder `steamvr.vrsettings` geändert |
+| SteamVR-Theater-Hilfen | separate Skripte entfernt; `play.ps1` stellt den Einzelwert sicher und startet bei tatsächlich laufendem SteamVR höchstens 20 s einen integrierten Wächter für `valve.steam.desktopgame.21090` |
 
 VDXR liefert mit `2688x2880` je Auge eine deutlich höhere Swapchain-Auflösung
 als SteamVR. Das Spielbild bleibt davon unberührt: Es kommt weiterhin als
 1024x768-Textur über die Bridge und wird im Host hochskaliert.
+
+Der fremde SteamVR-Lauf in `user_logs2` vom 31.07.2026 grenzte eine weitere
+Qualitätsregression eindeutig ein: Swapchains `2244x2352`, aber sowohl erster
+als auch späterer D3D9-Reset `requested=640x480` und anschließend
+`source=640x480 transport=640x480`. Die VR-Bridge ersetzt deshalb nur diese
+VGA-Fallbackklasse dynamisch durch den letzten bereits verifizierten Modus oder
+die aktuelle Desktopauflösung. Beliebige gewählte HD-Modi bleiben unverändert;
+die Auswahlfunktion ist für x86 und x64 automatisiert geprüft.
+
+Der VDXR-Lauf `fearvr-20260731-074801` bestätigt den korrigierten Pfad mit
+`requested=640x480 resolved=2560x1440`, anschließendem Spiel-Reset auf
+`1920x1440`, `transport=1440x1080` und aktivem GPU-HUD. Dabei zeigte der
+Sichttest noch zu dünne Pickup-Texte. Der abgeleitete `HUDSwap`-Datensatz nutzt
+deshalb 26 Pixel und voll deckende Weiß-/Gelbtöne. Die Kontur wird im
+GPU-Kompositor nun aus vier bilinearen Maskenabgriffen ungefähr zwei
+Quellpixel breit erzeugt; nach der 0,75-fachen Transport-Skalierung bleibt sie
+damit sicher sichtbar. Die Release-Prüfung validiert den Datensatz für beide
+Architekturen.
 
 Umgeschaltet wird über `-Runtime`, das `XR_RUNTIME_JSON` nur für den
 Hostprozess setzt. Die systemweite Runtime-Einstellung wird nicht verändert

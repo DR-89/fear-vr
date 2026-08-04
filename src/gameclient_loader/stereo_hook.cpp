@@ -36,6 +36,8 @@
 #include "wrist_hud_visibility.h"
 #include "climb_grip.h"
 #include "two_handed_grip.h"
+#include "two_handed_jump_camera.h"
+#include "vr_menu_scroll.h"
 
 namespace fearvr {
 namespace {
@@ -257,6 +259,9 @@ volatile LONG g_handPoseGapBridgedLogged = 0;
 volatile LONG g_weaponSocketSyncActiveLogged = 0;
 volatile LONG g_weaponCameraBaseSyncActiveLogged = 0;
 volatile LONG g_directionalCameraHeightBypassLogged = 0;
+volatile LONG g_twoHandedCameraHeightStabilizedLogged = 0;
+volatile LONG g_twoHandedViewRotationStabilizedLogged = 0;
+volatile LONG g_twoHandedCameraPositionStabilizedLogged = 0;
 volatile LONG g_armGeometryInspectedLogged = 0;
 volatile LONG g_armGeometryEmptyAttempts = 0;
 volatile LONG g_armGeometryNeverAvailableLogged = 0;
@@ -285,6 +290,22 @@ std::uint32_t g_lastInputButtons = 0;
 std::uint32_t g_lastActiveHands = 0;
 ULONGLONG g_lastFireHapticTick = 0;
 volatile LONG g_fireHapticActiveLogged = 0;
+constexpr std::size_t kVrMuzzleFlashRight = 0;
+constexpr std::size_t kVrMuzzleFlashLeft = 1;
+constexpr std::size_t kVrMuzzleFlashCount = 2;
+struct VrMuzzleFlashState {
+    HLOCALOBJ flare{nullptr};
+    HLOCALOBJ light{nullptr};
+    ULONGLONG pulseStartedTick{0};
+    ULONGLONG visibleUntilTick{0};
+    ULONGLONG lastTriggerTick{0};
+    std::uint32_t pulseSerial{0};
+};
+VrMuzzleFlashState g_vrMuzzleFlash[kVrMuzzleFlashCount];
+volatile LONG g_vrMuzzleFlashCreatedLogged = 0;
+volatile LONG g_vrMuzzleFlashActiveLogged = 0;
+volatile LONG g_vrMuzzleFlashRenderedLogged = 0;
+void RenderVrMuzzleFlash(HLOCALOBJ camera) noexcept;
 std::uint32_t g_lastMenuButtons = 0;
 bool g_lastMenuTriggerDown = false;
 bool g_menuAxisDown[4]{};
@@ -384,7 +405,13 @@ bool DualPistolsVrActive() noexcept {
 
 HLOCALOBJ g_playerCameraObject = nullptr;
 VerticalCameraHeightState g_verticalCameraHeight;
-float g_visualCameraHeight = 0.0F;
+TwoHandedJumpCameraState g_twoHandedJumpCamera;
+struct TwoHandedCameraPositionState {
+    LTVector localCameraOffset;
+    bool valid{false};
+};
+TwoHandedCameraPositionState g_twoHandedCameraPosition;
+LTVector g_visualCameraPosition;
 ULONGLONG g_visualCameraHeightSampleTick = 0;
 bool g_visualCameraHeightValid = false;
 // Der Weapon-Manager liefert die gemeinsame Y-Basis von Augen, Händen und
@@ -693,6 +720,9 @@ void* g_vrNormalControls[
 std::size_t g_vrNormalControlCount = 0;
 bool g_vrMenuControlsBuilt = false;
 bool g_vrSettingsPageActive = false;
+constexpr std::size_t kRetailVrMenuVisibleControlCount = 16;
+constexpr std::size_t kRetailVrMenuPageRows = 11;
+std::size_t g_vrMenuFirstVisibleRow = 0;
 int g_vrOriginalItemSpacing = 0;
 bool g_vrOriginalItemSpacingKnown = false;
 VrMenuControl g_vrMenuEntry;
@@ -764,6 +794,7 @@ constexpr std::size_t kRetailMenuListOffset = 0x6E8;
 // Retail CBaseMenu::Init writes FontSize / 4 here before marking the list
 // dirty. This is CLTGUIListCtrl::m_nItemSpacing in the verified 1.08 build.
 constexpr std::size_t kRetailListItemSpacingOffset = 0x54;
+constexpr std::size_t kRetailListCurrentIndexOffset = 0x58;
 constexpr std::size_t kRetailListFirstShownOffset = 0x5C;
 constexpr std::size_t kRetailListNeedsRecalculationOffset = 0x648;
 // CLTGUICtrl::IsEnabled() ist `m_bEnabled && IsVisible()`. Verstecken genügt
@@ -1885,8 +1916,9 @@ VrMenuControl SetRetailVrToggleVisible(
 }
 
 VrMenuControl RefreshRetailVrSettingsControls() noexcept {
-    // Keep one short, non-scrolling page. Less frequently changed options
-    // remain persisted in fearvr.ini but do not crowd the native 320px frame.
+    // Only one control for each setting is visible. The logical page has more
+    // rows than the native 320px frame, so MaintainRetailVrMenuScroll keeps the
+    // selected logical row inside its viewport.
     HideRetailVrSettingsControls();
     const VrMenuControl first = SetRetailVrToggleVisible(
         g_vrMenuStereo,
@@ -1932,6 +1964,88 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
     return first;
 }
 
+std::array<VrMenuControl, kRetailVrMenuVisibleControlCount>
+RetailVrMenuVisibleControls() noexcept {
+    const auto toggleControl = [](
+        const VrMenuToggle& toggle, bool enabled) noexcept {
+        return enabled ? toggle.enabled : toggle.disabled;
+    };
+    const int turnSpeed = std::clamp(g_turnSpeedPreset, 0, 2);
+    const int fovScale = std::clamp(g_fovScalePreset, 0, 3);
+    const int flashlightMount = std::clamp(
+        static_cast<int>(g_flashlightMount),
+        0, kFlashlightMountCount - 1);
+
+    return {{
+        toggleControl(
+            g_vrMenuStereo,
+            QueryBooleanOption(g_isStereoEnabled, true)),
+        toggleControl(
+            g_vrMenuStereoHud,
+            QueryBooleanOption(g_isStereoHudEnabled, true)),
+        g_vrMenuTurnSpeed[turnSpeed],
+        g_vrMenuFovScale[fovScale],
+        toggleControl(g_vrMenuAimGuide, g_weaponAimGuideEnabled),
+        toggleControl(g_vrMenuHaptics, g_controllerHapticsEnabled),
+        g_vrMenuFlashlightMount[flashlightMount],
+        toggleControl(g_vrMenuHandedness, !g_leftHandedBindings),
+        toggleControl(g_vrMenuClimbing, g_climbingEnabled),
+        toggleControl(g_vrMenuPhysicalLean, g_physicalLeanEnabled),
+        toggleControl(g_vrMenuPhysicalDuck, g_physicalDuckEnabled),
+        toggleControl(g_vrMenuMelee, g_meleeThrustEnabled),
+        toggleControl(g_vrMenuArms, g_showPlayerArms),
+        g_vrMenuRecenter,
+        g_vrMenuDefaults,
+        g_vrMenuBack,
+    }};
+}
+
+void MaintainRetailVrMenuScroll() noexcept {
+    if (!g_vrSettingsPageActive) {
+        return;
+    }
+    void* const list = RetailVrMenuList(g_vrMenuOwner);
+    if (list == nullptr) {
+        return;
+    }
+
+    __try {
+        const auto controls = RetailVrMenuVisibleControls();
+        const std::uint32_t selection =
+            *reinterpret_cast<const std::uint32_t*>(
+                static_cast<const unsigned char*>(list) +
+                kRetailListCurrentIndexOffset);
+        std::size_t selectedRow = controls.size();
+        for (std::size_t row = 0; row < controls.size(); ++row) {
+            if (controls[row].object != nullptr &&
+                controls[row].index == selection) {
+                selectedRow = row;
+                break;
+            }
+        }
+        if (selectedRow == controls.size()) {
+            return;
+        }
+
+        g_vrMenuFirstVisibleRow = VrMenuScrollStart(
+            g_vrMenuFirstVisibleRow,
+            selectedRow,
+            controls.size(),
+            kRetailVrMenuPageRows);
+        const std::uint32_t desiredFirstShown =
+            controls[g_vrMenuFirstVisibleRow].index;
+        auto* const firstShown = reinterpret_cast<std::uint32_t*>(
+            static_cast<unsigned char*>(list) +
+            kRetailListFirstShownOffset);
+        if (*firstShown != desiredFirstShown) {
+            *firstShown = desiredFirstShown;
+            *(static_cast<unsigned char*>(list) +
+              kRetailListNeedsRecalculationOffset) = 1;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void SelectRetailVrMenuControl(
     const VrMenuControl& control) noexcept {
     if (g_retailListSetSelection == nullptr ||
@@ -1942,7 +2056,7 @@ void SelectRetailVrMenuControl(
         g_retailListSetSelection(
             RetailVrMenuList(g_vrMenuOwner), control.index);
         if (g_vrSettingsPageActive) {
-            ResetRetailVrMenuScroll();
+            MaintainRetailVrMenuScroll();
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -1966,6 +2080,7 @@ void EnterRetailVrSettingsPage() noexcept {
          index < g_vrNormalControlCount; ++index) {
         SetRetailControlVisible(g_vrNormalControls[index], false);
     }
+    g_vrMenuFirstVisibleRow = 0;
     g_vrSettingsPageActive = true;
     SetRetailVrMenuCompactSpacing(true);
     const VrMenuControl first =
@@ -1980,6 +2095,8 @@ void LeaveRetailVrSettingsPage() noexcept {
     if (!g_vrSettingsPageActive) {
         return;
     }
+    ResetRetailVrMenuScroll();
+    g_vrMenuFirstVisibleRow = 0;
     g_vrSettingsPageActive = false;
     RestoreRetailSystemMenuControls();
     SaveVrSettings();
@@ -2441,6 +2558,10 @@ void __fastcall HookRetailMenuOnFocus(
     void* menu, void* ignoredEdx, bool focus) {
     (void)ignoredEdx;
     if (menu == g_vrMenuOwner && g_vrMenuControlsBuilt) {
+        if (g_vrSettingsPageActive) {
+            ResetRetailVrMenuScroll();
+        }
+        g_vrMenuFirstVisibleRow = 0;
         g_vrSettingsPageActive = false;
         RestoreRetailSystemMenuControls();
         // Fokusgewinn ist eine sichere Aussage: Das Pausenmenü ist offen.
@@ -5000,7 +5121,7 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         if (now >= g_visualCameraHeightSampleTick &&
             now - g_visualCameraHeightSampleTick <=
                 kVisualCameraHeightFreshMilliseconds) {
-            visualBasePosition.y = g_visualCameraHeight;
+            visualBasePosition = g_visualCameraPosition;
         }
     }
     if (cutsceneCamera && !cinematicCamera) {
@@ -5046,6 +5167,28 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         // and roll remain exclusively under HMD control.
         viewBaseRotation = ResolveCutsceneCameraBaseRotation(
             originalTransform.m_rRot, cutsceneBlend);
+    } else if (
+        g_twoHandedGripActive &&
+        g_weaponAim.trackingBaseValid &&
+        playingFrameFresh) {
+        // CPlayerCamera's rendered object includes transient HeadBobMgr and
+        // recoil rotations. CClientWeaponMgr receives the clean permanent
+        // camera rotation instead, which is also the basis used to transform
+        // both tracked controllers. Rendering the eyes from a different,
+        // sinusoidally tilted basis makes an otherwise fixed two-handed weapon
+        // appear to rise and fall while strafing or firing. Keep the shared
+        // gameplay yaw/pitch basis here; the full physical HMD rotation is
+        // multiplied in below for each eye.
+        viewBaseRotation = g_weaponAim.trackingBase.m_rRot;
+        viewBaseRotation.Normalize();
+        if (InterlockedCompareExchange(
+                &g_twoHandedViewRotationStabilizedLogged, 1, 0) == 0) {
+            Report(
+                "INFO", "two_handed_view_rotation_stabilized",
+                "Two-handed eyes, controllers and weapon share the clean "
+                "Retail gameplay rotation; strafe bob and recoil no longer "
+                "tilt the VR view around the weapon.");
+        }
     } else {
         ResolveSlideKickViewBase(
             originalTransform.m_rRot, viewBaseRotation);
@@ -5214,6 +5357,11 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         if (eyeResult[eye] == LT_OK) {
             g_stereoStep =
                 eye == FEARVR_EYE_LEFT
+                    ? "render_left_muzzle_flash"
+                    : "render_right_muzzle_flash";
+            RenderVrMuzzleFlash(camera);
+            g_stereoStep =
+                eye == FEARVR_EYE_LEFT
                     ? "render_left_aim_guide"
                     : "render_right_aim_guide";
             RenderWeaponAimGuide(camera);
@@ -5343,6 +5491,10 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
         g_playerBodyObject != nullptr ||
         g_flashlightModel != nullptr ||
         g_flashlightLight != nullptr ||
+        g_vrMuzzleFlash[kVrMuzzleFlashRight].flare != nullptr ||
+        g_vrMuzzleFlash[kVrMuzzleFlashRight].light != nullptr ||
+        g_vrMuzzleFlash[kVrMuzzleFlashLeft].flare != nullptr ||
+        g_vrMuzzleFlash[kVrMuzzleFlashLeft].light != nullptr ||
         g_rightHandControl.installed || g_leftHandControl.installed ||
         g_bodyPresentationNodeControl.installed;
 
@@ -5351,9 +5503,14 @@ void ForgetWorldObjectsAfterLevelChange() noexcept {
     g_flashlightModel = nullptr;
     g_flashlightLight = nullptr;
     g_flashlightModelWeapon = nullptr;
+    for (VrMuzzleFlashState& flash : g_vrMuzzleFlash) {
+        flash = VrMuzzleFlashState{};
+    }
     g_playerCameraObject = nullptr;
     ResetVerticalCameraHeight(g_verticalCameraHeight);
-    g_visualCameraHeight = 0.0F;
+    ResetTwoHandedJumpCamera(g_twoHandedJumpCamera);
+    g_twoHandedCameraPosition = TwoHandedCameraPositionState{};
+    g_visualCameraPosition = LTVector(0.0F, 0.0F, 0.0F);
     g_visualCameraHeightSampleTick = 0;
     g_visualCameraHeightValid = false;
     g_physicalDuckActive = false;
@@ -5469,7 +5626,7 @@ void StagePreRenderCameraOverride() noexcept {
             now >= g_visualCameraHeightSampleTick &&
             now - g_visualCameraHeightSampleTick <=
                 kVisualCameraHeightFreshMilliseconds) {
-            renderTargetCamera.m_vPos.y = g_visualCameraHeight;
+            renderTargetCamera.m_vPos = g_visualCameraPosition;
         }
         if (translationEnabled) {
             renderTargetCamera.m_vPos.y +=
@@ -5507,6 +5664,7 @@ void StagePreRenderCameraOverride() noexcept {
 }
 
 void RemoveFlashlightModel() noexcept;
+void RemoveVrMuzzleFlashObjects() noexcept;
 
 bool ResolveHeadFlashlightPose(LTRigidTransform& pose) noexcept {
     if (!g_headTracking.centered || g_headTracking.trackingLost) {
@@ -5615,6 +5773,237 @@ void SetFlashlightObjectVisible(
                 visible ? FLAG_VISIBLE : 0, FLAG_VISIBLE);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Retails First-Person-Muendungsblitz wird an das animierte Waffenmodell
+// geparentet. Unsere finale VR-Waffenpose wird erst nach Retails Update gesetzt;
+// dadurch landet der Retail-FX in manchen Laufzeitpfaden hinter der Kamera oder
+// am alten Hand-Socket. Dieser kleine native Ersatz wird aus demselben
+// ausgelieferten Muzzle-Material aufgebaut, aber direkt an die von uns
+// gemessene Laufmuendung gesetzt.
+constexpr ULONGLONG kVrMuzzleFlashDurationMs = 70;
+constexpr ULONGLONG kVrMuzzleFlashMinimumTriggerGapMs = 30;
+
+void TriggerVrMuzzleFlash(bool leftWeaponFired) noexcept {
+    VrMuzzleFlashState& flash = g_vrMuzzleFlash[
+        leftWeaponFired ? kVrMuzzleFlashLeft : kVrMuzzleFlashRight];
+    const ULONGLONG now = GetTickCount64();
+    if (flash.lastTriggerTick != 0 &&
+        now - flash.lastTriggerTick < kVrMuzzleFlashMinimumTriggerGapMs) {
+        // GetFireVectors kann denselben Schuss aus zwei Retail-Pfaden melden.
+        // Die Sichtzeit darf dabei verlaengert, aber die Animation nicht
+        // sichtbar neu gestartet werden.
+        flash.visibleUntilTick = (std::max)(
+            flash.visibleUntilTick, now + kVrMuzzleFlashDurationMs);
+        return;
+    }
+    flash.lastTriggerTick = now;
+    flash.pulseStartedTick = now;
+    flash.visibleUntilTick = now + kVrMuzzleFlashDurationMs;
+    ++flash.pulseSerial;
+    if (InterlockedCompareExchange(
+            &g_vrMuzzleFlashActiveLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "vr_muzzle_flash_active",
+            "Confirmed shots drive a native muzzle flare and warm point light "
+            "at the measured barrel end; empty trigger pulls stay dark.");
+    }
+}
+
+bool ResolveVrMuzzleFlashPose(
+    bool leftWeapon, LTRigidTransform& pose) noexcept {
+    if (!g_weaponAim.valid || g_weaponDisabled) {
+        return false;
+    }
+    if (leftWeapon) {
+        if (!DualPistolsVrActive() ||
+            !g_weaponAim.leftWeaponTransformValid) {
+            return false;
+        }
+        return ResolveLeftMuzzleWorldTransform(pose);
+    }
+    return ResolveMuzzleWorldTransform(pose);
+}
+
+bool CreateVrMuzzleFlashObjects(
+    VrMuzzleFlashState& flash,
+    const LTRigidTransform& pose) noexcept {
+    if (g_client == nullptr) {
+        return false;
+    }
+    if (flash.light == nullptr) {
+        ObjectCreateStruct create;
+        create.m_ObjectType = OT_LIGHT;
+        create.m_Pos = pose.m_vPos;
+        create.m_Rotation = pose.m_rRot;
+        flash.light = g_client->CreateObject(&create);
+        if (flash.light != nullptr) {
+            g_client->SetLightType(flash.light, eEngineLight_Point);
+            g_client->SetLightRadius(flash.light, 150.0F);
+            g_client->SetLightDetailSettings(
+                flash.light,
+                eEngineLOD_Low, eEngineLOD_Never, eEngineLOD_Never);
+        }
+    }
+    if (flash.light == nullptr) {
+        return false;
+    }
+    if (InterlockedCompareExchange(
+            &g_vrMuzzleFlashCreatedLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "vr_muzzle_flash_created",
+            "The native shadowless muzzle-flash point light was created; "
+            "visible stereo geometry is drawn directly per eye.");
+    }
+    return true;
+}
+
+void UpdateVrMuzzleFlash() noexcept {
+    if (g_client == nullptr) {
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    for (std::size_t index = 0; index < kVrMuzzleFlashCount; ++index) {
+        VrMuzzleFlashState& flash = g_vrMuzzleFlash[index];
+        const bool active = flash.visibleUntilTick > now;
+        LTRigidTransform muzzlePose;
+        const bool leftWeapon = index == kVrMuzzleFlashLeft;
+        if (!active || !ResolveVrMuzzleFlashPose(leftWeapon, muzzlePose)) {
+            SetFlashlightObjectVisible(flash.flare, false);
+            SetFlashlightObjectVisible(flash.light, false);
+            continue;
+        }
+
+        LTVector right;
+        LTVector up;
+        LTVector forward;
+        muzzlePose.m_rRot.GetVectors(right, up, forward);
+        if (!CreateVrMuzzleFlashObjects(flash, muzzlePose)) {
+            SetFlashlightObjectVisible(flash.flare, false);
+            SetFlashlightObjectVisible(flash.light, false);
+            continue;
+        }
+
+        const float age = static_cast<float>(
+            now - flash.pulseStartedTick) /
+            static_cast<float>(kVrMuzzleFlashDurationMs);
+        const float life = (std::max)(0.0F, 1.0F - age);
+        const LTRigidTransform lightPose(
+            muzzlePose.m_vPos + forward * 3.0F,
+            muzzlePose.m_rRot);
+        g_client->SetObjectTransform(flash.light, lightPose);
+        g_client->SetObjectColor(
+            flash.light, 1.0F, 0.46F, 0.12F, life);
+        g_client->SetLightIntensityScale(
+            flash.light, 0.35F + 1.65F * life);
+        SetFlashlightObjectVisible(flash.light, true);
+    }
+}
+
+void RenderVrMuzzleFlash(HLOCALOBJ camera) noexcept {
+    if (g_client == nullptr || camera == nullptr ||
+        !g_weaponAim.valid || g_weaponDisabled) {
+        return;
+    }
+    ILTDrawPrim* const drawPrim = g_client->GetDrawPrim();
+    if (drawPrim == nullptr) {
+        return;
+    }
+    LTRigidTransform eye;
+    if (g_client->GetObjectTransform(camera, &eye) != LT_OK) {
+        return;
+    }
+
+    const HOBJECT oldCamera = drawPrim->GetCamera();
+    const ELTDrawPrimTransformMode oldTransformMode =
+        drawPrim->GetTransformMode();
+    const ELTDrawPrimZMode oldZMode = drawPrim->GetZMode();
+    const ELTDrawPrimRenderMode oldRenderMode =
+        drawPrim->GetRenderMode();
+    drawPrim->SetCamera(camera);
+    drawPrim->SetTransformMode(eLTDrawPrimTransformMode_World);
+    drawPrim->SetZMode(eLTDrawPrimZMode_NoWrite);
+    drawPrim->SetRenderMode(eLTDrawPrimRenderMode_Modulate_Additive);
+    drawPrim->SetTexture(nullptr);
+
+    const ULONGLONG now = GetTickCount64();
+    bool rendered = false;
+    for (std::size_t index = 0; index < kVrMuzzleFlashCount; ++index) {
+        const VrMuzzleFlashState& flash = g_vrMuzzleFlash[index];
+        if (flash.visibleUntilTick <= now) {
+            continue;
+        }
+        LTRigidTransform muzzle;
+        if (!ResolveVrMuzzleFlashPose(
+                index == kVrMuzzleFlashLeft, muzzle)) {
+            continue;
+        }
+
+        const float age = std::clamp(
+            static_cast<float>(now - flash.pulseStartedTick) /
+                static_cast<float>(kVrMuzzleFlashDurationMs),
+            0.0F, 1.0F);
+        const float life = 1.0F - age;
+        const float variation =
+            0.90F + 0.10F * static_cast<float>(flash.pulseSerial % 3);
+        const float radius = 5.8F * variation * (0.72F + 0.28F * life);
+        const LTVector center =
+            muzzle.m_vPos + muzzle.m_rRot.Forward() * 1.0F;
+        const LTVector cameraRight = eye.m_rRot.Right() * radius;
+        const LTVector cameraUp = eye.m_rRot.Up() * radius;
+        const LTVector perimeter[4] = {
+            center - cameraRight + cameraUp,
+            center + cameraRight + cameraUp,
+            center + cameraRight - cameraUp,
+            center - cameraRight - cameraUp,
+        };
+        LT_POLYG3 glow[4];
+        const std::uint8_t coreAlpha = static_cast<std::uint8_t>(
+            std::clamp(255.0F * life, 0.0F, 255.0F));
+        for (std::size_t triangle = 0; triangle < 4; ++triangle) {
+            glow[triangle].verts[0].pos = center;
+            glow[triangle].verts[1].pos = perimeter[triangle];
+            glow[triangle].verts[2].pos = perimeter[(triangle + 1) % 4];
+            glow[triangle].verts[0].rgba.Init(
+                255, 238, 170, coreAlpha);
+            glow[triangle].verts[1].rgba.Init(255, 72, 8, 0);
+            glow[triangle].verts[2].rgba.Init(255, 72, 8, 0);
+        }
+        drawPrim->DrawPrim(glow, 4);
+        rendered = true;
+    }
+
+    drawPrim->SetRenderMode(oldRenderMode);
+    drawPrim->SetZMode(oldZMode);
+    drawPrim->SetTransformMode(oldTransformMode);
+    drawPrim->SetCamera(oldCamera);
+    if (rendered && InterlockedCompareExchange(
+            &g_vrMuzzleFlashRenderedLogged, 1, 0) == 0) {
+        Report(
+            "INFO", "vr_muzzle_flash_stereo_rendered",
+            "The muzzle flash was drawn directly into both stereo eyes at "
+            "the same measured Flash socket used by bullets and aim rays.");
+    }
+}
+
+void RemoveVrMuzzleFlashObjects() noexcept {
+    for (VrMuzzleFlashState& flash : g_vrMuzzleFlash) {
+        if (g_client != nullptr) {
+            if (flash.flare != nullptr) {
+                __try {
+                    g_client->RemoveObject(flash.flare);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+            if (flash.light != nullptr) {
+                __try {
+                    g_client->RemoveObject(flash.light);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+        }
+        flash = VrMuzzleFlashState{};
     }
 }
 
@@ -7037,17 +7426,127 @@ LTVector ResolveTrackedHandBasePosition(
             g_retailMovement.available &&
             (g_retailMovement.controlFlags &
              kRetailControlFlagDuck) != 0;
+        // Beim Zweihandgriff verschieben Lauf-, Schuss- und Sprunganimationen
+        // den animierten PlayerCamera-Socket. Die visuelle Augenhoehe wird
+        // deshalb waehrend des gesamten Griffs aus dem physischen PlayerBody
+        // rekonstruiert. Ducken sowie echte Kollisionskorrekturen behalten
+        // Vorrang.
+        const bool stabilizeTwoHandedCamera =
+            g_twoHandedGripActive &&
+            g_retailMovement.available &&
+            !ducking;
+        LTRigidTransform playerBodyTransform;
+        float playerBodyHeight = 0.0F;
+        bool playerBodyHeightValid = false;
+        if (g_playerBodyObject != nullptr) {
+            if (g_client->GetObjectTransform(
+                    g_playerBodyObject,
+                    &playerBodyTransform) == LT_OK &&
+                std::isfinite(playerBodyTransform.m_vPos.y)) {
+                playerBodyHeight = playerBodyTransform.m_vPos.y;
+                playerBodyHeightValid = true;
+            }
+        }
+        const TwoHandedJumpCameraOutput jumpHeight =
+            UpdateTwoHandedJumpCamera(
+                g_twoHandedJumpCamera,
+                playerBodyHeight,
+                playerBodyHeightValid,
+                cameraTransform.m_vPos.y,
+                g_retailMovement.onGround,
+                g_retailMovement.airborne,
+                ducking,
+                g_twoHandedGripActive,
+                g_retailMovement.available);
+        // Remove the complete local camera bob, not just its world Y value.
+        // Head-bob offsets are authored in camera-local space; after yaw/pitch
+        // projection their X/Z components can appear as a vertical weapon
+        // shift in the headset. Learn the stable body-to-camera offset outside
+        // a two-hand grip, then carry the physical PlayerBody with that fixed
+        // local offset for the whole grip.
+        bool positionAnchorActive = false;
+        LTVector anchoredCameraPosition = cameraTransform.m_vPos;
+        if (playerBodyHeightValid &&
+            RotationIsFiniteAndUsable(retailBaseRotation)) {
+            const bool learnPositionAnchor =
+                g_retailMovement.onGround &&
+                !g_retailMovement.airborne && !ducking &&
+                !g_twoHandedGripActive;
+            if (learnPositionAnchor) {
+                LTRotation inverseBase = retailBaseRotation.Conjugate();
+                inverseBase.Normalize();
+                const LTVector sample = inverseBase.RotateVector(
+                    cameraTransform.m_vPos - playerBodyTransform.m_vPos);
+                if (std::isfinite(sample.x) &&
+                    std::isfinite(sample.y) &&
+                    std::isfinite(sample.z) &&
+                    sample.MagSqr() < 1000000.0F) {
+                    if (!g_twoHandedCameraPosition.valid) {
+                        g_twoHandedCameraPosition.localCameraOffset = sample;
+                        g_twoHandedCameraPosition.valid = true;
+                    } else {
+                        constexpr float kStableOffsetLearningRate = 0.08F;
+                        g_twoHandedCameraPosition.localCameraOffset +=
+                            (sample -
+                             g_twoHandedCameraPosition.localCameraOffset) *
+                            kStableOffsetLearningRate;
+                    }
+                }
+            }
+            if (stabilizeTwoHandedCamera &&
+                g_twoHandedCameraPosition.valid) {
+                anchoredCameraPosition =
+                    playerBodyTransform.m_vPos +
+                    retailBaseRotation.RotateVector(
+                        g_twoHandedCameraPosition.localCameraOffset);
+                const LTVector correction =
+                    anchoredCameraPosition - cameraTransform.m_vPos;
+                constexpr float kPositionCollisionGuardUnits = 35.0F;
+                positionAnchorActive =
+                    std::isfinite(anchoredCameraPosition.x) &&
+                    std::isfinite(anchoredCameraPosition.y) &&
+                    std::isfinite(anchoredCameraPosition.z) &&
+                    correction.MagSqr() <=
+                        kPositionCollisionGuardUnits *
+                        kPositionCollisionGuardUnits;
+            }
+        }
+        const float stabilizedCameraHeight = positionAnchorActive
+            ? anchoredCameraPosition.y
+            : jumpHeight.visualHeight;
         const VerticalCameraHeightOutput height =
             UpdateVerticalCameraHeight(
                 g_verticalCameraHeight,
                 retailBasePosition.y,
-                cameraTransform.m_vPos.y,
+                stabilizedCameraHeight,
                 g_retailMovement.airborne,
                 ducking,
-                g_retailMovement.available);
-        g_visualCameraHeight = height.visualHeight;
+                g_retailMovement.available,
+                stabilizeTwoHandedCamera);
+        LTVector resolvedPosition = positionAnchorActive
+            ? anchoredCameraPosition
+            : cameraTransform.m_vPos;
+        resolvedPosition.y = height.visualHeight;
+        g_visualCameraPosition = resolvedPosition;
         g_visualCameraHeightSampleTick = GetTickCount64();
         g_visualCameraHeightValid = true;
+        if (positionAnchorActive &&
+            InterlockedCompareExchange(
+                &g_twoHandedCameraPositionStabilizedLogged, 1, 0) == 0) {
+            const LTVector correction =
+                resolvedPosition - cameraTransform.m_vPos;
+            char message[224]{};
+            std::snprintf(
+                message, sizeof(message),
+                "Full PlayerBody camera anchor active; removed local "
+                "animation offset (%.2f, %.2f, %.2f) game units.",
+                static_cast<double>(correction.x),
+                static_cast<double>(correction.y),
+                static_cast<double>(correction.z));
+            Report(
+                "INFO", "two_handed_camera_position_stabilized",
+                message);
+        }
         if (InterlockedCompareExchange(
                 &g_weaponCameraBaseSyncActiveLogged, 1, 0) == 0) {
             Report(
@@ -7063,11 +7562,33 @@ LTVector ResolveTrackedHandBasePosition(
                 "Descending stairs and airborne motion use Retail's raw "
                 "visual height until its smoothing filter catches up.");
         }
-        LTVector resolvedPosition = cameraTransform.m_vPos;
-        resolvedPosition.y = height.visualHeight;
+        if (stabilizeTwoHandedCamera &&
+            InterlockedCompareExchange(
+                &g_twoHandedCameraHeightStabilizedLogged, 1, 0) == 0) {
+            char message[320]{};
+            std::snprintf(
+                message, sizeof(message),
+                "%s raw_y=%.2f final_y=%.2f body_y=%.2f visual_y=%.2f "
+                "body_valid=%d anchor_valid=%d collision_guard=%d.",
+                jumpHeight.anchorActive
+                    ? "Physical PlayerBody height anchor active."
+                    : "PlayerBody anchor unavailable; final camera fallback.",
+                static_cast<double>(retailBasePosition.y),
+                static_cast<double>(cameraTransform.m_vPos.y),
+                static_cast<double>(playerBodyHeight),
+                static_cast<double>(height.visualHeight),
+                playerBodyHeightValid ? 1 : 0,
+                g_twoHandedJumpCamera.groundedEyeOffsetValid ? 1 : 0,
+                jumpHeight.collisionGuarded ? 1 : 0);
+            Report(
+                "INFO", "two_handed_camera_height_stabilized",
+                message);
+        }
         return resolvedPosition;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ResetVerticalCameraHeight(g_verticalCameraHeight);
+        ResetTwoHandedJumpCamera(g_twoHandedJumpCamera);
+        g_twoHandedCameraPosition = TwoHandedCameraPositionState{};
         g_visualCameraHeightValid = false;
         return retailBasePosition;
     }
@@ -9384,6 +9905,7 @@ int __fastcall HookRetailWeaponManagerUpdate(
     // ohnehin folgenlos zurueck.
     g_weaponDisabled = RetailWeaponIsDisabled(weapon);
     UpdateFlashlightModel(weapon);
+    UpdateVrMuzzleFlash();
     if (weapon != nullptr && !g_weaponDisabled &&
         g_retailSetWeaponVisible != nullptr) {
         g_retailSetWeaponVisible(weapon, true, true);
@@ -10496,6 +11018,7 @@ bool __fastcall HookRetailGetFireVectors(
         weapon, right, up, forward, firePosition);
     if (result) {
         RequestFireHaptic(leftWeaponFired);
+        TriggerVrMuzzleFlash(leftWeaponFired);
     }
     if (!result || !g_weaponAim.valid) {
         return result;
@@ -10610,6 +11133,9 @@ bool InstallVrCameraCollisionHook() noexcept {
 
 void RemoveWeaponAimHooks() noexcept {
     RestorePreRenderCameraOverride();
+    ResetTwoHandedJumpCamera(g_twoHandedJumpCamera);
+    g_twoHandedCameraPosition = TwoHandedCameraPositionState{};
+    RemoveVrMuzzleFlashObjects();
     RemoveFlashlightModel();
     RemoveHandNodeControls();
     if (g_retailWeaponManagerUpdateTarget != nullptr) {
@@ -11528,7 +12054,7 @@ void __fastcall HookClientShellUpdate(
         // Tastatur, Maus und Controller navigieren alle direkt über
         // CLTGUIListCtrl::NextSelection. Der Listenanfang muss deshalb hier
         // festgehalten werden, nicht nur wenn der Hook selbst auswählt.
-        ResetRetailVrMenuScroll();
+        MaintainRetailVrMenuScroll();
     }
     if (!g_disableClientUpdateWork) {
         UpdateCrosshairOverride();
@@ -11536,6 +12062,11 @@ void __fastcall HookClientShellUpdate(
     }
     g_semanticBitsInjected = false;
     g_clientShellUpdate(clientShell);
+    if (g_vrSettingsPageActive) {
+        // Retail changes the selected item inside Update. Correct the visible
+        // window afterwards so navigation exposes it in this render frame.
+        MaintainRetailVrMenuScroll();
+    }
     if (!g_disableClientUpdateWork) {
         // Erst nach Retails Update: Eine gerade geoeffnete ESC-Seite hat dann
         // bereits GS_MENU/GS_PAUSED gesetzt und bekommt im selben Renderframe

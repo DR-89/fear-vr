@@ -6,6 +6,7 @@
 #include "physical_duck.h"
 #include "stereo_math.h"
 #include "vertical_camera_height.h"
+#include "two_handed_jump_camera.h"
 #include "wrist_hud_visibility.h"
 
 namespace {
@@ -181,6 +182,58 @@ int main() {
         }
     }
     {
+        fearvr::TwoHandedJumpCameraState jump;
+        const auto grounded = fearvr::UpdateTwoHandedJumpCamera(
+            jump, 20.0F, true, 100.0F,
+            true, false, false, false, true);
+        if (grounded.anchorActive ||
+            !jump.groundedEyeOffsetValid ||
+            !Near(jump.groundedEyeOffset, 80.0F)) {
+            return Fail(
+                "grounded frame must capture eye-to-body jump anchor");
+        }
+        const auto airborne = fearvr::UpdateTwoHandedJumpCamera(
+            jump, 35.0F, true, 130.0F,
+            false, true, false, true, true);
+        if (!airborne.anchorActive ||
+            !Near(airborne.visualHeight, 115.0F)) {
+            return Fail(
+                "two-handed jump must follow physical body height only");
+        }
+        const auto firingOnGround = fearvr::UpdateTwoHandedJumpCamera(
+            jump, 20.0F, true, 112.0F,
+            true, false, false, true, true);
+        if (!firingOnGround.anchorActive ||
+            !Near(firingOnGround.visualHeight, 100.0F)) {
+            return Fail(
+                "two-handed firing and running must ignore camera socket lift");
+        }
+        const auto ducking = fearvr::UpdateTwoHandedJumpCamera(
+            jump, 20.0F, true, 72.0F,
+            true, false, true, true, true);
+        if (ducking.anchorActive ||
+            !Near(ducking.visualHeight, 72.0F)) {
+            return Fail(
+                "crouch height must retain Retail camera correction");
+        }
+        const auto oneHanded = fearvr::UpdateTwoHandedJumpCamera(
+            jump, 35.0F, true, 130.0F,
+            false, true, false, false, true);
+        if (oneHanded.anchorActive ||
+            !Near(oneHanded.visualHeight, 130.0F)) {
+            return Fail(
+                "ordinary jump must retain Retail camera height");
+        }
+        const auto ceiling = fearvr::UpdateTwoHandedJumpCamera(
+            jump, 75.0F, true, 110.0F,
+            false, true, false, true, true);
+        if (ceiling.anchorActive || !ceiling.collisionGuarded ||
+            !Near(ceiling.visualHeight, 110.0F)) {
+            return Fail(
+                "large ceiling correction must override jump anchor");
+        }
+    }
+    {
         fearvr::VerticalCameraHeightState height;
         fearvr::UpdateVerticalCameraHeight(
             height, 100.0F, 100.0F, false, true, true);
@@ -222,6 +275,25 @@ int main() {
         if (!airborne.bypassActive ||
             !Near(airborne.visualHeight, 120.0F)) {
             return Fail("airborne camera must ignore an old smoothing tail");
+        }
+    }
+    {
+        fearvr::VerticalCameraHeightState height;
+        fearvr::UpdateVerticalCameraHeight(
+            height, 100.0F, 100.0F, false, false, true);
+        const auto heldWeaponJump = fearvr::UpdateVerticalCameraHeight(
+            height, 122.0F, 109.0F, true, false, true, true);
+        if (heldWeaponJump.bypassActive ||
+            !Near(heldWeaponJump.visualHeight, 109.0F)) {
+            return Fail(
+                "two-handed airborne animation must keep final camera height");
+        }
+        const auto landing = fearvr::UpdateVerticalCameraHeight(
+            height, 105.0F, 107.0F, false, false, true);
+        if (landing.bypassActive ||
+            !Near(landing.visualHeight, 107.0F)) {
+            return Fail(
+                "stabilized jump must not become a downward-step bypass");
         }
     }
     {

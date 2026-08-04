@@ -193,7 +193,12 @@ something is built but not yet verified in-game, it's noted.
 - **Relative headtracking.** HMD rotation rotates the game camera relative
   to the neutral horizontal direction; physical pitch and roll are always
   preserved. The 3D world has no manual recenter; its stable camera basis is
-  initialized automatically.
+  initialized automatically from a fully tracked pose and rebuilt when the
+  OpenXR runtime changes its `LOCAL` tracking origin.
+- **No silent VGA VR mode.** User-selected render resolutions at 1024×720 and
+  above remain untouched. If Retail nevertheless requests its 640×480/800×600
+  fallback, VR uses the last verified render mode or the current desktop mode;
+  no machine-specific resolution is hard-coded.
 - **Optional HMD translation** up to 25 cm (`-Translation`). Without world
   collision, deliberately opt-in.
 - **Support-wrist status HUD.** Looking directly at the inside of the support
@@ -205,7 +210,9 @@ something is built but not yet verified in-game, it's noted.
   menus render.
 - **Stereo overlay for remaining HUD messages.** Hints and other non-status
   overlays are still lifted into both eyes instead of being left flat over
-  one eye.
+  one eye. Pickup prompts for weapons, medkits, grenades and gear use an
+  opaque 26-pixel face plus a transport-safe dark contour, so bright props
+  and floors cannot wash out the thin Retail glyphs.
 - **Flat-screen mode for fullscreen UI.** Menus, loading screens, movies and
   the mission briefing appear as a world-locked 2.4 × 1.8 m panel at 2 m
   distance. Detection is based on the retail game state
@@ -306,8 +313,10 @@ something is built but not yet verified in-game, it's noted.
   If the host crashes, the game continues flat.
 - **Runtime selection at launch:** SteamVR and VirtualDesktopXR are confirmed;
   `-Runtime` sets `XR_RUNTIME_JSON` only for the host process.
-- **No SteamVR configuration helpers:** launching through SteamVR no longer
-  edits `steamvr.vrsettings` or starts a theater watchdog.
+- **Targeted SteamVR theater suppression:** the launcher verifies
+  `steamvr.autoShowGameTheater=false` and briefly watches only
+  `valve.steam.desktopgame.21090` during startup. SteamVR's normal dashboard
+  remains untouched.
 - **Structured JSON logs** for launcher, host and bridge with perf counters;
   each run writes to its own directory under `logs\`.
 - **Version-bound with fail-safe.** All retail hooks check timestamp, image
@@ -482,8 +491,10 @@ permanently, do so in the Virtual Desktop Streamer or SteamVR respectively.
 `tools\verify-install.ps1` shows the active runtime and which ones are
 installed.
 
-Runtime selection only affects the host's OpenXR manifest. Neither SteamVR nor
-VDXR launch edits SteamVR settings or starts an auxiliary theater process.
+Runtime selection only affects the host's OpenXR manifest. Store launches
+briefly run the theater guard whenever SteamVR is actually active, including a
+VDXR game launch made while SteamVR is open. The guard is integrated into
+`play.ps1`; the old standalone theater tools remain removed.
 
 **Steam is still required** — but only as the store: F.E.A.R. is officially
 launched via `steam.exe -applaunch 21090`. This is independent of which VR

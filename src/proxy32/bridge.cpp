@@ -24,6 +24,7 @@
 #include "locomotion_reprojection.h"
 #include "protocol_utils.h"
 #include "stereo_hud_math.h"
+#include "vr_render_resolution.h"
 #include "system_d3d9.h"
 
 namespace fearvr {
@@ -210,8 +211,20 @@ enum class TransferMode {
 // system-memory bridge. At 2560x1440 a stereo pair is almost 30 MiB and field
 // logs showed 19 ms spent in readback/upload alone. StretchRect reduces the
 // image on the GPU before that expensive copy.
+// The classic D3D9 game device cannot expose its render targets directly to
+// the 64-bit OpenXR host. Two eye images therefore cross system memory. Keep
+// the known-good 1080p ceiling: the RTX 4060 Ti driver measured substantially
+// faster at 1440x1080 than at the non-native 1200x900 transport, and the latter
+// also produced visibly coarse scaling.
 constexpr UINT kMaxTransportWidth = 1920;
 constexpr UINT kMaxTransportHeight = 1080;
+
+// Retail menus and loading screens are effectively uncapped and can Present
+// more than a thousand times per second. Capturing all of those frames floods
+// the three-slot bridge, starves the game device and makes later stereo frames
+// several display intervals old. A world-locked flat panel needs no more than
+// 60 updates per second; head tracking itself remains at the OpenXR rate.
+constexpr ULONGLONG kMonoCaptureIntervalMilliseconds = 16;
 
 struct TransportExtent {
     UINT width{0};
@@ -302,9 +315,11 @@ sampler2D presented : register(s0);
 sampler2D rightWorld : register(s1);
 sampler2D eyeWorld : register(s2);
 sampler2D coverageMask : register(s3);
+sampler2D hudMask : register(s4);
 float4 params : register(c0);
 float4 size : register(c1);
 float4 shrink : register(c2);
+float4 outlineStep : register(c3);
 
 float4 main(float2 uv : TEXCOORD0) : COLOR0 {
     float4 world = tex2D(eyeWorld, uv);
@@ -334,7 +349,27 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0 {
         tex2D(coverageMask, float2(0.5, 0.5)).r;
     float sparse = 1.0 - step(params.w, currentCoverage);
     float overlay = params.y * inside * changed * sparse;
-    return lerp(lerp(world, overlayColor, overlay), flatImage, params.z);
+
+    // Der fertige Frame wird für den VR-Transport bei großen 4:3-Modi auf
+    // 75 Prozent verkleinert. Eine einzelne Quellpixel-Kontur verschwindet
+    // dabei fast vollständig. Vier bilinear gefilterte Abgriffe im Abstand von
+    // 1,5 Quellpixeln ergeben eine ungefähr zwei Pixel breite Kontur, die auch
+    // nach dem Transport mindestens einen klaren Pixel behält. Vier Abgriffe
+    // halten den gesamten Kompositor innerhalb des 64-Arithmetik-Limits von
+    // Shader Model 2.0. Die aktuelle HUD-Maske vermeidet neue Farbvergleiche.
+    float horizontal = max(
+        tex2D(hudMask, sourceUv + float2(outlineStep.x, 0.0)).r,
+        tex2D(hudMask, sourceUv - float2(outlineStep.x, 0.0)).r);
+    float vertical = max(
+        tex2D(hudMask, sourceUv + float2(0.0, outlineStep.y)).r,
+        tex2D(hudMask, sourceUv - float2(0.0, outlineStep.y)).r);
+    float neighbour = max(horizontal, vertical);
+    float outline = params.y * inside * sparse * (1.0 - changed) *
+                    step(0.05, neighbour);
+    float4 outlinedWorld = lerp(
+        world, float4(0.002, 0.003, 0.006, 1.0), outline * 0.94);
+    return lerp(lerp(outlinedWorld, overlayColor, overlay),
+                flatImage, params.z);
 }
 )";
 
@@ -432,7 +467,8 @@ public:
         coveragePending_ = false;
         std::ostringstream message;
         message << "reduce_levels=" << reduceLevelCount_
-                << " coverage=" << coverageWidth_ << 'x' << coverageHeight_;
+                << " coverage=" << coverageWidth_ << 'x' << coverageHeight_
+                << " outline=2px-4way";
         logger.Write("INFO", "stereo_hud_gpu_ready", message.str());
         return true;
     }
@@ -643,7 +679,7 @@ private:
                                    D3DCOLORWRITEENABLE_GREEN |
                                    D3DCOLORWRITEENABLE_BLUE |
                                    D3DCOLORWRITEENABLE_ALPHA);
-        for (DWORD sampler = 0; sampler < 4; ++sampler) {
+        for (DWORD sampler = 0; sampler < 5; ++sampler) {
             device->SetSamplerState(
                 sampler, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
             device->SetSamplerState(
@@ -744,21 +780,32 @@ private:
             static_cast<float>(kStereoHudShrinkNumerator) /
                 static_cast<float>(kStereoHudShrinkDenominator),
             0.0F, 0.0F, 0.0F};
+        // Im Shader selbst würde diese Multiplikation zwei zusätzliche
+        // Arithmetik-Slots belegen. Vorberechnet bleibt der Kompositor mit der
+        // breiteren Kontur innerhalb des ps_2_0-Limits von 64 Slots.
+        const float outlineStep[4] = {
+            1.5F / static_cast<float>(width_),
+            1.5F / static_cast<float>(height_), 0.0F, 0.0F};
         if (FAILED(device->SetRenderTarget(0, target.surface.Get())) ||
             FAILED(device->SetPixelShader(compositeShader_.Get())) ||
             FAILED(device->SetPixelShaderConstantF(0, params, 1)) ||
             FAILED(device->SetPixelShaderConstantF(1, size, 1)) ||
             FAILED(device->SetPixelShaderConstantF(2, shrink, 1)) ||
+            FAILED(device->SetPixelShaderConstantF(3, outlineStep, 1)) ||
             FAILED(device->SetTexture(0, presented)) ||
             FAILED(device->SetTexture(1, rightWorld)) ||
             FAILED(device->SetTexture(2, eyeWorld)) ||
-            FAILED(device->SetTexture(3, coverageTexture_))) {
+            FAILED(device->SetTexture(3, coverageTexture_)) ||
+            FAILED(device->SetTexture(4, mask_.texture.Get()))) {
             return false;
         }
         SetPointFilter(device, 0);
         SetPointFilter(device, 1);
         SetPointFilter(device, 2);
         SetPointFilter(device, 3);
+        // Die HUD-Maske wird nur für die Kontur gelesen. Linearfilterung lässt
+        // die 1,5-Pixel-Abgriffe eine lückenlose Zwei-Pixel-Kontur bilden.
+        SetLinearFilter(device, 4);
         return DrawFullscreenQuad(device, target.width, target.height);
     }
 
@@ -954,6 +1001,38 @@ public:
             return;
         }
 
+        const bool stereo =
+            stereoFrameReady_ &&
+            stereoEyeCaptured_[FEARVR_EYE_LEFT] &&
+            stereoEyeCaptured_[FEARVR_EYE_RIGHT];
+        if (stereo) {
+            // FEAR may Present more than once before the host publishes its
+            // next render request. A later Present with the same pose cannot
+            // improve head latency, but it would consume another full stereo
+            // readback and can displace the useful next request.
+            if (stereoFrameId_ != 0 &&
+                stereoFrameId_ == lastStereoTransferFrameId_) {
+                ++duplicateStereoTransferSkips_;
+                ClearStereoFrame();
+                LogCaptureRateLimit();
+                return;
+            }
+            lastStereoTransferFrameId_ = stereoFrameId_;
+        } else {
+            const ULONGLONG now = GetTickCount64();
+            if (lastMonoTransferTick_ != 0 &&
+                now - lastMonoTransferTick_ <
+                    kMonoCaptureIntervalMilliseconds) {
+                ++monoTransferRateSkips_;
+                LogCaptureRateLimit();
+                return;
+            }
+            // Rate-limit attempts as well as successful transfers. If the
+            // worker is busy, a 1000-FPS menu must not hammer it again on the
+            // very next Present.
+            lastMonoTransferTick_ = now;
+        }
+
         std::uint32_t slotIndex = 0;
         if (!ClaimWritablePair(slotIndex)) {
             ++droppedFrames_;
@@ -965,10 +1044,6 @@ public:
             return;
         }
 
-        const bool stereo =
-            stereoFrameReady_ &&
-            stereoEyeCaptured_[FEARVR_EYE_LEFT] &&
-            stereoEyeCaptured_[FEARVR_EYE_RIGHT];
         const std::uint64_t frameId =
             stereo ? stereoFrameId_ : ++frameId_;
         if (stereo && frameId > frameId_) {
@@ -1130,6 +1205,55 @@ public:
         }
         device_ = nullptr;
         deviceMetadataReady_ = false;
+    }
+
+    void PreserveVrBackBufferResolution(
+        D3DPRESENT_PARAMETERS* parameters) noexcept {
+        if (parameters == nullptr ||
+            parameters->BackBufferWidth == 0 ||
+            parameters->BackBufferHeight == 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (config_.sessionId == 0) {
+            return;
+        }
+
+        const int desktopWidth = GetSystemMetrics(SM_CXSCREEN);
+        const int desktopHeight = GetSystemMetrics(SM_CYSCREEN);
+        const VrRenderResolution requested{
+            parameters->BackBufferWidth,
+            parameters->BackBufferHeight};
+        const VrRenderResolution preferred{
+            preferredSourceWidth_, preferredSourceHeight_};
+        const VrRenderResolution desktop{
+            desktopWidth > 0 ? static_cast<std::uint32_t>(desktopWidth) : 0U,
+            desktopHeight > 0
+                ? static_cast<std::uint32_t>(desktopHeight)
+                : 0U};
+        const VrRenderResolution resolved = ResolveVrRenderResolution(
+            requested, preferred, desktop);
+        if (resolved.width == requested.width &&
+            resolved.height == requested.height) {
+            return;
+        }
+
+        parameters->BackBufferWidth = resolved.width;
+        parameters->BackBufferHeight = resolved.height;
+
+        std::ostringstream message;
+        message << "requested=" << requested.width << 'x'
+                << requested.height << " resolved="
+                << resolved.width << 'x' << resolved.height
+                << " source="
+                << (IsUsableVrRenderResolution(preferred)
+                        ? "last_verified"
+                        : "current_desktop")
+                << "; user-selected HD modes remain untouched.";
+        logger_.Write(
+            "INFO", "vr_low_resolution_replaced",
+            message.str());
     }
 
     void AfterReset(
@@ -1361,6 +1485,20 @@ public:
                 ReadAtomic64(shared_->requestSequence);
             if (before == after && (after & 1ULL) == 0 &&
                 (snapshot.flags & FEARVR_RF_VALID) != 0) {
+                if (!hostRecenterGenerationKnown_) {
+                    hostRecenterGeneration_ =
+                        snapshot.recenterGeneration;
+                    hostRecenterGenerationKnown_ = true;
+                } else if (hostRecenterGeneration_ !=
+                           snapshot.recenterGeneration) {
+                    hostRecenterGeneration_ =
+                        snapshot.recenterGeneration;
+                    IncrementRecenterGeneration();
+                    logger_.Write(
+                        "INFO", "tracking_origin_recenter",
+                        "OpenXR LOCAL origin changed; the game head/body "
+                        "anchor will be rebuilt on the new tracked pose.");
+                }
                 snapshot.recenterGeneration = recenterGeneration_;
                 if (config_.translationEnabled) {
                     snapshot.flags |= FEARVR_RF_TRANSLATION_ON;
@@ -1468,9 +1606,8 @@ public:
                 "Stereo capture deferred until resources are recreated.");
             return;
         }
-        result = device_->StretchRect(
-            backBuffer.Get(), nullptr, stereoCapture_[eye].Get(), nullptr,
-            D3DTEXF_NONE);
+        result = StretchSourceToTransport(
+            device_, backBuffer.Get(), stereoCapture_[eye].Get());
         if (FAILED(result)) {
             LogHresult("stereo_stage_copy_failed", result);
             return;
@@ -2175,7 +2312,7 @@ private:
     }
 
     bool EnsureResources(IDirect3DDevice9* device, UINT sourceWidth,
-                         UINT sourceHeight) noexcept {
+                          UINT sourceHeight) noexcept {
         if (resourcesReady_ &&
             sourceWidth_ == sourceWidth &&
             sourceHeight_ == sourceHeight &&
@@ -2191,6 +2328,10 @@ private:
         device_ = device;
         sourceWidth_ = sourceWidth;
         sourceHeight_ = sourceHeight;
+        if (sourceWidth >= 1024 && sourceHeight >= 720) {
+            preferredSourceWidth_ = sourceWidth;
+            preferredSourceHeight_ = sourceHeight;
+        }
         const TransportExtent transport =
             ComputeTransportExtent(sourceWidth, sourceHeight);
         width_ = transport.width;
@@ -2268,9 +2409,8 @@ private:
                          std::uint32_t slotIndex) noexcept {
         for (std::uint32_t eye = 0; eye < FEARVR_EYE_COUNT; ++eye) {
             SlotResource& resource = resources_[eye][slotIndex];
-            HRESULT result = device->StretchRect(
-                backBuffer, nullptr, resource.surface.Get(), nullptr,
-                D3DTEXF_NONE);
+            HRESULT result = StretchSourceToTransport(
+                device, backBuffer, resource.surface.Get());
             if (FAILED(result)) {
                 LogHresult("stretch_rect_failed", result);
                 return false;
@@ -2371,9 +2511,8 @@ private:
     bool CopyFrameViaCpu(IDirect3DDevice9* device,
                          IDirect3DSurface9* backBuffer,
                          std::uint32_t slotIndex) noexcept {
-        HRESULT result = device->StretchRect(
-            backBuffer, nullptr, gameCapture_.Get(), nullptr,
-            D3DTEXF_NONE);
+        HRESULT result = StretchSourceToTransport(
+            device, backBuffer, gameCapture_.Get());
         if (FAILED(result)) {
             LogHresult("cpu_bridge_stretch_failed", result);
             return false;
@@ -2434,9 +2573,8 @@ private:
     bool CopyStereoHudFrameViaGpu(IDirect3DDevice9* device,
                                   IDirect3DSurface9* backBuffer,
                                   std::uint32_t slotIndex) noexcept {
-        HRESULT result = device->StretchRect(
-            backBuffer, nullptr, gameCapture_.Get(), nullptr,
-            D3DTEXF_NONE);
+        HRESULT result = StretchSourceToTransport(
+            device, backBuffer, gameCapture_.Get());
         if (FAILED(result)) {
             LogHresult("stereo_hud_present_stretch_failed", result);
             return false;
@@ -2497,9 +2635,8 @@ private:
     bool CopyStereoHudFrameViaCpu(IDirect3DDevice9* device,
                                   IDirect3DSurface9* backBuffer,
                                   std::uint32_t slotIndex) noexcept {
-        HRESULT result = device->StretchRect(
-            backBuffer, nullptr, gameCapture_.Get(), nullptr,
-            D3DTEXF_NONE);
+        HRESULT result = StretchSourceToTransport(
+            device, backBuffer, gameCapture_.Get());
         if (FAILED(result)) {
             LogHresult("stereo_hud_present_stretch_failed", result);
             return false;
@@ -2767,9 +2904,8 @@ private:
 
         IDirect3DSurface9* sources[FEARVR_EYE_COUNT] = {};
         if (!stereo) {
-            const HRESULT result = device->StretchRect(
-                backBuffer, nullptr, gameCapture_.Get(), nullptr,
-                D3DTEXF_NONE);
+            const HRESULT result = StretchSourceToTransport(
+                device, backBuffer, gameCapture_.Get());
             if (FAILED(result)) {
                 LogHresult("async_mono_stage_failed", result);
                 CancelAsyncJob(jobIndex);
@@ -2788,9 +2924,8 @@ private:
                 CancelAsyncJob(jobIndex);
                 return false;
             }
-            HRESULT result = device->StretchRect(
-                backBuffer, nullptr, gameCapture_.Get(), nullptr,
-                D3DTEXF_NONE);
+            HRESULT result = StretchSourceToTransport(
+                device, backBuffer, gameCapture_.Get());
             if (FAILED(result)) {
                 LogHresult(
                     "async_hud_present_stretch_failed", result);
@@ -3155,6 +3290,8 @@ private:
     void ReleaseResources() noexcept {
         ReleaseAsyncTransferResources();
         pending_ = {};
+        lastMonoTransferTick_ = 0;
+        lastStereoTransferFrameId_ = 0;
         resourcesReady_ = false;
         transferMode_ = TransferMode::None;
         // Zuerst der Kompositor: Er hält Render-Targets auf demselben Gerät.
@@ -3327,6 +3464,44 @@ private:
         logger_.Write("ERROR", event, message.str());
     }
 
+    HRESULT StretchSourceToTransport(
+        IDirect3DDevice9* device, IDirect3DSurface9* source,
+        IDirect3DSurface9* destination) noexcept {
+        const bool scaling =
+            sourceWidth_ != width_ || sourceHeight_ != height_;
+        HRESULT result = device->StretchRect(
+            source, nullptr, destination, nullptr,
+            scaling ? D3DTEXF_LINEAR : D3DTEXF_NONE);
+        if (FAILED(result) && scaling) {
+            if (!linearCaptureFallbackLogged_) {
+                logger_.Write(
+                    "WARN", "linear_capture_filter_unavailable",
+                    "The D3D9 driver rejected filtered capture scaling; "
+                    "point sampling is used as a compatibility fallback.");
+                linearCaptureFallbackLogged_ = true;
+            }
+            result = device->StretchRect(
+                source, nullptr, destination, nullptr,
+                D3DTEXF_NONE);
+        }
+        return result;
+    }
+
+    void LogCaptureRateLimit() noexcept {
+        const std::uint64_t totalSkips =
+            monoTransferRateSkips_ + duplicateStereoTransferSkips_;
+        if (totalSkips != 1 && totalSkips % 10000 != 0) {
+            return;
+        }
+        std::ostringstream message;
+        message << "mono_skipped=" << monoTransferRateSkips_
+                << " duplicate_stereo_skipped="
+                << duplicateStereoTransferSkips_
+                << " mono_interval_ms="
+                << kMonoCaptureIntervalMilliseconds;
+        logger_.Write("INFO", "capture_rate_limited", message.str());
+    }
+
     void LogWin32(const char* event, DWORD error) noexcept {
         logger_.Write("ERROR", event,
                       "Win32=" + std::to_string(error));
@@ -3377,6 +3552,8 @@ private:
     UINT height_{0};
     UINT sourceWidth_{0};
     UINT sourceHeight_{0};
+    UINT preferredSourceWidth_{0};
+    UINT preferredSourceHeight_{0};
     std::uint32_t nextSlot_{0};
     std::uint64_t frameId_{0};
     std::uint64_t generation_{0};
@@ -3391,7 +3568,11 @@ private:
     std::uint64_t asyncTransferMaxMicroseconds_{0};
     std::uint64_t asyncReadbackTotalMicroseconds_{0};
     std::uint64_t asyncReadbackMaxMicroseconds_{0};
+    std::uint64_t monoTransferRateSkips_{0};
+    std::uint64_t duplicateStereoTransferSkips_{0};
     std::uint64_t stereoFrameId_{0};
+    std::uint64_t lastStereoTransferFrameId_{0};
+    ULONGLONG lastMonoTransferTick_{0};
     FearVrGameCameraSample stereoCameraSample_{};
     std::uint64_t stereoFrames_{0};
     std::uint64_t stereoHudFrames_{0};
@@ -3417,8 +3598,11 @@ private:
     bool recenterKeyWasDown_{false};
     bool comfortKeyWasDown_{false};
     bool comfortModeEnabled_{false};
+    bool linearCaptureFallbackLogged_{false};
     bool menuActive_{false};
     std::uint32_t recenterGeneration_{0};
+    std::uint32_t hostRecenterGeneration_{0};
+    bool hostRecenterGenerationKnown_{false};
     std::uint32_t fovScalePercent_{
         FEARVR_FOV_SCALE_DEFAULT_PERCENT};
     StereoToggleCallback stereoToggleCallback_{nullptr};
@@ -3615,6 +3799,7 @@ HRESULT STDMETHODCALLTYPE HookCreateDevice(
         return D3DERR_INVALIDCALL;
     }
     ForceHighQualitySource(parameters);
+    GetBridge().PreserveVrBackBufferResolution(parameters);
     behaviorFlags |= D3DCREATE_MULTITHREADED;
     const HRESULT result = record.createDevice(
         self, adapter, deviceType, focusWindow, behaviorFlags, parameters,
@@ -3638,6 +3823,12 @@ HRESULT STDMETHODCALLTYPE HookCreateDeviceEx(
         return D3DERR_INVALIDCALL;
     }
     ForceHighQualitySource(parameters);
+    GetBridge().PreserveVrBackBufferResolution(parameters);
+    if (parameters != nullptr && fullscreenMode != nullptr &&
+        parameters->Windowed == FALSE) {
+        fullscreenMode->Width = parameters->BackBufferWidth;
+        fullscreenMode->Height = parameters->BackBufferHeight;
+    }
     behaviorFlags |= D3DCREATE_MULTITHREADED;
     const HRESULT result = record.createDeviceEx(
         self, adapter, deviceType, focusWindow, behaviorFlags, parameters,
@@ -3657,6 +3848,7 @@ HRESULT STDMETHODCALLTYPE HookReset(IDirect3DDevice9* self,
         return D3DERR_INVALIDCALL;
     }
     ForceHighQualitySource(parameters);
+    GetBridge().PreserveVrBackBufferResolution(parameters);
     GetBridge().BeforeReset(parameters);
     const HRESULT result = record.reset(self, parameters);
     GetBridge().AfterReset(self, result);
@@ -3684,6 +3876,7 @@ HRESULT STDMETHODCALLTYPE HookLateReset(
         return D3DERR_INVALIDCALL;
     }
     ForceHighQualitySource(parameters);
+    GetBridge().PreserveVrBackBufferResolution(parameters);
     GetBridge().BeforeReset(parameters);
     const HRESULT result = g_lateReset(self, parameters);
     GetBridge().AfterReset(self, result);

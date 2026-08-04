@@ -42,11 +42,23 @@ inline VerticalCameraHeightOutput UpdateVerticalCameraHeight(
     float finalHeight,
     bool airborne,
     bool ducking,
-    bool movementStateAvailable) noexcept {
+    bool movementStateAvailable,
+    bool forceFinalHeight = false) noexcept {
     VerticalCameraHeightOutput output;
     output.visualHeight = finalHeight;
     if (!std::isfinite(rawHeight) || !std::isfinite(finalHeight) ||
         !movementStateAvailable) {
+        ResetVerticalCameraHeight(state);
+        return output;
+    }
+
+    // Some first-person animation paths feed a weapon/body-derived raw Y into
+    // the weapon manager. It is useful for removing Retails old smoothing tail
+    // during an ordinary jump, but must never become an eye-height source when
+    // the caller knows that this raw basis is presentation-driven. Resetting
+    // the detector also prevents the falling half of that same jump from being
+    // mistaken for a downward stair on the next frame.
+    if (forceFinalHeight) {
         ResetVerticalCameraHeight(state);
         return output;
     }

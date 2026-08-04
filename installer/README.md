@@ -49,9 +49,24 @@ packages before invoking Inno Setup.
 The setup program validates:
 
 1. `FEAR.exe` and `Default.archcfg` in the selected retail directory.
-2. `GameClient.dll` in the selected Public Tools directory or its
-   `Dev\Runtime\Game` child.
+2. `GameClient.dll` in the selected Public Tools directory or in its `Dev`,
+   `Dev\Runtime\Game`, `Runtime\Game`, or `Game` child.
 3. The packaged overlay manifest and required root proxy files.
+
+Both directory pages are pre-filled by an actual search, because neither
+installer forces a fixed target folder:
+
+- **F.E.A.R.:** every Steam library from `libraryfolders.vdf`, then the
+  uninstall registry (GOG, retail disc), then the usual folder names below
+  `Program Files (x86)`, `Program Files`, `Games`, `GOG Games` and the drive
+  root on every fixed drive, including the `Sierra`, `Monolith Productions`
+  and `Vivendi Games` vendor folders.
+- **Public Tools:** the uninstall registry first, then the same drive sweep
+  over `Sierra\FEAR Public Tools` — the official installer's own default —
+  plus the `Sierra Entertainment`, `Monolith Productions` and vendor-less
+  variants.
+
+An empty field means nothing was found; the user then browses to the folder.
 
 After extraction, it runs the package's preparation script with explicit
 `-InstallDir`, `-RetailRoot`, `-PublicToolsGame`, and `-Force` arguments. That

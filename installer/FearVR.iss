@@ -62,46 +62,272 @@ begin
     FileExistsBelow(Path, 'Default.archcfg');
 end;
 
+// Der eingegebene oder gefundene Pfad zeigt mal auf die Installationswurzel,
+// mal auf Dev, mal direkt auf Dev\Runtime\Game. Geliefert wird das
+// Verzeichnis mit der GameClient.dll, sonst ein leerer String.
+function PublicToolsGameDir(const Path: String): String;
+var
+  Suffixes: array[0..3] of String;
+  I: Integer;
+  Candidate: String;
+begin
+  Result := '';
+  if Path = '' then
+    exit;
+  Suffixes[0] := '';
+  Suffixes[1] := 'Dev\Runtime\Game';
+  Suffixes[2] := 'Runtime\Game';
+  Suffixes[3] := 'Game';
+  for I := 0 to 3 do
+  begin
+    if Suffixes[I] = '' then
+      Candidate := Path
+    else
+      Candidate := AddBackslash(Path) + Suffixes[I];
+    if FileExistsBelow(Candidate, 'GameClient.dll') then
+    begin
+      Result := Candidate;
+      exit;
+    end;
+  end;
+end;
+
 function LooksLikePublicTools(const Path: String): Boolean;
 begin
-  Result := FileExistsBelow(Path, 'GameClient.dll') or
-    FileExistsBelow(Path, 'Dev\Runtime\Game\GameClient.dll');
+  Result := PublicToolsGameDir(Path) <> '';
 end;
 
 function NormalisePublicToolsPath(const Path: String): String;
 begin
-  if FileExistsBelow(Path, 'GameClient.dll') then
-    Result := Path
-  else
+  Result := PublicToolsGameDir(Path);
+  if Result = '' then
     Result := AddBackslash(Path) + 'Dev\Runtime\Game';
 end;
 
-function FindSteamFearRoot(): String;
-var
-  Candidate: String;
+function JoinPath(const Left, Right: String): String;
 begin
-  Candidate := ExpandConstant(
-    '{pf32}\Steam\steamapps\common\FEAR Ultimate Shooter Edition');
-  if LooksLikeRetailRoot(Candidate) then
-  begin
-    Result := Candidate;
-    exit;
-  end;
-  Result := '';
+  if Left = '' then
+    Result := Right
+  else if Right = '' then
+    Result := Left
+  else
+    Result := AddBackslash(Left) + Right;
 end;
 
+procedure AddPath(List: TStringList; const Path: String);
+begin
+  if (Path <> '') and (List.IndexOf(Path) < 0) then
+    List.Add(Path);
+end;
+
+// Jedes feste Laufwerk, das der Rechner tatsaechlich hat. Die Public Tools
+// und das Spiel liegen oft nicht auf C:.
+procedure AddDriveRoots(List: TStringList);
+var
+  I: Integer;
+  Root: String;
+begin
+  for I := Ord('C') to Ord('Z') do
+  begin
+    Root := Chr(I) + ':';
+    if DirExists(Root + '\') then
+      AddPath(List, Root);
+  end;
+end;
+
+// Die Uninstall-Registry kennt den vom Nutzer frei gewaehlten Zielordner,
+// egal wo er liegt. Deshalb wird sie vor allen Standardpfaden befragt.
+procedure AddRegistryInstallLocations(
+  List: TStringList; const NameFilter: String);
+var
+  RootKeys: array[0..2] of Integer;
+  Keys: TArrayOfString;
+  Base, DisplayName, Location: String;
+  K, I: Integer;
+begin
+  RootKeys[0] := HKLM32;
+  RootKeys[1] := HKLM64;
+  RootKeys[2] := HKCU;
+  Base := 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall';
+  for K := 0 to 2 do
+  begin
+    if not RegGetSubkeyNames(RootKeys[K], Base, Keys) then
+      Continue;
+    for I := 0 to GetArrayLength(Keys) - 1 do
+    begin
+      if not RegQueryStringValue(
+        RootKeys[K], Base + '\' + Keys[I], 'DisplayName', DisplayName) then
+        Continue;
+      if Pos(Lowercase(NameFilter), Lowercase(DisplayName)) = 0 then
+        Continue;
+      if RegQueryStringValue(
+        RootKeys[K], Base + '\' + Keys[I], 'InstallLocation', Location) then
+        AddPath(List, RemoveBackslash(Trim(Location)));
+    end;
+  end;
+end;
+
+function SteamRoot(): String;
+var
+  Value: String;
+begin
+  Value := '';
+  if not (RegQueryStringValue(
+    HKLM32, 'SOFTWARE\Valve\Steam', 'InstallPath', Value) and (Value <> '')) then
+    if not (RegQueryStringValue(
+      HKLM64, 'SOFTWARE\Valve\Steam', 'InstallPath', Value) and (Value <> '')) then
+      if not (RegQueryStringValue(
+        HKCU, 'SOFTWARE\Valve\Steam', 'SteamPath', Value) and (Value <> '')) then
+        Value := ExpandConstant('{pf32}\Steam');
+  // HKCU\SteamPath steht mit Schraegstrichen in der Registry.
+  StringChangeEx(Value, '/', '\', True);
+  Result := RemoveBackslash(Value);
+end;
+
+// Steam-Bibliotheken aus libraryfolders.vdf. Ein einzelner fester Pfad
+// findet nur die Standardbibliothek und keine zweite Platte.
+procedure AddSteamLibraries(List: TStringList);
+var
+  Root, Vdf, Line, Path: String;
+  Lines: TArrayOfString;
+  I, P: Integer;
+begin
+  Root := SteamRoot;
+  AddPath(List, Root);
+  Vdf := AddBackslash(Root) + 'steamapps\libraryfolders.vdf';
+  if not FileExists(Vdf) then
+    exit;
+  if not LoadStringsFromFile(Vdf, Lines) then
+    exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    Line := Lines[I];
+    P := Pos('"path"', Lowercase(Line));
+    if P = 0 then
+      Continue;
+    Line := Copy(Line, P + 6, Length(Line));
+    P := Pos('"', Line);
+    if P = 0 then
+      Continue;
+    Line := Copy(Line, P + 1, Length(Line));
+    P := Pos('"', Line);
+    if P = 0 then
+      Continue;
+    Path := Copy(Line, 1, P - 1);
+    StringChangeEx(Path, '\\', '\', True);
+    AddPath(List, RemoveBackslash(Path));
+  end;
+end;
+
+function FindRetailRoot(): String;
+var
+  Libraries, Candidates, Folders, Parents, Vendors, Drives: TStringList;
+  I, J, K, L: Integer;
+begin
+  Result := '';
+  Candidates := TStringList.Create;
+  Libraries := TStringList.Create;
+  Folders := TStringList.Create;
+  Parents := TStringList.Create;
+  Vendors := TStringList.Create;
+  Drives := TStringList.Create;
+  try
+    Folders.Add('FEAR Ultimate Shooter Edition');
+    Folders.Add('FEAR');
+    Folders.Add('F.E.A.R');
+    Folders.Add('F.E.A.R.');
+    Folders.Add('FEAR Platinum Collection');
+
+    AddSteamLibraries(Libraries);
+    for I := 0 to Libraries.Count - 1 do
+      for J := 0 to Folders.Count - 1 do
+        AddPath(Candidates, JoinPath(
+          Libraries[I], 'steamapps\common\' + Folders[J]));
+
+    AddRegistryInstallLocations(Candidates, 'F.E.A.R');
+    AddRegistryInstallLocations(Candidates, 'FEAR');
+
+    Parents.Add('Program Files (x86)');
+    Parents.Add('Program Files');
+    Parents.Add('Games');
+    Parents.Add('GOG Games');
+    Parents.Add('SteamLibrary\steamapps\common');
+    Parents.Add('Games\steamapps\common');
+    Parents.Add('');
+    Vendors.Add('');
+    Vendors.Add('Sierra');
+    Vendors.Add('Monolith Productions');
+    Vendors.Add('Vivendi Games');
+    AddDriveRoots(Drives);
+    for I := 0 to Drives.Count - 1 do
+      for J := 0 to Parents.Count - 1 do
+        for K := 0 to Vendors.Count - 1 do
+          for L := 0 to Folders.Count - 1 do
+            AddPath(Candidates, JoinPath(JoinPath(JoinPath(
+              Drives[I] + '\', Parents[J]), Vendors[K]), Folders[L]));
+
+    for I := 0 to Candidates.Count - 1 do
+      if LooksLikeRetailRoot(Candidates[I]) then
+      begin
+        Result := Candidates[I];
+        Break;
+      end;
+  finally
+    Drives.Free;
+    Vendors.Free;
+    Parents.Free;
+    Folders.Free;
+    Libraries.Free;
+    Candidates.Free;
+  end;
+end;
+
+// Der offizielle Public-Tools-Installer schlaegt Sierra vor, laesst den
+// Zielordner aber frei waehlen. Ein einzelner fester Pfad reicht deshalb
+// nicht: erst Registry, dann die ueblichen Ordnernamen je Laufwerk.
 function FindPublicToolsRoot(): String;
 var
-  Candidate: String;
+  Candidates, Folders, Parents, Drives: TStringList;
+  I, J, K: Integer;
 begin
-  Candidate := ExpandConstant(
-    '{pf32}\Monolith Productions\FEAR Public Tools');
-  if LooksLikePublicTools(Candidate) then
-  begin
-    Result := Candidate;
-    exit;
-  end;
   Result := '';
+  Candidates := TStringList.Create;
+  Folders := TStringList.Create;
+  Parents := TStringList.Create;
+  Drives := TStringList.Create;
+  try
+    AddRegistryInstallLocations(Candidates, 'Public Tools');
+    AddRegistryInstallLocations(Candidates, 'FEAR SDK');
+
+    Folders.Add('Sierra\FEAR Public Tools');
+    Folders.Add('Sierra\F.E.A.R. Public Tools');
+    Folders.Add('Sierra Entertainment\FEAR Public Tools');
+    Folders.Add('Monolith Productions\FEAR Public Tools');
+    Folders.Add('FEAR Public Tools');
+    Folders.Add('F.E.A.R. Public Tools');
+    Parents.Add('Program Files (x86)');
+    Parents.Add('Program Files');
+    Parents.Add('Games');
+    Parents.Add('');
+    AddDriveRoots(Drives);
+    for I := 0 to Drives.Count - 1 do
+      for J := 0 to Parents.Count - 1 do
+        for K := 0 to Folders.Count - 1 do
+          AddPath(Candidates, JoinPath(JoinPath(
+            Drives[I] + '\', Parents[J]), Folders[K]));
+
+    for I := 0 to Candidates.Count - 1 do
+      if LooksLikePublicTools(Candidates[I]) then
+      begin
+        Result := Candidates[I];
+        Break;
+      end;
+  finally
+    Drives.Free;
+    Parents.Free;
+    Folders.Free;
+    Candidates.Free;
+  end;
 end;
 
 function GetRetailRoot(Param: String): String;
@@ -129,7 +355,7 @@ begin
     False,
     '');
   RetailPage.Add('F.E.A.R. folder:');
-  RetailPage.Values[0] := FindSteamFearRoot();
+  RetailPage.Values[0] := FindRetailRoot();
 
   PublicToolsPage := CreateInputDirPage(
     RetailPage.ID,

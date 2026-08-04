@@ -43,6 +43,8 @@ Nothing is replaced, the mod's files simply sit next to the game's own.
   locally — bundled with the Steam Ultimate Shooter Edition under `extras\`, or
   available as
   [F.E.A.R. SDK v1.08 on AusGamers](https://www.ausgamers.com/files/download/25133/fear-sdk-v108).
+  Its installer defaults to `C:\Program Files (x86)\Sierra\FEAR Public Tools`;
+  any other folder works too and is found automatically.
   A personal `-PrivateBundle` already contains the required runtime modules.
 - A headset with **SteamVR** or **Virtual Desktop (VDXR)** as the active
   OpenXR runtime. Native SteamVR hardware is covered by explicit Valve Index

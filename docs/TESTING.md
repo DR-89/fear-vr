@@ -410,14 +410,13 @@ Automatisiert und im Retail-Lauf `logs\m5-fear-20260724-222748` bestätigt:
 - Änderungen werden sofort angewendet und in
   `stage\userdata-m5\fearvr.ini` persistiert.
 
-Die Seite ist bewusst kurz und einseitig, damit kein Eintrag über den Rand des
-nativen Rahmens läuft: Stereo rendering, Stereo HUD, Turn speed, Red aim guide,
-Controller vibration, Controls, Ladder climbing, Melee, Show arms, Recenter
-view, Reset VR defaults, BACK. HMD-Translation, Head-Bob, Komfortbildschirm
-und die vier einzelnen Nahkampfaktionen bleiben ohne eigenen Menüeintrag in
-`fearvr.ini` einstellbar. Ein zweistufiges Menü wurde verworfen; die
-Beschriftungen sind durchgehend englisch. Bedienung: Stick navigiert, A oder
-Trigger bestätigt, B geht zurück. Details: `docs/OPENXR-INPUT.md`.
+Die Seite verwendet den dynamisch vermessenen Retail-Rahmen und scrollt die
+17 sichtbaren Einstellungen einschließlich `Weapon weight` so, dass die
+aktuelle Auswahl innerhalb des Fensters bleibt. HMD-Translation, Head-Bob,
+Komfortbildschirm und die vier einzelnen Nahkampfaktionen bleiben ohne eigenen
+Menüeintrag in `fearvr.ini` einstellbar. Die Beschriftungen sind durchgehend
+englisch. Bedienung: Stick navigiert, A oder Trigger bestätigt, B geht zurück.
+Details: `docs/OPENXR-INPUT.md`.
 
 ## 12. Arme schaltbar, Hände, Torso und Beine sichtbar
 

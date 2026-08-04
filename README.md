@@ -292,8 +292,9 @@ something is built but not yet verified in-game, it's noted.
 ### Menu and Settings
 
 - **Native VR settings page** in the ESC menu ("VR SETTINGS"), usable with
-  the controller: Stereo rendering, Stereo HUD, Turn speed, Red aim
-  guide, Controller vibration, Flashlight mount (left hand/head/weapon),
+  the controller: Stereo rendering, Stereo HUD, Weapon weight
+  (none/light/medium/heavy), Turn speed, Red aim guide, Controller vibration,
+  Flashlight mount (left hand/head/weapon),
   Controls (right/left-handed), Ladder climbing (hands or classic), Physical
   lean, Physical duck, Melee (gestures or classic), Show arms, FOV scale,
   Recenter 2D panel, Reset VR defaults.
@@ -302,9 +303,19 @@ something is built but not yet verified in-game, it's noted.
 - **Body visibility switch** saved as `ShowArms` (`0` by default). The
   generated Alpha-Test material hides only upper and lower arms; hands, torso
   and legs remain visible, while the head is hidden through its separate
-  material slot. F11 remains
-  a developer diagnostic for isolating Retail body pieces, not the arm-hiding
-  mechanism.
+  material slot. F11 remains a developer diagnostic for isolating Retail body
+  pieces, not the arm-hiding mechanism.
+- **Optional simulated weapon weight**, selectable in the VR menu as None,
+  Light, Medium, or Heavy. These apply `0x`, `0.5x`, `1x`, or `2x` to the
+  configured profile; None is the default. The detailed `WeaponWeight`,
+  `WeaponPositionalFollow`, `WeaponRotationalFollow`, and
+  `WeaponCatchUpStrength` default to `1.0`, `18.0`, `20.0`, and `1.5`.
+  Per-weapon overrides use `[WeaponWeight.<model-name>]` with `Weight`,
+  `PositionalFollow`, `RotationalFollow`, and `CatchUpStrength`. Unknown
+  models explicitly use the `[VR]` defaults. `WeaponWeightDiagnostics=1`
+  emits rate-limited raw/filter error and velocity telemetry.
+  Recommended ranges are `0.10-4.00`, `2.0-40.0`, `2.0-40.0`, and
+  `0.0-4.0`, respectively.
 
 ### Operation
 

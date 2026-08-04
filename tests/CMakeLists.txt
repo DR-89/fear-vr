@@ -59,6 +59,15 @@ if(MSVC)
 endif()
 add_test(NAME two_handed_grip COMMAND test_two_handed_grip)
 
+add_executable(test_weapon_weight test_weapon_weight.cpp)
+target_link_libraries(
+  test_weapon_weight PRIVATE fearvr-common fearvr-warnings
+)
+if(MSVC)
+  target_compile_options(test_weapon_weight PRIVATE /UNDEBUG)
+endif()
+add_test(NAME weapon_weight COMMAND test_weapon_weight)
+
 add_executable(test_melee_thrust test_melee_thrust.cpp)
 target_link_libraries(
   test_melee_thrust PRIVATE fearvr-common fearvr-warnings

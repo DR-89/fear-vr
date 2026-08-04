@@ -500,20 +500,26 @@ im Rahmen bleibt:
 
 1. Stereo rendering
 2. Stereo HUD
-3. Red aim guide
-4. Controller vibration
-5. Flashlight mount: LEFT HAND / HEAD / WEAPON
-6. Controls: RIGHT-HANDED / LEFT-HANDED
-7. Ladder climbing: HANDS / CLASSIC
-8. Physical lean: ON / OFF
-9. Physical duck: ON / OFF
-10. Melee: GESTURES / CLASSIC
-11. Show arms: ON / OFF
-12. FOV scale: 100% / 110% / 120% / 130%
-13. Turn speed
-14. Recenter 2D panel
-15. Reset VR defaults
-16. BACK
+3. Weapon weight: NONE / LIGHT / MEDIUM / HEAVY
+4. Red aim guide
+5. Controller vibration
+6. Flashlight mount: LEFT HAND / HEAD / WEAPON
+7. Controls: RIGHT-HANDED / LEFT-HANDED
+8. Ladder climbing: HANDS / CLASSIC
+9. Physical lean: ON / OFF
+10. Physical duck: ON / OFF
+11. Melee: GESTURES / CLASSIC
+12. Show arms: ON / OFF
+13. FOV scale: 100% / 110% / 120% / 130%
+14. Turn speed
+15. Recenter 2D panel
+16. Reset VR defaults
+17. BACK
+
+Die vier Gewichtsstufen skalieren das konfigurierte Waffenprofil mit `0`,
+`0,5`, `1` oder `2`. Die Auswahl wird als `WeaponWeightPreset` gespeichert;
+eine vorhandene Konfiguration mit `WeaponWeightEnabled=1` und ohne Preset wird
+aus Kompatibilitätsgründen als `MEDIUM` geladen.
 
 `Show arms` ist standardmäßig `OFF` und verwendet ein lokal erzeugtes
 Alpha-Test-Material, das nur Ober- und Unterarme ausblendet. Hände, Torso und

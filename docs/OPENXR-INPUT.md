@@ -559,10 +559,9 @@ können weiterhin direkt in der INI gesetzt werden.
 
 1. **Display & HUD:** Stereo rendering, Stereo HUD, FOV scale.
 2. **Movement & Comfort:** HMD translation, head bob, comfort screen,
-   movement direction, smooth-turn speed, physical leaning, physical duck and
-   lean strength.
+   movement direction, smooth-turn speed, physical leaning and lean strength.
 3. **Controls:** handedness, controller vibration, ladder climbing,
-   flashlight mount and Recenter VR origin.
+   flashlight mount, physical duck and Recenter VR origin.
 4. **Weapons:** three nested pages keep the list bounded: Handling & appearance
    contains red aim guide, show arms and two-handed grip; Simulated weight
    contains None/Light/Medium/Heavy presets plus the per-weapon profile

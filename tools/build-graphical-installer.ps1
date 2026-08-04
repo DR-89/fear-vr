@@ -90,8 +90,12 @@ if (-not (Test-Path -LiteralPath $packagePath -PathType Container)) {
 }
 
 $requiredFiles = @(
-    'tools\install.ps1',
-    'tools\play.ps1'
+    'FEARVR\tools\prepare-overlay.ps1',
+    'FEARVR\tools\play.ps1',
+    'FEARVR\release-manifest.json',
+    'dinput8.dll',
+    'd3d9.dll',
+    'Start F.E.A.R. VR.cmd'
 )
 
 foreach ($relativePath in $requiredFiles) {

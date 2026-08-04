@@ -1,107 +1,64 @@
 # Graphical installer
 
-This directory contains an Inno Setup wrapper around the existing
-`tools/install.ps1` workflow.
+This directory contains an Inno Setup 6 wrapper for the current F.E.A.R. VR
+`retail-overlay` release package.
 
-The graphical installer does **not** reimplement the installation logic and does
-not expose gameplay settings. It only gathers installation paths and options,
-then invokes `install.ps1` in non-interactive mode.
+The generated installer asks for a legal F.E.A.R. 1.08 installation and a
+F.E.A.R. Public Tools 1.08 installation. It then copies the overlay directly
+into the folder containing `FEAR.exe`, runs
+`FEARVR\tools\prepare-overlay.ps1`, and optionally creates a desktop shortcut.
+It does not replace `FEAR.exe` or the retail game archives. Existing root-level
+`dinput8.dll` and `d3d9.dll` proxy mods are replaced by F.E.A.R. VR's proxies.
 
-## User experience
+Gameplay and comfort settings remain available through the in-game VR menu and
+`fearvr.ini` where applicable.
 
-The generated installer guides users through:
+## Prerequisites
 
-1. Locating the retail F.E.A.R. 1.08 installation.
-2. Locating F.E.A.R. Public Tools 1.08.
-3. Choosing a separate F.E.A.R. VR installation folder.
-4. Choosing whether to create a desktop shortcut.
-5. Optionally cleaning an existing staged installation.
-6. Running the existing installation script and displaying its output.
-
-Gameplay and comfort options remain available through the in-game VR settings
-menu and `fearvr.ini` where applicable.
-
-## Prerequisites for maintainers
-
-Install Inno Setup 6 so `ISCC.exe` is available. The default locations checked
-by the build script are:
+Install Inno Setup 6. The build script automatically checks these locations:
 
 ```text
 C:\Program Files (x86)\Inno Setup 6\ISCC.exe
 C:\Program Files\Inno Setup 6\ISCC.exe
+%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe
 ```
 
-## Build the installer
+## Build
 
-First create a normal release package using the existing release process:
+First create an unpacked public retail-overlay package:
 
 ```powershell
-pwsh -File tools\make-release.ps1
+pwsh -File tools\make-release.ps1 -NoArchive
 ```
 
-Then point the graphical-installer build script at the prepared package folder:
-
-```powershell
-pwsh -File tools\build-graphical-installer.ps1 `
-  -PackageDir "<path-to-prepared-release-package>"
-```
-
-The generated executable is written to `dist` by default:
-
-```text
-dist\FearVR-Setup-<version>.exe
-```
-
-Use a custom output directory when needed:
+Then build the installer from the generated directory below `dist`:
 
 ```powershell
 pwsh -File tools\build-graphical-installer.ps1 `
-  -PackageDir "<path-to-prepared-release-package>" `
-  -OutputDir "D:\Builds\FearVR"
+  -PackageDir "dist\fearvr-<version>+<commit>-overlay"
 ```
 
-Pass the compiler path explicitly when Inno Setup is installed elsewhere:
+The result is `dist\FearVR-Setup-<version>.exe`. `-OutputDir`, `-Version`, and
+`-InnoSetupCompiler` may be supplied when non-default values are needed.
 
-```powershell
-pwsh -File tools\build-graphical-installer.ps1 `
-  -PackageDir "<path-to-prepared-release-package>" `
-  -InnoSetupCompiler "D:\Tools\Inno Setup 6\ISCC.exe"
-```
+The build script rejects legacy staged-install packages and incomplete overlay
+packages before invoking Inno Setup.
 
-## Architecture
+## Installation flow
 
-The final setup executable embeds the prepared release package in a temporary
-folder. During installation it runs:
+The setup program validates:
 
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
-  -File tools\install.ps1 `
-  -RetailRoot "<selected-retail-folder>" `
-  -PublicToolsGame "<selected-public-tools-folder>" `
-  -InstallDir "<selected-install-folder>" `
-  -NonInteractive
-```
+1. `FEAR.exe` and `Default.archcfg` in the selected retail directory.
+2. `GameClient.dll` in the selected Public Tools directory or its
+   `Dev\Runtime\Game` child.
+3. The packaged overlay manifest and required root proxy files.
 
-Depending on the wizard selections, it may also pass:
+After extraction, it runs the package's preparation script with explicit
+`-InstallDir`, `-RetailRoot`, `-PublicToolsGame`, and `-Force` arguments. That
+script verifies the release manifest, copies the proprietary modules only from
+the user's local Public Tools installation, and creates the isolated runtime
+configuration below `FEARVR`.
 
-```text
--NoShortcut
--Clean
-```
-
-The retail game folder remains unmodified. The existing PowerShell installer
-continues to own validation, package integrity checks, staging, update handling,
-and shortcut creation.
-
-## Recommended follow-up work
-
-Before publishing the graphical installer as the default release path:
-
-- Confirm the exact output directory produced by `make-release.ps1` and optionally
-  make `build-graphical-installer.ps1` discover it automatically.
-- Test clean installs and updates on Windows 10 and Windows 11.
-- Test Steam, GOG, and retail-disc paths where available.
-- Add project artwork and an application icon.
-- Add code signing for the setup executable when a certificate is available.
-- Add a GitHub Actions job that installs Inno Setup and produces the installer
-  as a release artifact.
+Before publishing, clean-install and update testing should still be performed
+on each supported Windows/store combination. Code signing and project artwork
+can be added independently of the packaging format.

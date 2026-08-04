@@ -2612,8 +2612,6 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
             g_vrMenuMovementDirection, g_headRelativeMovement);
         SetRetailVrToggleVisible(
             g_vrMenuPhysicalLean, g_physicalLeanEnabled);
-        SetRetailVrToggleVisible(
-            g_vrMenuPhysicalDuck, g_physicalDuckEnabled);
         SetRetailVrPresetVisible(
             g_vrMenuLeanScale,
             ClosestVrPresetIndex(g_leanScalePercent, kLeanScalePresets));
@@ -2635,6 +2633,8 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
             }
         }
         SetRetailVrToggleVisible(g_vrMenuClimbing, g_climbingEnabled);
+        SetRetailVrToggleVisible(
+            g_vrMenuPhysicalDuck, g_physicalDuckEnabled);
         SetRetailControlVisible(g_vrMenuRecenter, true);
         break;
     case VrSettingsPage::Weapons:
@@ -2657,8 +2657,9 @@ VrMenuControl RefreshRetailVrSettingsControls() noexcept {
         first = SetRetailVrToggleVisible(
             g_vrMenuWeaponProfileTarget,
             EditingCurrentWeaponWeightProfile());
-        SetRetailVrToggleVisible(
-            g_vrMenuWeaponWeight, g_weaponWeightEnabled);
+        // The four presets include NONE, so the older independent on/off row
+        // would be redundant and would push this page beyond Retail's eight
+        // visible selectable rows.
         const int weaponWeightPreset = std::clamp(
             static_cast<int>(g_weaponWeightPreset), 0, 3);
         for (int index = 0; index < 4; ++index) {
@@ -2898,6 +2899,10 @@ void ShowRetailVrSettingsPage(VrSettingsPage page) noexcept {
     SetRetailVrMenuCompactSpacing(true);
     const VrMenuControl first = RefreshRetailVrSettingsControls();
     SelectRetailVrMenuControl(first);
+    // SetSelection counts hidden sibling controls while CalculatePositions
+    // does not. Every categorized page fits completely, so physical row zero
+    // is the only stable list origin after changing pages.
+    ResetRetailVrMenuScroll();
 }
 
 void EnterRetailVrSettingsPage() noexcept {
@@ -3854,6 +3859,7 @@ std::uint32_t __fastcall HookRetailMenuOnCommand(
 
     MarkRetailVrMenuForLayout();
     SelectRetailVrMenuControl(selection);
+    ResetRetailVrMenuScroll();
     SaveVrSettings();
     return 1;
 }
@@ -5981,11 +5987,15 @@ void FormatDevMenuRow(
     }
     case DevMenuTab::weight: {
         const WeaponWeightProfile& weight = EditableWeaponWeightProfile();
+        static constexpr const wchar_t* kWeightPresetNames[]{
+            L"NONE", L"LIGHT", L"MEDIUM", L"HEAVY"};
+        const int preset = std::clamp(
+            static_cast<int>(g_weaponWeightPreset), 0, 3);
         switch (row) {
         case 0:
             _snwprintf_s(
                 text, textCount, _TRUNCATE, L"SIMULATED WEIGHT: %s",
-                onOff[g_weaponWeightEnabled ? 1 : 0]);
+                kWeightPresetNames[preset]);
             break;
         case 1:
             _snwprintf_s(
@@ -15142,12 +15152,17 @@ void ActivateFloatingDevMenuRow(
     case DevMenuTab::weight: {
         WeaponWeightProfile& profile = EditableWeaponWeightProfile();
         switch (row) {
-        case 0:
-            g_weaponWeightEnabled = !g_weaponWeightEnabled;
+        case 0: {
+            const int next =
+                (static_cast<int>(g_weaponWeightPreset) + 1) % 4;
+            g_weaponWeightPreset = SanitizeWeaponWeightPreset(next);
+            g_weaponWeightEnabled =
+                g_weaponWeightPreset != WeaponWeightPreset::none;
             ResetWeaponWeightPair(
                 g_weightedWeaponInput.filters,
                 WeaponWeightResetReason::enabledChanged);
             break;
+        }
         case 1:
             g_vrWeaponProfileEditsCurrent =
                 HasCurrentWeaponWeightProfile()

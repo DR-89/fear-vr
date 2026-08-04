@@ -134,9 +134,6 @@ struct CommandLineConfig {
     // Pixel fuer Pixel auf der CPU. Der GPU-Weg zeichnet in das Geraet des
     // Spiels; bleibt danach etwas schwarz, trennt dieser Schalter die Ursache.
     bool disableGpuHud{false};
-    // Diagnostic escape hatch for comparing against beta.7's immediate
-    // CPU-readback scheduling (the old end-of-Present spin stays removed).
-    bool syncCpuBridge{false};
     // Measures the game's unmodified Present rate while leaving the proxy,
     // OpenXR host, and gameplay hooks loaded. No frame is copied to the host.
     bool disableCapture{false};
@@ -184,10 +181,6 @@ CommandLineConfig ReadConfig() noexcept {
         } else if (_wcsicmp(
                        arguments[index], L"-fearvr-no-gpu-hud") == 0) {
             config.disableGpuHud = true;
-        } else if (_wcsicmp(
-                       arguments[index],
-                       L"-fearvr-sync-cpu-bridge") == 0) {
-            config.syncCpuBridge = true;
         } else if (_wcsicmp(
                        arguments[index],
                        L"-fearvr-no-capture") == 0) {
@@ -1272,7 +1265,6 @@ public:
         transferMaxMicroseconds_ =
             (std::max)(transferMaxMicroseconds_, transferMicroseconds);
         if (stereo) {
-            lastStagedStereoFrameId_ = frameId;
             if (stereoHudFlatFrame_) {
                 InterlockedAnd(
                     AtomicFlags(*shared_),
@@ -4464,16 +4456,7 @@ private:
     FearVrGameCameraSample stereoCameraSample_{};
     std::uint64_t stereoFrames_{0};
     std::uint64_t stereoHudFrames_{0};
-    std::uint64_t lastStagedStereoFrameId_{0};
     std::uint64_t stereoDuplicateCaptureDrops_{0};
-    std::uint64_t cpuCaptureQueued_{0};
-    std::uint64_t cpuCaptureTransferred_{0};
-    std::uint64_t cpuCaptureQueueDrops_{0};
-    std::uint64_t cpuCaptureModeDrops_{0};
-    std::uint64_t cpuCaptureStaleDrops_{0};
-    std::uint64_t cpuCaptureSlotDrops_{0};
-    std::uint64_t cpuCaptureQueryNotReady_{0};
-    std::uint64_t cpuCaptureTransferMaxMicroseconds_{0};
     std::uint64_t xrPacingWaits_{0};
     std::uint64_t xrPacingTimeouts_{0};
     std::uint64_t xrPacingWaitMaxMilliseconds_{0};

@@ -36,6 +36,13 @@ liegen **nicht** im Repository:
   Retail-schonende Stagingstrategie. **Komponentenspezifische Lizenzgrenzen
   (MIT / GPL / proprietär)** beachten. Es wird **weder Code noch Binärdatei**
   ohne konkrete Lizenzprüfung übernommen.
+- **EchoPatch** — https://github.com/Wemino/EchoPatch — die Beschreibung des
+  redundanten Jupiter-EX-HID-Initialisierungsfehlers und die drei
+  Steam-1.08-Zielbereiche wurden gegen Commit
+  `b4a7074e4cbb2fb6bb238809f7cf26424f1f5961` und anschließend gegen die
+  laufenden Originalbytes verifiziert. EchoPatch-Code und -Binärdateien
+  werden nicht mitgebaut oder ausgeliefert; die GPL-3.0-Komponente selbst
+  bleibt eine reine Referenz.
 
 ## Regeln (ANWEISUNG.md §4, §10, §11)
 

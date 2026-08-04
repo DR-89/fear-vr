@@ -721,8 +721,12 @@ std::size_t g_vrNormalControlCount = 0;
 bool g_vrMenuControlsBuilt = false;
 bool g_vrSettingsPageActive = false;
 constexpr std::size_t kRetailVrMenuVisibleControlCount = 16;
-constexpr std::size_t kRetailVrMenuPageRows = 11;
 std::size_t g_vrMenuFirstVisibleRow = 0;
+// CMenuSystem::OnFocus shrinks the list to the stock controls visible in the
+// current game state. Learn the real capacity from m_nLastShown instead of
+// assuming the default layout height. Eight is only the safe first-frame
+// fallback for the single-player pause menu.
+std::size_t g_vrMenuPageRows = 8;
 int g_vrOriginalItemSpacing = 0;
 bool g_vrOriginalItemSpacingKnown = false;
 VrMenuControl g_vrMenuEntry;
@@ -796,6 +800,7 @@ constexpr std::size_t kRetailMenuListOffset = 0x6E8;
 constexpr std::size_t kRetailListItemSpacingOffset = 0x54;
 constexpr std::size_t kRetailListCurrentIndexOffset = 0x58;
 constexpr std::size_t kRetailListFirstShownOffset = 0x5C;
+constexpr std::size_t kRetailListLastShownOffset = 0x60;
 constexpr std::size_t kRetailListNeedsRecalculationOffset = 0x648;
 // CLTGUICtrl::IsEnabled() ist `m_bEnabled && IsVisible()`. Verstecken genügt
 // deshalb, damit CLTGUIListCtrl::NextSelection einen Eintrag überspringt; ein
@@ -1801,10 +1806,9 @@ void MarkRetailVrMenuForLayout() noexcept {
 // sichtbaren Umschalter versteckte Geschwister-Controls, weshalb
 // `m_nFirstShown` falsch gesetzt wird und die Liste springt.
 //
-// Die verkürzte VR-Seite passt vollständig in den nativen Rahmen. Der
-// Listenanfang wird deshalb bei 0 festgehalten, solange sie aktiv ist. Der
-// Schreibzugriff erfolgt nur bei Bedarf, damit nicht jedes Frame eine
-// Neuberechnung erzwungen wird.
+// Beim Verlassen der VR-Seite muss der Listenanfang wieder auf Retails erste
+// physische Zeile zeigen. Der Schreibzugriff erfolgt nur bei Bedarf, damit
+// nicht jedes Frame eine Neuberechnung erzwungen wird.
 void ResetRetailVrMenuScroll() noexcept {
     void* const list = RetailVrMenuList(g_vrMenuOwner);
     if (list == nullptr) {
@@ -1917,8 +1921,8 @@ VrMenuControl SetRetailVrToggleVisible(
 
 VrMenuControl RefreshRetailVrSettingsControls() noexcept {
     // Only one control for each setting is visible. The logical page has more
-    // rows than the native 320px frame, so MaintainRetailVrMenuScroll keeps the
-    // selected logical row inside its viewport.
+    // rows than the dynamically sized Retail system-menu frame, so
+    // MaintainRetailVrMenuScroll keeps the selected row inside its viewport.
     HideRetailVrSettingsControls();
     const VrMenuControl first = SetRetailVrToggleVisible(
         g_vrMenuStereo,
@@ -1983,8 +1987,6 @@ RetailVrMenuVisibleControls() noexcept {
         toggleControl(
             g_vrMenuStereoHud,
             QueryBooleanOption(g_isStereoHudEnabled, true)),
-        g_vrMenuTurnSpeed[turnSpeed],
-        g_vrMenuFovScale[fovScale],
         toggleControl(g_vrMenuAimGuide, g_weaponAimGuideEnabled),
         toggleControl(g_vrMenuHaptics, g_controllerHapticsEnabled),
         g_vrMenuFlashlightMount[flashlightMount],
@@ -1994,6 +1996,8 @@ RetailVrMenuVisibleControls() noexcept {
         toggleControl(g_vrMenuPhysicalDuck, g_physicalDuckEnabled),
         toggleControl(g_vrMenuMelee, g_meleeThrustEnabled),
         toggleControl(g_vrMenuArms, g_showPlayerArms),
+        g_vrMenuFovScale[fovScale],
+        g_vrMenuTurnSpeed[turnSpeed],
         g_vrMenuRecenter,
         g_vrMenuDefaults,
         g_vrMenuBack,
@@ -2027,11 +2031,36 @@ void MaintainRetailVrMenuScroll() noexcept {
             return;
         }
 
+        std::array<std::uint32_t, kRetailVrMenuVisibleControlCount>
+            controlIndices{};
+        for (std::size_t row = 0; row < controls.size(); ++row) {
+            controlIndices[row] = controls[row].index;
+        }
+        if (!VrMenuControlOrderIsStrictlyIncreasing(
+                controlIndices.data(), controlIndices.size())) {
+            Report(
+                "ERROR", "vr_settings_menu_order_invalid",
+                "The logical VR rows do not match Retail's physical control "
+                "order; scrolling was left unchanged.");
+            return;
+        }
+        const std::uint32_t lastShown =
+            *reinterpret_cast<const std::uint32_t*>(
+                static_cast<const unsigned char*>(list) +
+                kRetailListLastShownOffset);
+        const std::size_t observedPageRows =
+            VrMenuVisibleRowCapacity(
+                controlIndices.data(), controlIndices.size(),
+                g_vrMenuFirstVisibleRow, lastShown);
+        if (observedPageRows != 0) {
+            g_vrMenuPageRows = VrMenuSafePageRows(observedPageRows);
+        }
+
         g_vrMenuFirstVisibleRow = VrMenuScrollStart(
             g_vrMenuFirstVisibleRow,
             selectedRow,
             controls.size(),
-            kRetailVrMenuPageRows);
+            g_vrMenuPageRows);
         const std::uint32_t desiredFirstShown =
             controls[g_vrMenuFirstVisibleRow].index;
         auto* const firstShown = reinterpret_cast<std::uint32_t*>(
@@ -2055,9 +2084,6 @@ void SelectRetailVrMenuControl(
     __try {
         g_retailListSetSelection(
             RetailVrMenuList(g_vrMenuOwner), control.index);
-        if (g_vrSettingsPageActive) {
-            MaintainRetailVrMenuScroll();
-        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
@@ -2081,6 +2107,7 @@ void EnterRetailVrSettingsPage() noexcept {
         SetRetailControlVisible(g_vrNormalControls[index], false);
     }
     g_vrMenuFirstVisibleRow = 0;
+    g_vrMenuPageRows = 8;
     g_vrSettingsPageActive = true;
     SetRetailVrMenuCompactSpacing(true);
     const VrMenuControl first =
@@ -2097,6 +2124,7 @@ void LeaveRetailVrSettingsPage() noexcept {
     }
     ResetRetailVrMenuScroll();
     g_vrMenuFirstVisibleRow = 0;
+    g_vrMenuPageRows = 8;
     g_vrSettingsPageActive = false;
     RestoreRetailSystemMenuControls();
     SaveVrSettings();
@@ -12050,12 +12078,6 @@ void __fastcall HookClientShellUpdate(
         UpdateClimbMotion();
         PollControllerMenuInput();
     }
-    if (g_vrSettingsPageActive) {
-        // Tastatur, Maus und Controller navigieren alle direkt über
-        // CLTGUIListCtrl::NextSelection. Der Listenanfang muss deshalb hier
-        // festgehalten werden, nicht nur wenn der Hook selbst auswählt.
-        MaintainRetailVrMenuScroll();
-    }
     if (!g_disableClientUpdateWork) {
         UpdateCrosshairOverride();
         UpdateVrCameraCollisionPath();
@@ -12063,8 +12085,10 @@ void __fastcall HookClientShellUpdate(
     g_semanticBitsInjected = false;
     g_clientShellUpdate(clientShell);
     if (g_vrSettingsPageActive) {
-        // Retail changes the selected item inside Update. Correct the visible
-        // window afterwards so navigation exposes it in this render frame.
+        // Tastatur, Maus und Controller können die Auswahl vor oder in
+        // Retails Update ändern. Ein einziger Abgleich danach verhindert,
+        // dass zwei Korrekturen vor CalculatePositions den Listenanfang mit
+        // veralteten m_nLastShown-Daten hin und her setzen.
         MaintainRetailVrMenuScroll();
     }
     if (!g_disableClientUpdateWork) {

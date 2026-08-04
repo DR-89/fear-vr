@@ -147,5 +147,35 @@ int main() {
     ok &= Expect(
         fearvr::VrMenuScrollStart(5, 7, 8, 11) == 0,
         "a menu shorter than the viewport must never scroll");
+    const std::uint32_t menuIndices[]{
+        18, 22, 28, 30, 32, 35, 37, 39, 41, 43, 45, 47, 51, 54, 55, 56};
+    ok &= Expect(
+        fearvr::VrMenuVisibleRowCapacity(
+            menuIndices, 16, 0, 39) == 8,
+        "Retail's physical last-shown index must yield the real first-page "
+        "capacity despite hidden sibling gaps");
+    ok &= Expect(
+        fearvr::VrMenuVisibleRowCapacity(
+            menuIndices, 16, 5, 47) == 7,
+        "capacity must be measured from the current logical first row");
+    ok &= Expect(
+        fearvr::VrMenuVisibleRowCapacity(
+            menuIndices, 16, 8, 39) == 0,
+        "a stale last-shown index before the current page must be rejected");
+    ok &= Expect(
+        fearvr::VrMenuControlOrderIsStrictlyIncreasing(menuIndices, 16),
+        "logical VR rows must follow Retail's physical navigation order");
+    const std::uint32_t wrongMenuOrder[]{18, 22, 51, 47, 28};
+    ok &= Expect(
+        !fearvr::VrMenuControlOrderIsStrictlyIncreasing(
+            wrongMenuOrder, 5),
+        "an FOV/turn-speed ordering mismatch must be rejected");
+    ok &= Expect(
+        fearvr::VrMenuSafePageRows(8) == 7,
+        "the visually clipped Retail boundary row must stay below the page "
+        "capacity");
+    ok &= Expect(
+        fearvr::VrMenuSafePageRows(1) == 1,
+        "a one-row emergency viewport must remain usable");
     return ok ? 0 : 1;
 }

@@ -494,8 +494,9 @@ erkannt.
 native Menüliste und ist deshalb mit Tastatur und VR-Controller bedienbar:
 Stick navigiert, A oder Trigger bestätigt, B geht zurück.
 
-Die Seite ist bewusst kurz und einseitig, damit kein Eintrag über den Rand des
-nativen 320px-Rahmens läuft und kein unsauberes Scrollen entsteht:
+Die Seite verwendet den von Retail dynamisch bemessenen Rahmen und scrollt so,
+dass die aktuelle Auswahl beim Wechsel zwischen den sichtbaren Zeilengruppen
+im Rahmen bleibt:
 
 1. Stereo rendering
 2. Stereo HUD

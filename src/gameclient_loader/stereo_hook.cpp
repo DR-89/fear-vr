@@ -33,6 +33,7 @@
 #include "melee_actions.h"
 #include "physical_duck.h"
 #include "protocol.h"
+#include "render_pacing.h"
 #include "stereo_math.h"
 #include "vertical_camera_height.h"
 #include "wrist_hud_visibility.h"
@@ -7063,8 +7064,13 @@ LTRESULT RenderStereo(ILTRenderer* renderer, HLOCALOBJ camera,
         return g_renderCameraWithOverride(
             renderer, camera, techniqueOverride);
     }
+    if ((request.flags & FEARVR_RF_FLATSCREEN) != 0) {
+        return g_renderCameraWithOverride(
+            renderer, camera, techniqueOverride);
+    }
     if (g_waitForNewRenderRequest != nullptr &&
-        g_lastStereoRenderRequestId != 0) {
+        ShouldWaitForNewRenderRequest(
+            g_lastStereoRenderRequestId, request.frameId)) {
         g_stereoStep = "wait_for_fresh_render_request";
         FearVrRenderRequest freshRequest{};
         constexpr std::uint32_t kMaximumPacingWaitMilliseconds = 20;

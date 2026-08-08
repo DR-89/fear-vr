@@ -264,8 +264,8 @@ if (-not $retail.Verified) {
     # in GameOrig.dll aus den Public Tools, nicht in FEAR.exe.
     Write-Host @"
   [!]  This FEAR.exe build has not been tested with the mod.
-       Only the Steam Ultimate Shooter Edition 1.08 is confirmed; other 1.08
-       builds (GOG, retail disc) are expected to work but are unverified.
+       The listed Steam and GOG Preservation 1.08 builds are confirmed; other
+       1.08 builds (other GOG revisions, retail disc) remain unverified.
        Please report success or failure so the build can be listed.
        SHA-256: $($retail.Sha256)
 "@ -ForegroundColor Yellow

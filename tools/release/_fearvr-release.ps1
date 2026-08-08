@@ -11,7 +11,8 @@ $script:FearVrRelease = [ordered]@{
     ExpectedSha256  = 'D5EBC38A4F12B772C9112A2811C290ADB6C5052D3BC2F817302D38CF55BB2CBE'
 
     # Bekannte, tatsächlich getestete FEAR.exe-Builds. Jede andere 1.08-EXE
-    # (GOG, Retail-DVD) kann laufen, ist hier aber nicht bestätigt: Alle
+    # (weitere GOG-Revisionen, Retail-DVD) kann laufen, ist hier aber nicht
+    # bestätigt: Alle
     # versionsabhängigen Signaturen dieses Mods liegen in GameOrig.dll aus den
     # Public Tools, nicht in FEAR.exe. Deshalb wird ein unbekannter Hash nur
     # noch gemeldet und nicht mehr als Abbruchgrund behandelt.
@@ -20,6 +21,8 @@ $script:FearVrRelease = [ordered]@{
             'Steam, Ultimate Shooter Edition 1.08'
         'D662DCCDB2EBD17D1ACED7C725A8724060010718146E0C0074DA5E8EF89B82B4' =
             'Steam 1.08 + HDTextures4FEAR/XP v2.0.2'
+        'C1678AA4DF37E87C097F45D8EB68A7C379D99AD12D8DA2771CF6235D9493D0B2' =
+            'GOG Preservation Program 1.08 (2025-03-20)'
     }
 
     # Unverändertes VC7.1-GameClient.dll aus den Public Tools 1.08. Dient als

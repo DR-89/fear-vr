@@ -5,13 +5,20 @@
 # =============================================================================
 
 # --- Verifizierter Ausgangszustand (§2, geprüft 2026-07-24) ---
+$retailRootOverride = $env:FEARVR_RETAIL_ROOT
+$retailRoot = if ([string]::IsNullOrWhiteSpace($retailRootOverride)) {
+    'C:\Program Files (x86)\Steam\steamapps\common\FEAR Ultimate Shooter Edition'
+} else {
+    [IO.Path]::GetFullPath($retailRootOverride)
+}
+
 $script:FearVr = [ordered]@{
     ProjectRoot   = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-    RetailRoot    = 'C:\Program Files (x86)\Steam\steamapps\common\FEAR Ultimate Shooter Edition'
+    RetailRoot    = $retailRoot
     FearExeName   = 'FEAR.exe'
     ExpectedVersion = '1.08.282.0'
     ExpectedSha256  = 'D5EBC38A4F12B772C9112A2811C290ADB6C5052D3BC2F817302D38CF55BB2CBE'
-    # Beide Steam-1.08-Varianten sind lokal verifiziert. Der HD-Texturen-
+    # Diese 1.08-Varianten sind lokal verifiziert. Der HD-Texturen-
     # Installer ersetzt FEAR.exe; sein Uninstaller stellt die Stock-Datei
     # wieder her. Ein Wechsel zwischen genau diesen beiden Hashes ist sicher.
     KnownRetailHashes = [ordered]@{
@@ -19,6 +26,8 @@ $script:FearVr = [ordered]@{
             'Steam, Ultimate Shooter Edition 1.08'
         'D662DCCDB2EBD17D1ACED7C725A8724060010718146E0C0074DA5E8EF89B82B4' =
             'Steam 1.08 + HDTextures4FEAR/XP v2.0.2'
+        'C1678AA4DF37E87C097F45D8EB68A7C379D99AD12D8DA2771CF6235D9493D0B2' =
+            'GOG Preservation Program 1.08 (2025-03-20)'
     }
     SdkInstallerRel = 'extras\fear_publictools_108.exe'
     SdkInstallerSize = 671441087

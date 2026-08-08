@@ -35,9 +35,9 @@ Nothing is replaced, the mod's files simply sit next to the game's own.
 
 **What you need**
 
-- F.E.A.R. **1.08**, legally installed. Only the Steam Ultimate Shooter
-  Edition is confirmed in-game; GOG and retail-disc copies of 1.08 install and
-  launch, but are untested — see [Game editions](#game-editions). Versions
+- F.E.A.R. **1.08**, legally installed. The Steam Ultimate Shooter Edition and
+  the March 2025 GOG Preservation build are confirmed in-game; retail-disc and
+  other 1.08 revisions remain untested — see [Game editions](#game-editions). Versions
   below 1.08 are rejected, because the Public Tools modules do not match them.
 - The public download needs the official **Public Tools 1.08** installed
   locally — bundled with the Steam Ultimate Shooter Edition under `extras\`, or
@@ -178,16 +178,24 @@ on disk. What differs between editions is how the game starts:
 |---|---|---|
 | Steam (Ultimate Shooter Edition 1.08) | `steam.exe -applaunch 21090` | Confirmed in-game |
 | Steam 1.08 + HDTextures4FEAR/XP v2.0.2 | `steam.exe -applaunch 21090` | Recognized; exact patched EXE hash confirmed |
-| GOG (1.08) | `FEAR.exe` directly, same arguments | Should work, untested |
+| GOG Preservation Program (1.08, 2025-03-20) | `FEAR.exe` directly, same arguments | Confirmed in-game; exact EXE/HID signatures and stable sustained play verified |
 | Retail disc, patched to 1.08 | `FEAR.exe` directly, same arguments | Should work, untested |
+
+Steam CEG initially exposes encrypted bytes at the two HID patch regions, so
+the earliest `dinput8.dll` check cannot match. The GameClient loader repeats
+the same guarded check after CEG has unpacked the image but before DirectInput
+device initialization; the `DirectInput8Create` proxy performs one final
+guarded verification. A successful Steam run can therefore report
+`fear_hid_fix result=already_applied`, while GOG normally reports `applied`.
 
 The mod picks the launch mode itself: a copy under `steamapps\common`
 goes through Steam, anything else is started directly.
 
 An unknown `FEAR.exe` build is no longer an error. The mod records its
 SHA-256 with a warning and continues; on a byte mismatch the HID patch remains
-off rather than touching unknown code. If you run a GOG or disc copy, that hash
-plus the `fear_hid_fix` result from the log is what is needed to confirm it.
+off rather than touching unknown code. If you run another GOG revision or a
+disc copy, that hash plus the `fear_hid_fix` result from the log is what is
+needed to confirm it.
 
 The HDTextures4FEAR/XP v2.0.2 installer replaces the Steam executable. Its
 patched hash and the original Steam hash are both recognized. Installing or
@@ -199,7 +207,7 @@ require reinstalling the VR mod; unknown executable changes are still rejected.
 | Message | Cause and fix |
 |---|---|
 | `Wrong FEAR.exe version` | Not patched to 1.08, or `-RetailRoot` points at a different installation. |
-| `This FEAR.exe build has not been tested` | A 1.08 build other than Steam's (GOG, disc). Installation continues; please report whether it works. |
+| `This FEAR.exe build has not been tested` | An unrecognized 1.08 build, such as another GOG revision or a retail-disc executable. Installation continues; please report whether it works. |
 | `Public Tools 1.08 not found` | The public download could not find them—install the copy under `extras\`, pass `-PublicToolsGame`, or use a local `-PrivateBundle`. |
 | `Package file is missing or was modified` | The package was altered after it was built; unpack it again. |
 | Steam creates no `FEAR.exe` after three launch attempts | The launcher now falls back to the verified executable directly while Steam remains running, then still verifies that the matching VR bridge loaded. |

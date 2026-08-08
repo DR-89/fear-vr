@@ -12,11 +12,23 @@ namespace fearvr {
 // were independently verified against our unmodified local 1.08 executable;
 // they are checked in full before any process memory is changed.
 inline constexpr std::uint32_t kFear108TimeDateStamp = 0x44EF6AE6U;
+inline constexpr std::size_t kSteamFear108ImageSize = 0x1F3000U;
+// GOG's March 2025 Preservation build keeps the original code RVAs and PE
+// timestamp, but has a smaller image. Exact image sizes isolate the shared
+// unpacked signature from other 1.08 executables that have not been verified.
+inline constexpr std::size_t kGogFear108ImageSize = 0x19D000U;
 inline constexpr std::size_t kLegacyInputHookRva = 0x84057U;
 inline constexpr std::array<std::uint8_t, 29> kLegacyInputHookBytes{
     0x6A, 0x00, 0x6A, 0x00, 0xFF, 0x15, 0x1C, 0x82, 0x70, 0x00,
     0x50, 0x68, 0xC0, 0x0C, 0x48, 0x00, 0x6A, 0x0D, 0xFF, 0x15,
     0xA4, 0x88, 0x70, 0x00, 0xA3, 0xBC, 0x5B, 0x57, 0x00};
+
+// GOG contains these bytes on disk. Steam exposes the same bytes after CEG
+// has unpacked the process image at runtime.
+inline constexpr std::array<std::uint8_t, 29> kUnpackedLegacyInputHookBytes{
+    0x6A, 0x00, 0x6A, 0x00, 0xFF, 0x15, 0x70, 0xC0, 0x54, 0x00,
+    0x50, 0x68, 0xC0, 0x0C, 0x48, 0x00, 0x6A, 0x0D, 0xFF, 0x15,
+    0x3C, 0xC4, 0x54, 0x00, 0xA3, 0xBC, 0x5B, 0x57, 0x00};
 
 inline constexpr std::size_t kRedundantHidDeviceRva = 0x840DDU;
 inline constexpr std::array<std::uint8_t, 22> kRedundantHidDeviceBytes{

@@ -35,6 +35,12 @@ param(
 
     [switch]$NoGpuHud,
 
+    [switch]$NoStereo,
+
+    [switch]$NoCapture,
+
+    [switch]$NoXrFramePacing,
+
     [switch]$Wait
 )
 
@@ -204,6 +210,15 @@ if ($Milestone -in @('M4', 'M5') -and $NoHeadBob) {
 if ($NoGpuHud) {
     $steamArguments += '-fearvr-no-gpu-hud'
 }
+if ($NoStereo) {
+    $steamArguments += '-fearvr-no-stereo'
+}
+if ($NoCapture) {
+    $steamArguments += '-fearvr-no-capture'
+}
+if ($NoXrFramePacing) {
+    $steamArguments += '-fearvr-no-xr-frame-pacing'
+}
 if ($Milestone -eq 'M5') {
     $steamArguments += '-fearvr-input'
 }
@@ -331,10 +346,15 @@ do {
             Stop-StartedM2Processes
             throw 'D3D9 und OpenXR verwenden unterschiedliche GPU-Adapter.'
         }
-        $bridgeReady =
-            $proxyText -match '"event":"adapter_match"' -and
-            $proxyText -match '"event":"shared_resources"' -and
-            $proxyText -match '"event":"frame_ready"'
+        if ($NoCapture) {
+            $bridgeReady =
+                $proxyText -match '"event":"capture_disabled"'
+        } else {
+            $bridgeReady =
+                $proxyText -match '"event":"adapter_match"' -and
+                $proxyText -match '"event":"shared_resources"' -and
+                $proxyText -match '"event":"frame_ready"'
+        }
         if ($Milestone -ne 'M2') {
             $hookReady =
                 $proxyText -match '"event":"engine_interfaces_found"' -and
@@ -345,7 +365,8 @@ do {
         }
     }
     $hostText = Get-Content -Raw -LiteralPath $hostLog.FullName
-    $frameImported = $hostText -match '"event":"ipc_frame"'
+    $frameImported = $NoCapture -or
+        $hostText -match '"event":"ipc_frame"'
 } until (($bridgeReady -and $frameImported -and $hookReady) -or
          (Get-Date) -ge $deadline)
 if (-not $bridgeReady -or -not $frameImported -or -not $hookReady) {
@@ -360,6 +381,12 @@ Write-Host (
     "F.E.A.R. läuft mit $milestoneLabel-Bridge (PID $($fear.Id))."
 ) `
     -ForegroundColor Green
+if ($NoCapture) {
+    Write-Host (
+        'Diagnose: Capture und Host-Transfer sind vollständig deaktiviert; ' +
+        'das Proxylog misst die rohe Present-Rate.'
+    ) -ForegroundColor Yellow
+}
 Write-Host "HID-Fix: aktiv ($($loaded['dinput8.dll']))."
 if ($Milestone -ne 'M2') {
     if ($stereoReady) {

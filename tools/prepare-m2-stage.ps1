@@ -52,6 +52,18 @@ foreach ($required in @(
     }
 }
 
+$installedDeployment = $null
+$installedDeploymentPath = Join-Path $cfg.RetailRoot 'FEARVR\deployment.json'
+if (Test-Path -LiteralPath $installedDeploymentPath -PathType Leaf) {
+    try {
+        $installedDeployment =
+            Get-Content -Raw -LiteralPath $installedDeploymentPath |
+                ConvertFrom-Json
+    } catch {
+        $installedDeployment = $null
+    }
+}
+
 $dinputDestination = Join-Path $cfg.RetailRoot 'dinput8.dll'
 if (Test-Path -LiteralPath $dinputDestination -PathType Leaf) {
     $existingDinputHash = Get-FileSha256 $dinputDestination
@@ -68,6 +80,11 @@ if (Test-Path -LiteralPath $dinputDestination -PathType Leaf) {
                 }
             }
     )
+    if ($null -ne $installedDeployment -and
+        $installedDeployment.dinputProxySha256) {
+        $knownPreviousHashes +=
+            [string]$installedDeployment.dinputProxySha256
+    }
     $sourceHash = Get-FileSha256 $dinputSource
     if ($existingDinputHash -ne $sourceHash -and
         $existingDinputHash -notin $knownPreviousHashes) {
@@ -105,6 +122,12 @@ if (Test-Path -LiteralPath $d3d9Destination -PathType Leaf) {
             }
         }
         if (-not $existingIsPriorFearVr -and
+            $null -ne $installedDeployment -and
+            $installedDeployment.d3d9ProxySha256 -eq
+                $existingD3d9Hash) {
+            $existingIsPriorFearVr = $true
+        }
+        if (-not $existingIsPriorFearVr -and
             (Test-Path -LiteralPath $d3d9UpstreamDestination -PathType Leaf)) {
             throw (
                 'Ein fremder d3d9.dll-Wrapper und bereits eine andere ' +
@@ -129,9 +152,29 @@ if ($actualOriginalHash -ne $expectedOriginalHash) {
 $stageRoot = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot "stage\$milestoneSlug-game"
 )
-$userDirectory = Assert-UnderProjectRoot (
-    Join-Path $cfg.ProjectRoot "stage\userdata-$milestoneSlug"
-)
+$userDirectoryOverride = $env:FEARVR_USER_DIRECTORY
+if ([string]::IsNullOrWhiteSpace($userDirectoryOverride)) {
+    $userDirectory = Assert-UnderProjectRoot (
+        Join-Path $cfg.ProjectRoot "stage\userdata-$milestoneSlug"
+    )
+} else {
+    $userDirectory = [IO.Path]::GetFullPath($userDirectoryOverride)
+    $installedUserDirectory = if (
+        $null -ne $installedDeployment -and
+        $installedDeployment.userDirectory
+    ) {
+        [IO.Path]::GetFullPath(
+            [string]$installedDeployment.userDirectory)
+    } else {
+        $null
+    }
+    if ($null -eq $installedUserDirectory -or
+        $userDirectory -ne $installedUserDirectory) {
+        throw (
+            'FEARVR_USER_DIRECTORY must exactly match the userdata path ' +
+            'recorded by the verified installed FEARVR deployment.')
+    }
+}
 $logDirectory = Assert-UnderProjectRoot (
     Join-Path $cfg.ProjectRoot 'logs'
 )

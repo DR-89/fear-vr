@@ -199,6 +199,12 @@ extern "C" IDirect3D9* WINAPI FearVrEarlyDirect3DCreate9(
 extern "C" HRESULT WINAPI DirectInput8Create(
     HINSTANCE instance, DWORD version, REFIID interfaceId,
     LPVOID* output, LPUNKNOWN outer) {
+    // Steam CEG still exposes encrypted code when this proxy loads. The first
+    // DirectInput8Create call occurs after unpacking but before Retail
+    // enumerates redundant HID devices, so retry the fully guarded patch.
+    if (g_hidFixResult == fearvr::FearHidFixResult::SignatureMismatch) {
+        g_hidFixResult = fearvr::ApplyFear108HidFix();
+    }
     const auto function = reinterpret_cast<DirectInput8CreateFunction>(
         SystemExport("DirectInput8Create"));
     const HRESULT result = function == nullptr

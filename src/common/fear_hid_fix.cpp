@@ -23,6 +23,15 @@ bool IsAllNops(const std::uint8_t* bytes, std::size_t count) noexcept {
         [](const std::uint8_t byte) { return byte == 0x90U; });
 }
 
+const std::array<std::uint8_t, 29>& ExpectedLegacyInputHookBytes(
+    const std::size_t imageSize) noexcept {
+    if (imageSize == kGogFear108ImageSize ||
+        imageSize == kSteamFear108ImageSize) {
+        return kUnpackedLegacyInputHookBytes;
+    }
+    return kLegacyInputHookBytes;
+}
+
 } // namespace
 
 bool MatchesFear108HidSignatures(const std::uint8_t* image,
@@ -30,9 +39,10 @@ bool MatchesFear108HidSignatures(const std::uint8_t* image,
     if (image == nullptr || imageSize < kPatchEnd) {
         return false;
     }
+    const auto& legacyBytes = ExpectedLegacyInputHookBytes(imageSize);
     return std::memcmp(image + kLegacyInputHookRva,
-                       kLegacyInputHookBytes.data(),
-                       kLegacyInputHookBytes.size()) == 0 &&
+                       legacyBytes.data(),
+                       legacyBytes.size()) == 0 &&
            std::memcmp(image + kRedundantHidDeviceRva,
                        kRedundantHidDeviceBytes.data(),
                        kRedundantHidDeviceBytes.size()) == 0;
@@ -45,10 +55,11 @@ bool HasCompatibleFear108HidPatchState(
         return false;
     }
 
+    const auto& legacyBytes = ExpectedLegacyInputHookBytes(imageSize);
     const bool legacyOriginal =
         std::memcmp(image + kLegacyInputHookRva,
-                    kLegacyInputHookBytes.data(),
-                    kLegacyInputHookBytes.size()) == 0;
+                    legacyBytes.data(),
+                    legacyBytes.size()) == 0;
     const bool legacyPatched =
         IsAllNops(image + kLegacyInputHookRva,
                   kLegacyInputHookBytes.size());

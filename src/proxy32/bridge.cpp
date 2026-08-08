@@ -1126,6 +1126,10 @@ public:
         }
 
         InterlockedIncrement64(Atomic64(shared_->gameHeartbeat));
+        if (config_.disableCapture) {
+            RecordBypassPresentRateLocked();
+            return;
+        }
         PollPending();
         UpdateHostConnection();
         EnsureDeviceMetadata(device);
@@ -1740,6 +1744,40 @@ public:
     }
 
 private:
+    void RecordBypassPresentRateLocked() noexcept {
+        const auto now = std::chrono::steady_clock::now();
+        if (bypassPresentWindowStart_.time_since_epoch().count() == 0) {
+            bypassPresentWindowStart_ = now;
+            bypassPresentCount_ = 1;
+            logger_.Write(
+                "WARN", "capture_disabled",
+                "Frame staging and transfer are disabled; Present rate "
+                "is measured without bridge capture work.");
+            return;
+        }
+
+        ++bypassPresentCount_;
+        const auto elapsed = std::chrono::duration_cast<
+            std::chrono::microseconds>(
+                now - bypassPresentWindowStart_);
+        constexpr std::int64_t kLogIntervalMicroseconds = 3000000;
+        if (elapsed.count() < kLogIntervalMicroseconds) {
+            return;
+        }
+        const double framesPerSecond =
+            static_cast<double>(bypassPresentCount_) * 1000000.0 /
+            static_cast<double>(elapsed.count());
+        std::ostringstream message;
+        message << "presents=" << bypassPresentCount_
+                << " window_us=" << elapsed.count()
+                << " fps=" << std::fixed << std::setprecision(1)
+                << framesPerSecond;
+        logger_.Write(
+            "INFO", "capture_bypass_present_rate", message.str());
+        bypassPresentCount_ = 0;
+        bypassPresentWindowStart_ = now;
+    }
+
     void ServiceCaptureDuringPacingWaitLocked() noexcept {
         // The current Latest-Frame worker owns CPU/D3D9Ex transfers. Pacing
         // only polls its publication query; the older PR queue is disabled.
@@ -1840,7 +1878,7 @@ public:
     }
 
     void BeginStereoEye(std::uint32_t eye) noexcept {
-        if (eye >= FEARVR_EYE_COUNT) {
+        if (eye >= FEARVR_EYE_COUNT || config_.disableCapture) {
             return;
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1860,7 +1898,8 @@ public:
     }
 
     void CaptureStereoEye(std::uint32_t eye) noexcept {
-        if (eye >= FEARVR_EYE_COUNT || config_.sessionId == 0) {
+        if (eye >= FEARVR_EYE_COUNT || config_.sessionId == 0 ||
+            config_.disableCapture) {
             return;
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1923,6 +1962,9 @@ public:
     void EndStereoFrame(
         std::uint64_t frameId,
         const FearVrGameCameraSample* camera) noexcept {
+        if (config_.disableCapture) {
+            return;
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         RestoreStereoRenderTarget();
         if (!stereoAccepting_) {

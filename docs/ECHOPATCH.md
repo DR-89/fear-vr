@@ -34,6 +34,91 @@ Ereignis `fear_hid_fix` mit einem der Ergebnisse `applied`,
 `already_applied`, `not_fear_108`, `image_too_small`,
 `signature_mismatch` oder `protection_failed`.
 
+## Steam CEG und GOG Preservation Program
+
+Die Steam- und die am 20. März 2025 aktualisierte GOG-Fassung sind beide
+verifizierte 1.08-Builds:
+
+| Edition | SHA-256 von `FEAR.exe` | `SizeOfImage` | Startmodus |
+|---|---|---|---|
+| Steam Ultimate Shooter Edition | `D5EBC38A4F12B772C9112A2811C290ADB6C5052D3BC2F817302D38CF55BB2CBE` | `0x001F3000` | Steam App 21090 |
+| GOG Preservation Program | `C1678AA4DF37E87C097F45D8EB68A7C379D99AD12D8DA2771CF6235D9493D0B2` | `0x0019D000` | `FEAR.exe` direkt |
+
+Beide melden Dateiversion `1.08.282.0` und PE-Zeitstempel `0x44EF6AE6`.
+
+### Fehlerbild und Ursache
+
+Vor der Korrektur startete die VR-Mod in beiden Editionen normal, aber jedes
+Steam-Protokoll und das erste GOG-Protokoll meldeten
+`fear_hid_fix result=signature_mismatch`. Die Bildrate war anfangs gut und nahm
+anschließend während derselben Sitzung stetig ab. Das entsprach genau dem
+ungepatchten HID-Fehler des Basisspiels.
+
+Die beiden relevanten Codeblöcke liegen in beiden Builds an denselben RVAs:
+
+- Der 22 Byte lange redundante HID-Block bei `0x840DD` ist bytegleich mit dem
+  bereits unterstützten 1.08-Build.
+- Der 29 Byte lange Legacy-Input-Block bei `0x84057` verwendet im GOG-Build
+  auf dem Datenträger und im von CEG entpackten Steam-Prozess dieselben IAT-
+  Operanden: `FF 15 70 C0 54 00` und `FF 15 3C C4 54 00`.
+
+Beim Laden des frühen Steam-`dinput8.dll`-Proxys sind diese Steam-Codepages
+noch CEG-verschlüsselt. Die erste Prüfung muss daher fehlschlagen. Nachdem CEG
+das Image entpackt hat, stimmen die Live-Bytes dagegen mit der vollständig
+verifizierten gemeinsamen Signatur überein. Die frühere Implementierung
+ordnete diese Bytes nur der kleineren GOG-Imagegröße zu und lehnte Steam auch
+nach dem Entpacken ab. Eine pauschal gelockerte Signatur wäre unsicher gewesen.
+
+### Abgesicherte Korrektur
+
+Die gemeinsame entpackte 29-Byte-Signatur wird ausschließlich für die beiden
+exakten Imagegrößen `0x001F3000` (Steam) und `0x0019D000` (GOG) akzeptiert.
+Danach muss weiterhin der gesamte gemeinsame 22-Byte-HID-Block passen.
+
+GOG kann bereits beim Laden des `dinput8.dll`-Proxys gepatcht werden. Bei
+Steam wiederholt der GameClient-Loader dieselbe vollständig abgesicherte
+Prüfung nach dem CEG-Entpacken, aber vor der DirectInput-Geräteinitialisierung.
+Der exportierte `DirectInput8Create`-Proxy führt unmittelbar davor eine letzte
+abgesicherte Wiederholungsprüfung aus. Erst wenn beide Blöcke vollständig
+verifiziert oder bereits vollständig genoppt sind, werden die noch
+ursprünglichen Bytes im Prozessspeicher durch NOPs ersetzt. `FEAR.exe` auf dem
+Datenträger bleibt unverändert.
+
+Die exakten Steam- und GOG-SHA-256-Werte sind in der Entwicklungs- und
+Release-Erkennung eingetragen. Eine zukünftige Revision wird dadurch nicht
+automatisch akzeptiert.
+
+### Verifikation am 8. August 2026
+
+- Vor der Korrektur: Steam und GOG jeweils
+  `fear_hid_fix result=signature_mismatch`.
+- GOG nach der Korrektur: `fear_hid_fix result=applied`.
+- Steam nach der Korrektur: `fear_hid_fix result=already_applied`; der
+  GameClient-Fallback hatte beide Regionen nach dem CEG-Entpacken bereits
+  erfolgreich gepatcht, bevor der DirectInput-Proxy sie erneut prüfte.
+- Read-only-Verifikation im laufenden Steam-Prozess: alle 29 beziehungsweise
+  22 Bytes der beiden Regionen waren `0x90`.
+- Vollständige x86-Testsuite: 24 von 24 Tests bestanden.
+- Reale GOG- und Steam-VR-Sitzungen: derselbe Spielstand über längere Zeit
+  stabil und ohne den zuvor beobachteten fortschreitenden Leistungseinbruch.
+- Benutzerprofil und elf vorhandene Spielstände blieben beim Overlay-Update
+  erhalten.
+
+Der neueste HID-Status lässt sich so prüfen:
+
+```powershell
+$log = Get-ChildItem <FEAR>\FEARVR\logs -Recurse -Filter dinput-*.log |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1
+Get-Content -LiteralPath $log.FullName
+```
+
+Für GOG ist normalerweise `result=applied` zu erwarten. Steam meldet
+normalerweise `result=already_applied`, weil der Loader nach dem CEG-Entpacken
+vor dem DirectInput-Proxy zum Zug kommt. `signature_mismatch` als endgültiges
+Protokollergebnis bedeutet, dass eine andere EXE-Revision oder veränderte
+Prozessbytes vorliegen; in diesem Fall bleibt der Patch absichtlich aus.
+
 ## Was ausdrücklich nicht übernommen wurde
 
 HUD-Skalierung, FOV, SSAA, Controller-/Gyro-Unterstützung, Crash-Handler,

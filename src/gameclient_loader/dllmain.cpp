@@ -126,10 +126,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(instance);
-        // Fallback for custom launch layouts that cannot place the early
-        // dinput8 proxy beside FEAR.exe. The proxy normally applies this
-        // before DirectInput initialization; repeating the guarded operation
-        // here is safe and prevents later device reinitialization paths.
+        // Fallback for custom launch layouts and Steam CEG. Steam can load the
+        // early dinput8 proxy while these FEAR.exe pages are still encrypted;
+        // this module is loaded after unpacking but before DirectInput device
+        // initialization. Repeating the guarded operation is safe.
         fearvr::ApplyFear108HidFix();
     }
     return TRUE;

@@ -16,6 +16,12 @@ param(
 
     [switch]$NoGpuHud,
 
+    [switch]$NoStereo,
+
+    [switch]$NoCapture,
+
+    [switch]$NoXrFramePacing,
+
     [string]$Runtime = 'active',
 
     [switch]$Wait
@@ -24,4 +30,6 @@ param(
 & "$PSScriptRoot\launch-m2-fear.ps1" -Milestone M5 `
     -Translation:$Translation -StereoHud:(-not $NoStereoHud) `
     -NoHeadBob:$NoHeadBob -NoGpuHud:$NoGpuHud `
+    -NoStereo:$NoStereo -NoCapture:$NoCapture `
+    -NoXrFramePacing:$NoXrFramePacing `
     -Runtime $Runtime -Wait:$Wait
